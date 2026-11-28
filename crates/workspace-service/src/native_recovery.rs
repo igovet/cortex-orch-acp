@@ -1448,7 +1448,10 @@ fn recover_task_tx(
             | TaskState::WaitingUser
             | TaskState::AnswerReady
     ) {
-        lifecycle::event_tx(db, &task, "NATIVE_RECOVERY_RESUMED", json!({"state":state}))?;
+        // Restore the wait driver without claiming that an existing owner wait resumed.
+        if state != TaskState::WaitingUser || legacy {
+            lifecycle::event_tx(db, &task, "NATIVE_RECOVERY_RESUMED", json!({"state":state}))?;
+        }
         return Ok(Some((task.to_owned(), owner, state)));
     } else if state == TaskState::Recovering && descriptive_command_hold_tx(db, task)? {
         // Earlier builds held a verified, synthesized result as interrupted when a
@@ -1532,7 +1535,9 @@ impl Runtime {
             .executor
             .publication(|store| {
                 crate::native_project::recover_files(store)?;
-                crate::native_commands::recover_commands(store)
+                crate::native_commands::recover_commands(store)?;
+                remove_stale_brokers(&store.key().directory());
+                Ok(())
             })?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
@@ -1552,9 +1557,6 @@ impl Runtime {
                     error.code()
                 );
             }
-        }
-        if let Ok(key) = crate::native_runtime::key(&self.host.root) {
-            remove_stale_brokers(&key.directory());
         }
         let root = self.host.root.clone();
         let engine_proc = engine_proc.to_owned();
@@ -1837,7 +1839,9 @@ impl Runtime {
         }
         // The serial lane of automatic continuation and owner controls: no driver of
         // these tasks is started by them while this pass decides.
-        let serial = self.controls.lock().await;
+        let Some(serial) = self.background_control().await else {
+            return Ok(false);
+        };
         let mut driven = std::collections::BTreeSet::new();
         for (task, _) in &attempts {
             if self.driven(task).await {
@@ -2532,6 +2536,23 @@ mod restart_tests {
             .read(|db| Ok(db.query_row("SELECT json_valid(result_json) FROM runtime_nodes WHERE node_id='n'", [], |r| r.get(0))?))
             .unwrap();
         assert!(valid);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_restart_restores_an_owner_wait_without_recording_a_resume() {
+        let (root, store) = empty_store();
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='WAITING_USER' WHERE task_id='t'", [])?;
+            for boot in ["boot-one", "boot-two"] {
+                let restored = recover_task_tx(db, "t", "WAITING_USER", "owner".into(),
+                    1, false, false, Some(boot), false)?;
+                assert_eq!(restored.map(|(_, _, state)| state), Some(TaskState::WaitingUser));
+            }
+            assert_eq!(domain::task_tx(db, "t")?.0, TaskState::WaitingUser);
+            Ok(())
+        }).unwrap();
+        assert_eq!(count(&store, "NATIVE_RECOVERY_RESUMED"), 0);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -9,9 +9,14 @@ mod namespace_host;
 mod peer;
 #[path = "support/service_regressions.rs"]
 mod service_regressions;
+#[path = "support/typed_deliverables.rs"]
+mod typed_deliverables;
 #[cfg(feature = "test-observations")]
 #[path = "support/native_baseline.rs"]
 mod native_baseline;
+#[path = "../../../tests/fixtures/plan-choice-defaults.rs"]
+mod fixture_choices;
+
 use cortex_core::{lifecycle::TaskMachine, CoreResult, OpenMode, Store};
 use cortex_engine::environment::{EngineKind, LaunchSpec as EngineLaunch};
 use serde_json::{json, Value};
@@ -95,7 +100,7 @@ impl NativeRoutes for Routes {
             }),
             connection: "qualified-fake".into(),
             connection_limit: 4,
-            model: if other {
+            model: if other || role == "worker-code-reviewer" && scenario.starts_with("typed-deliverables") {
                 "fixture-other"
             } else {
                 "fixture-model"
@@ -1020,7 +1025,7 @@ async fn waiting_worker(variant: &str) {
         .unwrap_or_else(|_| panic!("checkpoint missing: {sql}"));
     }
     if variant == "preempt" {
-        wait_for(&store, "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')").await;
+        wait_for(&store, "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-general' AND status='ready')").await;
         let call = serde_json::from_value(json!({"op":"product.facts","projectId":id,"params":{}}))
             .unwrap();
         let facts = service.machine(call).await.unwrap();
@@ -1028,7 +1033,7 @@ async fn waiting_worker(variant: &str) {
             .as_array()
             .unwrap()
             .iter()
-            .find(|w| w["role"] == "backend-dev")
+            .find(|w| w["role"] == "general")
             .unwrap()["id"]
             .clone();
         let send = |text: &'static str, request: &'static str| {
@@ -1082,7 +1087,7 @@ async fn waiting_worker(variant: &str) {
     .await;
     if variant == "guidance" {
         // Wait until the worker's turn has settled into its wait for the answer.
-        wait_for(&store, "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')").await;
+        wait_for(&store, "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-general' AND status='ready')").await;
         let call = serde_json::from_value(json!({"op":"product.facts","projectId":id,"params":{}}))
             .unwrap();
         let facts = service.machine(call).await.unwrap();
@@ -1090,7 +1095,7 @@ async fn waiting_worker(variant: &str) {
             .as_array()
             .unwrap()
             .iter()
-            .find(|w| w["role"] == "backend-dev")
+            .find(|w| w["role"] == "general")
             .unwrap()["id"]
             .clone();
         let receipt = service
@@ -2404,7 +2409,7 @@ async fn controls(scenario: &str, action: &str) {
         panic!("native control did not reach terminal state: {diagnostics}");
     });
     if action == "retry" {
-        assert!(store.read(|db|Ok(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE role_id='worker-backend-dev'",[],|r|r.get::<_,i64>(0))?)).unwrap()>=2);
+        assert!(store.read(|db|Ok(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE role_id='worker-general'",[],|r|r.get::<_,i64>(0))?)).unwrap()>=2);
     }
     if action == "prompt" {
         // The held worker's result and execution revision were kept. One active turn
@@ -2424,7 +2429,7 @@ async fn controls(scenario: &str, action: &str) {
         store.write(|db| {
             let waits=cortex_core::lifecycle::waits::projection_tx(db,&db.query_row("SELECT task_id FROM runtime_tasks",[],|r|r.get::<_,String>(0))?)?;
             assert_eq!(waits[0]["status"],"resumed");
-            assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE role_id='worker-backend-dev'",[],|r|r.get::<_,i64>(0))?,1);
+            assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE role_id='worker-general'",[],|r|r.get::<_,i64>(0))?,1);
             Ok(())
         }).unwrap();
     }
@@ -2499,7 +2504,7 @@ async fn positive_owner_control(action: &str) {
             "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='NATIVE_COMMAND_STARTED' AND json_extract(payload_json,'$.argv[0]')='/usr/bin/cmp')"
         }
         _ => {
-            "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')"
+            "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-general' AND status='ready')"
         }
     };
     async fn wait_for(store: &Store, sql: &str) {
@@ -2530,7 +2535,7 @@ async fn positive_owner_control(action: &str) {
         .as_array()
         .unwrap()
         .iter()
-        .find(|w| w["role"] == "backend-dev")
+        .find(|w| w["role"] == "general")
         .unwrap()["id"]
         .clone();
     let mut payload = match action {
@@ -2616,7 +2621,7 @@ async fn positive_owner_control(action: &str) {
         "worker_message" => {
             wait_for(&store,"SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='NATIVE_GUIDANCE_SETTLED' AND json_extract(payload_json,'$.delivered')=1)").await;
             store.read(|db|{
-                assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE role_id='worker-backend-dev'",[],|r|r.get::<_,i64>(0))?,1);
+                assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE role_id='worker-general'",[],|r|r.get::<_,i64>(0))?,1);
                 assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM host_transcript WHERE text='Guidance observed in same worker session.')",[],|r|r.get::<_,bool>(0))?);
                 Ok(())
             }).unwrap();
@@ -3122,7 +3127,7 @@ async fn worker_route() {
     tokio::time::timeout(Duration::from_secs(25), async {
         // Provisioning records the session ref before the engine confirms `configure`:
         // also wait for both worker sessions' configured events.
-        while roles("worker-backend-dev") == 0
+        while roles("worker-general") == 0
             || roles("worker-code-reviewer") == 0
             || configured().iter().filter(|s| s.0 == "worker").count() < 2
         {
@@ -3176,7 +3181,7 @@ async fn worker_route() {
     // The desktop's worker facts: each worker shows its own configured route.
     let facts = machine(&service, "product.facts", id, json!({})).await;
     let shown = facts["workers"].as_array().unwrap();
-    for role in ["backend-dev", "code-reviewer"] {
+    for role in ["general", "code-reviewer"] {
         let w = shown
             .iter()
             .find(|w| w["role"] == role)
@@ -3618,14 +3623,14 @@ impl PauseCheckpoint {
         };
         let interrupted = second_assignment(self);
         let resumed = second_assignment(after);
-        assert!(self.attempts.iter().any(|a| a.0 == interrupted && a.3 == "worker-backend-dev"));
+        assert!(self.attempts.iter().any(|a| a.0 == interrupted && a.3 == "worker-general"));
         assert!(self.attempts.iter().any(|a| a.3 == "orchestrator"));
         let fresh = |a: &(String, String, String, String)| {
             !a.1.is_empty() && !a.2.is_empty()
                 && self.attempts.iter().all(|old| old.1 != a.1 && old.2 != a.2)
         };
         assert!(after.attempts.iter().any(|a| {
-            a.0 == resumed && a.3 == "worker-backend-dev" && fresh(a)
+            a.0 == resumed && a.3 == "worker-general" && fresh(a)
         }), "the interrupted worker did not get a fresh attempt and channel");
         // The clean completion path can synthesize without another coordinator.
         // If Resume did provision one, it must not reuse an earlier identity.
@@ -3705,6 +3710,16 @@ async fn binary_journey(scenario: &str) {
     } else {
         state_base.clone()
     };
+    let store_channel = if channel.is_dev() {
+        cortex_core::StoreChannel::Dev
+    } else {
+        cortex_core::StoreChannel::Release
+    };
+    let key = cortex_core::store::StoreRoot::new(&state, store_channel)
+        .unwrap()
+        .project_key(f.0.join("project"))
+        .unwrap();
+    let open_store = || Store::open(key.clone(), OpenMode::RuntimeValidate).unwrap();
     let catalog = state.join("cortex/catalog/cn_fixture");
     for dir in [
         f.0.join("home"),
@@ -3952,7 +3967,7 @@ async fn binary_journey(scenario: &str) {
         refused["error"]["message"],
         "native_route_executable_unavailable"
     );
-    f.store()
+    open_store()
         .read(|db| {
             assert_eq!(
                 db.query_row("SELECT count(*) FROM runtime_tasks", [], |r| r
@@ -3975,7 +3990,7 @@ async fn binary_journey(scenario: &str) {
         ),
     )
     .await;
-    let store = f.store();
+    let store = open_store();
     if scenario == "command-scratch-hold" {
         restart_signal(&store,"SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE operation='command_run' AND request_key='scratch-command-control' AND json_extract(result_json,'$.handle.profile')='codex_scratch')").await;
         let receipt = || {
@@ -4251,14 +4266,22 @@ async fn binary_journey(scenario: &str) {
                 Ok(())
             })
             .unwrap();
-        unsafe {
-            libc::kill(child.id().unwrap() as i32, libc::SIGTERM);
-        }
-        assert!(tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .success());
+        let pid = child.id().unwrap() as i32;
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        let stopped = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        let status = stopped.unwrap_or_else(|_| {
+            let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).ok().into_iter().flatten()
+                .flatten()
+                .map(|entry| (entry.file_name(), std::fs::read_to_string(entry.path().join("wchan")).ok()))
+                .collect::<Vec<_>>();
+            let group = unsafe { libc::getpgid(pid) };
+            let process = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()
+                .and_then(|stat| stat.rsplit_once(')').map(|(_, fields)| {
+                    fields.split_whitespace().take(6).collect::<Vec<_>>().join(" ")
+                }));
+            panic!("{scenario}: SIGTERM deadline exceeded, pid={pid}, pgid={group}, stat={process:?}, threads={tasks:?}");
+        }).unwrap();
+        assert!(status.success(), "{scenario}: SIGTERM exit {status}");
         println!(
             "service SIGKILL {scenario}: durable same command/output identity, observed status, no replay"
         );
@@ -4301,7 +4324,7 @@ async fn binary_journey(scenario: &str) {
     if scenario != "complete" {
         let signal = match scenario {
             "hold" | "hold-ambiguous" | "paused" | "paused-checkpoint" => {
-                "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')"
+                "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-general' AND status='ready')"
             }
             "review-hold" => {
                 "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-code-reviewer' AND status='ready')"
@@ -4581,7 +4604,7 @@ async fn binary_journey(scenario: &str) {
                      FROM delegation_provisioning p JOIN runtime_nodes n
                         ON n.task_id=p.task_id AND n.assignment_ref=p.idempotency_key
                      JOIN runtime_tasks t ON t.task_id=n.task_id AND t.revision=n.revision
-                     WHERE p.role_id='worker-backend-dev' AND p.status='ready'",
+                     WHERE p.role_id='worker-general' AND p.status='ready'",
                     [], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,r.get::<_, String>(2)?,
                                 r.get::<_, String>(3)?,r.get::<_, i64>(4)?,r.get::<_, String>(5)?)),
                 )?)
@@ -4686,7 +4709,7 @@ async fn binary_journey(scenario: &str) {
                             "SELECT EXISTS(SELECT 1 FROM delegation_provisioning p
                              JOIN runtime_events e ON e.task_id=p.task_id AND e.type='NATIVE_SESSION_CONFIGURED'
                                 AND json_extract(e.payload_json,'$.channel_id')=p.channel_id
-                             WHERE p.rowid>? AND p.task_id=? AND p.role_id='worker-backend-dev' AND p.status='ready')",
+                             WHERE p.rowid>? AND p.task_id=? AND p.role_id='worker-general' AND p.status='ready')",
                             (last_attempt, task), |r| r.get::<_, bool>(0),
                         )?)
                     }).unwrap();
@@ -4712,7 +4735,7 @@ async fn binary_journey(scenario: &str) {
                     (task, attempt, channel, session), |r| r.get::<_, bool>(0),
                 )?);
                 assert_eq!(db.query_row(
-                    "SELECT count(*) FROM delegation_provisioning WHERE task_id=? AND rowid>? AND role_id='worker-backend-dev'",
+                    "SELECT count(*) FROM delegation_provisioning WHERE task_id=? AND rowid>? AND role_id='worker-general'",
                     (task, last_attempt), |r| r.get::<_, i64>(0),
                 )?, 1);
                 let (fresh_attempt, fresh_channel): (String, String) = db.query_row(
@@ -4890,6 +4913,14 @@ async fn worktree_fixture_peer() {
             }
             Some("session/set_config_option") => json!({"configOptions":options}),
             Some("session/prompt") => {
+                if let Ok(expected) = std::fs::read_to_string("expected-attachment.txt") {
+                    assert!(carries_text(&params["prompt"], &expected));
+                    let other = if expected.ends_with("first") { "second" } else { "first" };
+                    assert!(!carries_text(&params["prompt"], &format!("Scoped attachment {other}")));
+                    write_frame(&mut output, &json!({"jsonrpc":"2.0","id":call_id,
+                        "result":{"stopReason":"end_turn"}})).await.unwrap();
+                    continue;
+                }
                 let Some(calls) = params["prompt"].as_array().and_then(|blocks| {
                     blocks.iter().rev().find_map(|block| {
                         let text = block["text"].as_str()?;
@@ -4942,7 +4973,7 @@ async fn worktree_fixture_peer() {
     }
 }
 
-async fn bound_worktree_journey() {
+async fn bound_worktree_journey(attachment_store: Option<&cortex_core::store::StoreRoot>) {
     use cortex_core::workspace::{create_draft, start_native_worktree, worktrees::resolve};
     use workspace_service::native_sessions::{NativeHost, SessionRole};
     let f = Fixture::new();
@@ -4975,12 +5006,17 @@ async fn bound_worktree_journey() {
         let request = serde_json::from_value(json!({"op":op,"projectId":id,"params":params})).unwrap();
         async move { service.machine(request).await.unwrap() }
     };
-    let key = cortex_core::ProjectKey::new(&root, if workspace_protocol::channel::current().is_dev() {
-        cortex_core::StoreChannel::Dev
-    } else { cortex_core::StoreChannel::Release }).unwrap();
+    let key = if let Some(attachment_store) = attachment_store {
+        attachment_store.project_key(&root).unwrap()
+    } else {
+        cortex_core::ProjectKey::new(&root, if workspace_protocol::channel::current().is_dev() {
+            cortex_core::StoreChannel::Dev
+        } else { cortex_core::StoreChannel::Release }).unwrap()
+    };
+    let reader_key = key.clone();
     let state = f.0.join("state");
     let host = tokio::task::spawn_blocking(move || NativeHost::open_workspace(key, Default::default(), state)).await.unwrap().unwrap();
-    let store = f.store();
+    let store = Store::open(reader_key, OpenMode::RuntimeValidate).unwrap();
     let actor = format!("uid:{}", unsafe { libc::getuid() });
     store.write(|db| {
         db.execute("INSERT INTO workspace_projects VALUES (?,?,?,'fixture',1)", (id,root.to_str(),&actor))?;
@@ -5023,13 +5059,35 @@ async fn bound_worktree_journey() {
             epoch: admitted["owner"]["epoch"].as_i64().unwrap()
         };
         let w = resolve(&store,&task,&owner).unwrap().worktree.unwrap();
+        if attachment_store.is_some() {
+            use cortex_core::input::{retain_for_answer, Block, Capture};
+            let text = format!("Scoped attachment {label}");
+            std::fs::write(w.path.join("expected-attachment.txt"), &text).unwrap();
+            retain_for_answer(&store, &task, label, "Fixture attachment", &Capture {
+                blocks: vec![Block {
+                    index: 0,
+                    kind: "resource".into(),
+                    mime: Some("text/plain".into()),
+                    name: Some("scope.txt".into()),
+                    uri: None,
+                    availability: "stored".into(),
+                    reason: None,
+                    body: Some(text.into_bytes()),
+                }],
+            }).unwrap();
+            let session = host.dispatch(task.clone(), owner, SessionRole::Coordinator, route("worktree-fixture-peer")).await.unwrap();
+            let turn = session.prompt("Inspect the scoped attachment.").await.unwrap();
+            assert_eq!(turn.stop_reason, "end_turn");
+            session.shutdown().await.unwrap();
+            continue;
+        }
         std::fs::write(w.path.join("expected.txt"), label).unwrap();
         git(&w.path, &["add", "--", "expected.txt"]);
         git(&w.path, &["commit", "-qm", "Checkout-specific verification fixture"]);
         eprintln!("worktree fixture: planning {label}");
         let session = host.dispatch(task.clone(),owner.clone(),SessionRole::Coordinator,route("worktree-fixture-peer")).await.unwrap();
         let plan = json!({"name":"plan_submit","arguments":{"request_key":"plan","plan":{
-            "tasks":[{"id":"work","role":"backend-dev","objective":"Edit work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}],
+            "tasks":[{"id":"work","role":"general","objective":"Edit work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}],
             "verification":[["/usr/bin/cmp","expected.txt","work.txt"]]
         }}});
         let turn = tokio::time::timeout(Duration::from_secs(15), session.prompt(&json!([plan]).to_string()))
@@ -5043,8 +5101,13 @@ async fn bound_worktree_journey() {
         eprintln!("worktree fixture: worker claimed {label}");
         runs.push((label, draft, task, owner, w, worker));
     }
+    if attachment_store.is_some() {
+        tokio::task::spawn_blocking(move || drop(host)).await.unwrap();
+        service.stop().await.unwrap();
+        return;
+    }
     assert_ne!(runs[0].4.path, runs[1].4.path);
-    let report = "# Fixture report\n\n## Inputs consumed\nDisposable fixture.\n\n## Changes\nEdited work.txt.\n\n## Verification\nRuntime verification follows.\n\n## Evidence links and delivery state\nWorktree fixture.\n\n## Risks and remaining work\nNo live checks.";
+    let report = "# Fixture report\n\n## Evidence and work\nEdited work.txt in the disposable worktree.\n\n## Verification\nRuntime verification follows.\n\n## Risks and remaining work\nNo live checks.";
     for (label, _, task, _, _, worker) in &runs {
         let request = json!([
             {"name":"project_read","arguments":{"path":"work.txt"}},
@@ -5206,6 +5269,14 @@ fn main() {
         );
     }
     let mode = std::env::args().nth(1).unwrap_or_default();
+    if matches!(mode.as_str(), "typed-deliverables-probe" | "typed-deliverables-replan-probe" | "typed-deliverables-auto-probe") {
+        assert!(!namespace_host::assert_unavailable_view(), "typed deliverables need the real plan-admission namespace");
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::time::timeout(Duration::from_secs(110), typed_deliverables::run(mode.ends_with("replan-probe"), mode.ends_with("auto-probe")))
+                .await.expect("typed deliverables timed out").expect("typed deliverables refused");
+        });
+        return;
+    }
     if mode == "native-baseline-probe" {
         #[cfg(feature = "test-observations")]
         native_baseline::run();
@@ -5239,7 +5310,7 @@ fn main() {
     if mode.is_empty() || mode == "worktree-bound-probe" {
         if !namespace_host::assert_unavailable_view() {
             tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-                tokio::time::timeout(Duration::from_secs(90), bound_worktree_journey())
+                tokio::time::timeout(Duration::from_secs(90), bound_worktree_journey(None))
                     .await.expect("bound worktree journey timeout");
             });
             println!("two task checkouts passed Changes, Code, independent review, verification and squash cleanup");
@@ -5278,7 +5349,7 @@ fn main() {
 
     if mode == "attachments-probe" {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            tokio::time::timeout(Duration::from_secs(60), attachments_journey())
+            tokio::time::timeout(Duration::from_secs(60), attachments_journey(None))
                 .await
                 .expect("attachments journey timeout");
             if !namespace_host::assert_unavailable_view() {
@@ -5290,6 +5361,35 @@ fn main() {
         println!(
             "owner attachments: draft Start, follow-up message and answer retained and delivered to the engine"
         );
+        return;
+    }
+    if mode == "relocated-attachments-probe" || mode == "relocated-worktree-attachments-probe" {
+        use cortex_core::{store::StoreRoot, StoreChannel};
+        let scope = Fixture::new();
+        let state = scope.0.join("private-store-state");
+        workspace_service::store_locations::configure(&state).unwrap();
+        let channel = if workspace_protocol::channel::current().is_dev() {
+            StoreChannel::Dev
+        } else {
+            StoreChannel::Release
+        };
+        let root = StoreRoot::new(&state, channel).unwrap();
+        if mode == "relocated-worktree-attachments-probe" {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                tokio::time::timeout(Duration::from_secs(60), bound_worktree_journey(Some(&root)))
+                    .await.expect("relocated worktree attachment journey timed out");
+            });
+            println!("{} channel: two linked checkouts received only their own task's attachments", workspace_protocol::channel::current().name);
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for placement in [AttachmentPlacement::FreshHome, AttachmentPlacement::Migrated, AttachmentPlacement::Returned] {
+                tokio::time::timeout(Duration::from_secs(60), attachments_journey(Some((&root, placement))))
+                    .await
+                    .unwrap_or_else(|_| panic!("attachment journey timed out for {placement:?}"));
+            }
+        });
+        println!("{} channel: draft and follow-up attachments delivered from fresh, migrated, and returned stores", workspace_protocol::channel::current().name);
         return;
     }
     if mode.is_empty() || mode == "prompt-usage-refusal" {
@@ -5495,6 +5595,14 @@ fn main() {
             tokio::time::timeout(Duration::from_secs(40), binary_journey("command-scratch-hold"))
                 .await
                 .expect("managed command stop exceeded deadline");
+            return;
+        }
+        if mode == "command-restart-lost-probe" {
+            for _ in 0..12 {
+                tokio::time::timeout(Duration::from_secs(40), binary_journey("command-restart-lost"))
+                    .await
+                    .unwrap();
+            }
             return;
         }
         if mode == "command-restart-probe" {
@@ -5703,7 +5811,7 @@ async fn controls_after_a_paused_task() {
         }
     };
     let (draft, execution) = start("Guidance then pause").await;
-    wait_for(&store, "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')").await;
+    wait_for(&store, "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-general' AND status='ready')").await;
     let worker = worker_of("Guidance then pause").await;
     tokio::time::timeout(Duration::from_secs(20), service.control_execution(json!({"action":"worker_message","workerId":worker,
         "text":"Keep the worker message verbatim","attachments":[],"projectId":id,"executionId":execution,"requestId":"guide"})))
@@ -5804,7 +5912,14 @@ fn carries_text(prompt: &Value, needle: &str) -> bool {
 /// attachments, a draft keeps its files, Start retains them as private bodies and the
 /// engine's first prompt carries the image and the text; a later owner message with a
 /// file retains and delivers it too; invalid files refuse before anything is kept.
-async fn attachments_journey() {
+#[derive(Clone, Copy, Debug)]
+enum AttachmentPlacement {
+    FreshHome,
+    Migrated,
+    Returned,
+}
+
+async fn attachments_journey(placement: Option<(&cortex_core::store::StoreRoot, AttachmentPlacement)>) {
     let f = Fixture::new();
     // The coordinator plans; its worker holds until the follow-up message is recorded.
     std::fs::write(f.0.join("project/scenario.txt"), "hold").unwrap();
@@ -5817,9 +5932,38 @@ async fn attachments_journey() {
         .await
         .unwrap();
     let id = registered["projectId"].as_str().unwrap().to_owned();
+    // The real Dev registration writes its ownership marker before a
+    // checkout-local fixture can be considered an existing Dev store.
+    let key = placement.map(|(root, placement)| {
+        use cortex_core::store::{administration, migration};
+        let key = root.project_key(f.0.join("project")).unwrap();
+        if matches!(placement, AttachmentPlacement::Migrated | AttachmentPlacement::Returned) {
+            let local = cortex_core::ProjectKey::new(key.root(), key.channel()).unwrap();
+            drop(Store::open(local, OpenMode::Initialize).unwrap());
+        }
+        if matches!(placement, AttachmentPlacement::Returned) {
+            drop(Store::open(key.clone(), OpenMode::Initialize).unwrap());
+            let entry = administration::list(root).unwrap().into_iter()
+                .find(|entry| entry.project_root == key.root()).unwrap();
+            migration::return_to_project(&key, &entry.store_id, true).unwrap();
+        }
+        key
+    });
     service.activate(&id).await.unwrap();
     let runner = tokio::spawn(service.clone().serve());
-    let store = f.store();
+    let store = match key {
+        Some(key) => {
+            let (_, placement) = placement.unwrap();
+            let expected = match placement {
+                AttachmentPlacement::Returned => key.anchor_directory(),
+                _ => key.home_directory().unwrap(),
+            };
+            let store = Store::open(key, OpenMode::RuntimeValidate).unwrap();
+            assert_eq!(store.key().directory(), expected);
+            store
+        }
+        None => f.store(),
+    };
     // The capability the desktop reads (through `projects.status`) is explicit.
     let status = service.project_status(&id).await.unwrap();
     assert_eq!(status["capabilities"]["attachments"], true, "{status}");
@@ -6226,6 +6370,9 @@ async fn answer_attachments_journey() {
 fn fixture_defaults(mut call: Value) -> Value {
     let name = call["name"].as_str().unwrap_or_default().to_owned();
     let arguments = &mut call["arguments"];
+    if name == "plan_submit" {
+        fixture_choices::fill_plan_choices(&mut arguments["plan"]);
+    }
     match name.as_str() {
         "plan_submit" if arguments["plan"]["outcomes"].is_null() => {
             arguments["plan"]["outcomes"] = json!([{"id":"goal","statement":"The requested work is done"}]);

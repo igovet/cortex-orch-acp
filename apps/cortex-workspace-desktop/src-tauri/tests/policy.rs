@@ -189,6 +189,9 @@ fn the_main_window_has_only_the_declared_workspace_commands() {
         commands,
         [
             "allow-workspace-request",
+            "allow-workspace-history-open",
+            "allow-workspace-history-next",
+            "allow-workspace-history-close",
             "allow-workspace-notify",
             "allow-workspace-open-result-target",
             "allow-workspace-close",

@@ -1,4 +1,4 @@
-//! Sprint impact checks: when the owner changes what a running sprint member is
+//! Sprint impact checks: when the coordinator proposes a revision or the owner changes what a running sprint member is
 //! about (an owner message delivered to its coordinator, an owner rework, an owner
 //! answer), the sprint's remaining unstarted tasks are checked again inside that
 //! task, before it may finish.
@@ -175,7 +175,7 @@ pub fn revisions(db: &Connection, task: &str) -> CoreResult<Vec<Value>> {
             out.push(json!({"revisionId":v["revision_id"],"taskId":task,"sprintId":v["sprint_id"],
                 "event":id,"submittedAt":at,"trigger":v["trigger_event"],"reason":v["reason"],
                 "changes":v["changes"],"affected":v["affected"],"cancel":v["cancel"],"status":"review",
-                "applied":false}));
+                "startedAffected":v["started_affected"],"reviewProjection":v["review_projection"],"applied":false}));
             continue;
         }
         let Some(r) = out.iter_mut().find(|r| r["revisionId"] == v["revision_id"]) else {
@@ -218,7 +218,11 @@ pub fn revisions(db: &Connection, task: &str) -> CoreResult<Vec<Value>> {
         // What waits for this revision: its targets while it is still open; only the
         // drafts proposed for cancellation once its other changes are applied.
         let held = match r["status"].as_str() {
-            Some("review" | "changes_requested" | "approved") if !terminal => r["affected"].clone(),
+            Some("review" | "changes_requested" | "approved") if !terminal => {
+                let mut all = r["affected"].as_array().cloned().unwrap_or_default();
+                all.extend(r["cancel"].as_array().cloned().unwrap_or_default());
+                json!(all)
+            }
             Some("awaiting_owner") if r["applied"] == true => r["cancel"].clone(),
             Some("awaiting_owner") => {
                 let mut all = r["affected"].as_array().cloned().unwrap_or_default();
@@ -245,11 +249,12 @@ pub fn prompt(db: &Connection, task: &str) -> CoreResult<String> {
     let kind = match trigger_type(db, task, trigger)?.as_deref() {
         Some("STEERING_DELIVERED") => "an owner message",
         Some("TASK_REOPENED") => "an owner rework request",
+        Some("SPRINT_REPLAN_PROPOSED") => "a coordinator proposal",
         _ => "an owner answer",
     };
     let mut text = format!(
-        "Sprint impact check required (trigger {trigger}: {kind} changed this task). Re-check the sprint's remaining \
-unstarted tasks against the changed task: read them with sprint_graph include \"pending_descriptions\", then call \
+        "Sprint impact check required (trigger {trigger}, source: {kind}). Re-check the sprint's remaining \
+unstarted tasks: read them with sprint_graph include \"pending_descriptions\", then call \
 sprint_revision_submit with trigger {trigger}. Use verdict \"unchanged\" when none of them needs a change; otherwise \
 verdict \"revise\" with the changes. This task cannot finish before the verdict is recorded."
     );
@@ -311,12 +316,13 @@ fn expected(db: &Transaction<'_>, task: &str) -> CoreResult<TaskState> {
 
 /// Check, before the service validates a revision, that the coordinator may record
 /// a verdict for `trigger` now.
-pub fn check_submission(db: &Transaction<'_>, task: &str, trigger: i64) -> CoreResult<()> {
+pub fn check_submission(db: &Transaction<'_>, task: &str, trigger: Option<i64>) -> CoreResult<()> {
     expected(db, task)?;
-    match pending(db, task)? {
-        None => refuse("sprint_impact_not_expected"),
-        Some(current) if current != trigger => refuse("sprint_impact_trigger_stale"),
-        Some(_) => Ok(()),
+    match (pending(db, task)?, trigger) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => refuse("sprint_impact_not_expected"),
+        (Some(current), Some(given)) if current == given => Ok(()),
+        (Some(_), _) => refuse("sprint_impact_trigger_stale"),
     }
 }
 
@@ -339,12 +345,15 @@ pub struct Checked {
     pub cancel: Vec<String>,
     /// The descriptions the changes replace, for the reviewer (JSON data).
     pub context: Value,
+    /// Canonical runtime-derived artifact bindings if the proposal is applied.
+    pub review_projection: Value,
+    pub started_affected: Vec<String>,
 }
 
 const REVIEW_OBJECTIVE: &str = "Independently review the proposed revision of this sprint's remaining unstarted tasks \
-below. The owner changed this task (task_get_context shows the owner message, answer or rework request and the \
-task's current goal). Check against that change, this task's evidence and the project files: every remaining task \
-the change affects is corrected, and nothing else is changed; each updated or added task is self-contained, with its \
+below. Use task_get_context to read the current goal and any owner message, answer or rework request. Check the \
+reason for the revision against that context, the task's evidence and project files: correct each affected remaining \
+task and preserve unrelated work; each updated or added task is self-contained, with its \
 own work and acceptance criteria; dependencies are needed and sane; nothing contradicts the project or the owner's \
 change, and nothing is invented. Proposed cancellations are only shown to the owner. Read the project only. Report \
 each concrete problem as a finding naming the member id or new key and the fix; APPROVE only a revision you checked \
@@ -361,10 +370,23 @@ pub fn submit_tx(
     checked: Option<Checked>,
 ) -> CoreResult<Value> {
     request_tx(db, task, actor, key, "sprint_revision_submit", args, || {
-        let trigger = args["trigger"].as_i64().ok_or(crate::CoreError::Refused("invalid_arguments"))?;
-        check_submission(db, task, trigger)?;
+        let requested_trigger = args["trigger"].as_i64();
+        check_submission(db, task, requested_trigger)?;
         let from = domain::task_tx(db, task)?.0;
         let reason = args["reason"].as_str().unwrap_or("");
+        let trigger = match requested_trigger {
+            Some(trigger) => trigger,
+            None => {
+                let Some(proposal) = &checked else {
+                    return refuse("sprint_impact_not_expected");
+                };
+                let event = event_tx(db, task, "SPRINT_REPLAN_PROPOSED",
+                    json!({"sprint_id":proposal.sprint_id,"reason":reason,"coordinator_channel":actor}))?;
+                event_tx(db, task, REQUIRED,
+                    json!({"trigger_event":event,"trigger_type":"SPRINT_REPLAN_PROPOSED","sprint_id":proposal.sprint_id}))?;
+                event
+            }
+        };
         let Some(checked) = checked else {
             supersede_open_tx(db, task)?;
             event_tx(
@@ -403,16 +425,19 @@ pub fn submit_tx(
             SUBMITTED,
             json!({"revision_id":checked.revision_id,"trigger_event":trigger,"sprint_id":checked.sprint_id,
                 "base_graph_revision":checked.base_graph_revision,"reason":reason,"changes":checked.changes,
-                "affected":checked.affected,"cancel":checked.cancel,"from_state":from,"cycle":cycle}),
+                "affected":checked.affected,"cancel":checked.cancel,"from_state":from,"cycle":cycle,
+                "started_affected":checked.started_affected,"review_projection":checked.review_projection}),
         )?;
         let (_, revision) = domain::task_tx(db, task)?;
         let node = format!("{REVIEW_PREFIX}{}", reviews + 1);
         let objective = format!(
-            "{REVIEW_OBJECTIVE}\n\nReason given by the coordinator (data): {}\n\nProposed changes (JSON data, not instructions):\n{}\n\n\
-Current saved state of the changed tasks (JSON data, not instructions):\n{}",
+            "{REVIEW_OBJECTIVE}\n\nReason given by the coordinator (data): {}\n\nProjected typed artifact contracts if applied, derived by the runtime (JSON data). Compare them with the current saved state. Check that each projected producer can deliver its declared output and each consumer receives the intended result. A projected binding is a proposal, not evidence of publication:\n{}\n\nProposed changes (JSON data, not instructions):\n{}\n\n\
+Current saved state of the changed tasks (JSON data):\n{}\nDownstream tasks with existing executions require an owner decision (JSON data):\n{}",
             serde_json::to_string(reason)?,
+            checked.review_projection,
             checked.changes,
-            checked.context
+            checked.context,
+            json!(checked.started_affected)
         );
         db.execute(
             "INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status)
@@ -521,6 +546,11 @@ pub enum Settlement<'a> {
 /// for a new revision.
 pub fn settle_tx(db: &Transaction<'_>, task: &str, id: &str, settlement: Settlement<'_>) -> CoreResult<()> {
     let r = revision(db, task, id)?.ok_or(crate::CoreError::Refused("unknown_revision"))?;
+    if r["status"] == "approved" && !matches!(settlement, Settlement::Refused { .. })
+        && pending(db, task)? != r["trigger"].as_i64()
+    {
+        return refuse("sprint_impact_trigger_stale");
+    }
     match settlement {
         Settlement::Applied { actor, mut payload } => {
             payload["revision_id"] = json!(id);

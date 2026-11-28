@@ -1,5 +1,7 @@
 # Consistency and recovery
 
+Recovery verifies the binding between the project-side marker and its [private home store](../project/storage.md#where-the-database-lives-and-how-it-moves) before using task history.
+
 **Status: planned rules. The local desktop slice implements the rules below for its subset, with no-paid checks; no recovery claim is made beyond those checks.**
 
 The authoritative service coordinates clients; local caches are not acceptance evidence. Commit runtime-owned state and corresponding public event atomically where supported. Use snapshot plus cursor, bounded replay and resnapshot on a gap. Reordered or duplicate events must not produce duplicate effects. Reject stale entity versions, old owner epochs and revoked device identities.
@@ -123,16 +125,14 @@ conversation.
 Streamed message chunks are display rows that the runtime does not commit one by
 one. Each chunk's row waits in memory as a deferred write
 (`StoreExecutor::write_deferred` in `crates/cortex-core/src/store/executor.rs`) and
-commits in one transaction with the other waiting display rows within 250 ms, at
-once when 64 are waiting, before any later ordinary write (a tool row, an owner
-message, the turn's settle event, any runtime state change) and when the service
-shuts down. Rows keep one row per chunk, the same seq order and the same message
-identity a chunk committed at once would get, because each deferred row runs the
-same statement in submission order; only the commit is shared. A streaming turn
-therefore needs one commit per 250 ms window instead of one per chunk. The loss
-bound applies to display text only: a service killed (not stopped) inside that
-window loses the waiting chunks of the last 250 ms, never a tool row, a result, a
-lifecycle change or anything another write depends on. A waiting row that fails
+is due immediately after 40 ms of stream inactivity. A continuing stream batches
+for up to 40 ms on an available writer, flushing earlier when 64 rows are waiting,
+before any later ordinary write (a tool row, an owner message, the turn's settle
+event, any runtime state change), and when the service shuts down. Each chunk
+keeps its own row and gets its sequence and message identity in submission order
+inside the transaction. A service process crash can lose waiting display chunks.
+A system crash or power failure can also lose committed display batches since the
+last FULL commit. A waiting row that fails
 (for example a replaced owner's channel) is rolled back alone and never reported.
 
 After its first complete read a conversation is only continued, never reread.
@@ -271,13 +271,16 @@ A successful native snapshot starts an independent reader loop for its active
 project. A commit with outbox changes in the same process wakes that reader;
 the first change after idle is read without a debounce, and a burst leaves one
 pending wake with at least 25 ms between poll starts. A commit during a read can
-still trigger a follow-up. Each reader has its own 250 ms fallback after its
-last attempt, so committed outbox rows from a separate writer process (including
-an independent incoming ACP agent) remain visible without a local wake. This is
-a scheduling interval, not a delivery deadline: storage or a concurrent query
-can delay that project's reader without holding back other projects. Removing a
-project or stopping the service retires its loop and prevents late publication;
-a blocking SQLite call already in progress can finish on its own.
+still trigger a follow-up. On Linux, a reader opened on a verified home store also
+watches its database directory for WAL activity from separate processes,
+including an independent incoming ACP agent. An empty read after an early WAL
+hint can cause up to two throttled follow-ups. Only committed outbox rows can
+produce updates. Watching the directory keeps WAL replacement visible. Each
+reader retries a lost watch and keeps its 250 ms fallback, including when the
+watch is unavailable or wakes before a commit. Storage or a concurrent query can delay a project's reader
+without holding back other projects. Removing a project or stopping the service
+retires its loop and prevents late publication. A blocking SQLite call already
+in progress can finish on its own.
 
 The reader tails committed public outbox metadata and publishes selected task
 DTOs through Core's bounded, generation-local event stream. The existing socket

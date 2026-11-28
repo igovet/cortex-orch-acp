@@ -246,7 +246,7 @@ worker runs in the Cortex worker permission profile
 `workspace-write`). The launcher defines the profile with non-persistent `-c`
 layers (`permission_layers` in
 `crates/workspace-service/src/native_codex_runtime.rs`): Codex's built-in
-`:workspace` profile, sandbox rooted at the project, with `.cortex`, `.cortex-dev`,
+`:workspace` profile, sandbox rooted at the project, with the project-side storage markers `.cortex`, `.cortex-dev`,
 the dev owner files and fixed credential names at the project root kept
 read-only (`.git`, `.codex` and `.agents` are read-only in `:workspace` itself),
 `default_permissions=":workspace"` (Codex requires a default once profiles are

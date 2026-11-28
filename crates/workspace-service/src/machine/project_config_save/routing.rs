@@ -346,15 +346,11 @@ pub(super) fn save(
         document(&params["value"], &current["value"]["routing"])?
     };
     // Existing legacy tiers, not the displayed legacyTiers list, survive edits.
-    let path = context::key(root)
-        .map_err(|_| {
-            refuse(
-                "project_context_conflict",
-                "The project store refused the request.",
-            )
-        })?
-        .directory()
-        .join("routing.json");
+    // Keep the read lease through replacement so local store relocation
+    // cannot move the routing file between preflight and commit.
+    let store = context::open_now(root, cortex_core::OpenMode::LiveReadOnly)?
+        .ok_or_else(|| refuse("project_store_missing", "The project store is unavailable."))?;
+    let path = store.key().directory().join("routing.json");
     let before = reader::read_plain(&path, false)?;
     let previous = before
         .as_ref()

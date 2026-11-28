@@ -329,9 +329,11 @@ impl Bridge {
         self.call(method, params, method != "service.status").await
     }
     async fn call(&self, method: &str, params: Value, ordinary: bool) -> Result<Value, String> {
-        // A read waits for its answer however long the machine takes: a slow read is never
-        // a timeout. Only a lost connection (`service_disconnected`) ends it as an error.
-        if workspace_protocol::read::read_request(method, &params) {
+        // Reads and manual Accept wait for one answer on the original connection.
+        // The service applies Accept's checkout and storage limits.
+        if workspace_protocol::read::read_request(method, &params)
+            || workspace_protocol::read::owner_accept_request(method, &params)
+        {
             let _permit = if ordinary {
                 Some(self.ordinary.acquire().await.map_err(|_| {
                     format!("{REFUSED}{}", refusal("service_stopping").unwrap_or_default())
@@ -689,7 +691,34 @@ pub fn incoming(message: &Value) -> Result<Incoming, Refused> {
             {
                 return Err(refuse("delta_stream_mismatch"));
             }
-            Ok(Incoming::Forward(event.clone()))
+            let mut event = event.clone();
+            if let Some(raw) = event.get("historyHeads") {
+                use workspace_protocol::{
+                    events::{DeltaOperation, PublicEntity},
+                    read::{HistoryHead, HISTORY_HEAD_LIMIT},
+                };
+                let valid = raw.as_array().is_some_and(|items| {
+                    items.len() <= HISTORY_HEAD_LIMIT && {
+                        let mut seen = std::collections::BTreeSet::new();
+                        items.iter().all(|item| {
+                            serde_json::from_value::<HistoryHead>(item.clone()).is_ok_and(|head| {
+                                seen.insert(head.task_id.clone())
+                                    && batch.changes.iter().any(|change| {
+                                        change.id == head.task_id && matches!(&change.operation,
+                                            DeltaOperation::Upsert(PublicEntity::TaskProjection(task))
+                                                if task.execution_id.as_deref() == Some(head.execution_id.as_str()))
+                                    })
+                            })
+                        })
+                    }
+                });
+                // The delta is authoritative even when the optional hint cannot
+                // be used. Older or malformed hints fall back to history reads.
+                if !valid {
+                    event.as_object_mut().unwrap().remove("historyHeads");
+                }
+            }
+            Ok(Incoming::Forward(event))
         }
         Some("native_resync") => {
             project_named(event).ok_or(refused("invalid_project"))?;
@@ -724,7 +753,13 @@ pub fn incoming(message: &Value) -> Result<Incoming, Refused> {
         // One project gained or lost its runtime, or settled a merge: the window rereads that project, not every project.
         // One it cannot name is still a change: the whole window rereads, as before, and the subscription stays up.
         Some("project_state") => Ok(Incoming::Forward(match project_named(event) {
-            Some(project) => json!({"type":"project_state","projectId":project}),
+            Some(project) => {
+                let mut update = json!({"type":"project_state","projectId":project});
+                if let Some(active) = event["movingHistory"].as_bool() {
+                    update["movingHistory"] = json!(active);
+                }
+                update
+            }
             None => json!({"type":"refresh"}),
         })),
         Some(kind @ ("invalidation" | "public_events")) => {
@@ -934,11 +969,19 @@ mod tests {
             .rpc("machine.call", json!({"op":"product.task","projectId":"p","params":{"action":"close"}}))
             .await;
         assert_eq!(action.unwrap_err(), "service_timeout");
+        let accept = slow
+            .rpc("machine.call", json!({"op":"product.task","projectId":"p","params":{"action":"accept"}}))
+            .await;
+        assert_eq!(accept.unwrap()["ok"], true);
         let lost = Bridge::new(std::sync::Arc::new(Slow(None)));
         let read = lost
             .rpc("machine.call", json!({"op":"product.facts","projectId":"p","params":{}}))
             .await;
         assert_eq!(read.unwrap_err(), "service_disconnected");
+        let accept = lost
+            .rpc("machine.call", json!({"op":"product.task","projectId":"p","params":{"action":"accept"}}))
+            .await;
+        assert_eq!(accept.unwrap_err(), "service_disconnected");
     }
 
     #[test]
@@ -1010,6 +1053,35 @@ mod tests {
             forwarded,
             json!({"type":"invalidated","projectId":"p","source":"runtime"})
         );
+    }
+
+    #[test]
+    fn history_hint_has_no_body_and_must_name_the_upserted_execution() {
+        use super::{incoming, Incoming};
+        use serde_json::json;
+        let base = json!({"type":"native_delta","projectId":"p","batch":{
+            "generation":"g","streamKey":{"scope":"project","project_id":"p"},
+            "fromSequence":"1","throughSequence":"1","changes":[{
+              "kind":"task","id":"t","baseVersion":"0","newVersion":"1",
+              "operation":{"type":"upsert","data":{"kind":"task_projection","data":{
+                "taskId":"t","description":"Fixture","title":null,"titleAvailability":"not_connected",
+                "version":"1","executionId":"e","phase":"execution","runtimeState":"EXECUTING",
+                "executionState":"running","waitReason":null,"lastConfirmedAt":null,"coordinatorRoute":null,"warnings":[]
+              }}}
+            }]},
+            "historyHeads":[{"taskId":"t","executionId":"e","position":"42","questionsEmpty":true}]
+        });
+        assert!(matches!(incoming(&event(base.clone())), Ok(Incoming::Forward(e)) if e == base));
+        for bad in [
+            json!({"taskId":"t","executionId":"another","position":"42","questionsEmpty":true}),
+            json!({"taskId":"t","executionId":"e","position":"42","questionsEmpty":true,"text":"private"}),
+            json!({"taskId":"t","executionId":"e","position":42,"questionsEmpty":true}),
+        ] {
+            let mut changed = base.clone();
+            changed["historyHeads"] = json!([bad]);
+            assert!(matches!(incoming(&event(changed)), Ok(Incoming::Forward(e))
+                if e.get("historyHeads").is_none() && e["batch"] == base["batch"]));
+        }
     }
 
     #[tokio::test]
@@ -1432,6 +1504,10 @@ mod tests {
             forwarded(serde_json::json!({"type":"project_state","projectId":"p"})),
             serde_json::json!({"type":"project_state","projectId":"p"})
         );
+        for active in [true, false] {
+            let update = serde_json::json!({"type":"project_state","projectId":"p","movingHistory":active});
+            assert_eq!(forwarded(update.clone()), update);
+        }
         // One it cannot name still rereads the window, and keeps the subscription.
         assert_eq!(
             forwarded(serde_json::json!({"type":"project_state"})),

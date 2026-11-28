@@ -95,6 +95,43 @@ it("running cards explain Stop first without opening the dialog or issuing a com
   expect(p.commands).toHaveLength(0);
 });
 
+it("a paused card names the exact blocker and sends only the bound external close", async () => {
+  const s = withTask(emptyWorkspace(), "Paused external");
+  Object.assign(s.tasks[0], { status: "paused", process: "stopped", executionId: "we_7", sourceVersion: "13",
+    warnings: ["external_close_waiting_for_exit"], issue: "backend-dev (worker-fixture)" });
+  const p = await mount(s);
+  externalAction("Actions for Paused external")!.click(); await settle();
+  const dialog = document.querySelector("dialog[open]")!;
+  expect(dialog.textContent).toContain("backend-dev (worker-fixture)");
+  expect(dialog.textContent).toContain("sprint queue stays paused");
+  const check = [...dialog.querySelectorAll("button")].find(b => b.textContent === "Check stop and close")!;
+  check.click(); await settle();
+  expect(p.commands.map(entry => entry.payload)).toMatchObject([
+    {type: "close_task", taskId: "t", choice: "external", executionId: "we_7", expectedVersion: "13", confirmed: true},
+  ]);
+  p.receipt(false, undefined, "external_stop_pending", "Still waiting for worker-fixture.");
+  await settle();
+  expect(dialog.textContent).toContain("Still waiting for worker-fixture.");
+  expect(document.querySelector("dialog[open]")).toBe(dialog);
+  p.emit(projection("2", {...s, tasks: [{ ...s.tasks[0], sourceVersion: "14", warnings: [], issue: null }]})); await settle();
+  check.click(); await settle();
+  expect(p.commands.at(-1)?.payload).toMatchObject({choice: "external", executionId: "we_7", expectedVersion: "14"});
+  p.receipt();
+  await settle();
+  expect(document.querySelector("dialog[open]")).toBeNull();
+});
+
+it("an open external confirmation cannot apply to a newly started execution", async () => {
+  const s = withTask(emptyWorkspace(), "New execution");
+  const p = await mount(s);
+  externalAction("Actions for New execution")!.click(); await settle();
+  p.emit(projection("2", {...s, tasks: [{ ...s.tasks[0], status: "paused", process: "stopped", executionId: "new", sourceVersion: "2" }]})); await settle();
+  const confirm = [...document.querySelectorAll<HTMLButtonElement>("dialog[open] button")].find(b => b.textContent === "Close task")!;
+  expect(confirm.dataset.why).toContain("execution changed");
+  confirm.click(); await settle();
+  expect(p.commands).toHaveLength(0);
+});
+
 it.each([
   ["List", `/m/${LOCAL_MACHINE_ID}/p/p/list`, "Actions for External work"],
   ["task title band", `/m/${LOCAL_MACHINE_ID}/t/t`, "Task actions"],

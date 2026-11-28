@@ -48,6 +48,7 @@ pub(super) fn tag_checkout(mut payload: Value, snapshot: &EvidenceSnapshot) -> V
     payload
 }
 fn require_checkout(db: &rusqlite::Connection, task: &str, snapshot: &EvidenceSnapshot) -> CoreResult<()> {
+    crate::workspace::worktrees::assignments::require_integrated(db, task)?;
     if !crate::workspace::worktrees::receipt_matches(
         db, task, snapshot.checkout_evidence.as_ref().unwrap_or(&Value::Null), true
     )? {
@@ -262,7 +263,7 @@ struct Word {
     raw: String,
     text: String,
 }
-/// Split an inline script into simple commands joined by `;` or `&&`, or `None`
+/// Split an inline script into simple commands joined by `;`, newline or `&&`, or `None`
 /// for anything outside a deliberately small grammar: words of unquoted letters,
 /// digits and `_./:,+@%=-~*?^`, single-quoted text, double-quoted text, and
 /// plain `$NAME`/`${NAME}` expansions. Every other operator (pipes, `||`, a single
@@ -295,19 +296,19 @@ fn shell_script(script: &str) -> Option<Vec<Vec<Word>>> {
             i += 1;
             continue;
         }
-        if c == ';' || (c == '&' && chars.get(i + 1) == Some(&'&')) {
+        if c == ';' || c == '\n' || (c == '&' && chars.get(i + 1) == Some(&'&')) {
             if commands.last().is_none_or(Vec::is_empty) {
                 return None;
             }
             commands.push(Vec::new());
-            i += if c == ';' { 1 } else { 2 };
+            i += if c == '&' { 2 } else { 1 };
             continue;
         }
         let (mut raw, mut text) = (String::new(), String::new());
         while i < chars.len() {
             let c = chars[i];
             match c {
-                ' ' | '\t' | ';' => break,
+                ' ' | '\t' | ';' | '\n' => break,
                 '&' if chars.get(i + 1) == Some(&'&') => break,
                 '\'' => {
                     let end = chars[i + 1..].iter().position(|c| *c == '\'')?;
@@ -367,7 +368,7 @@ fn shell_script(script: &str) -> Option<Vec<Vec<Word>>> {
 /// An inline `sh`/`bash`/`dash` `-c` script that sets up the environment and then
 /// runs one check is judged by that check: any number of `umask NNN`,
 /// `export NAME=value...`, `cd DIR` and `set -e/-u/-x/-o pipefail` commands joined
-/// by `;` or `&&`, followed by exactly one simple command, which is classified like
+/// by `;`, newline or `&&`, followed by exactly one simple command, classified like
 /// direct argv. Its program word may start with `$HOME/` (when the script does not
 /// assign HOME) but carry no other expansion. Anything else is trivial: its exit
 /// status is not proven to come from a nontrivial command.
@@ -457,6 +458,40 @@ fn quiet_search(args: &[String]) -> bool {
     }
     quiet && operand
 }
+fn git_subcommand(words: &[String]) -> &[String] {
+    let mut rest = &words[1..];
+    while let Some(option) = rest.first().filter(|s| s.starts_with('-')) {
+        let operands = usize::from(
+            ["-C", "-c", "--git-dir", "--work-tree"].contains(&option.as_str()),
+        );
+        rest = rest.get(1 + operands..).unwrap_or(&[]);
+    }
+    rest
+}
+fn diff_asserts(args: &[String]) -> bool {
+    args.iter().any(|s| s == "--exit-code" || s == "--quiet")
+}
+/// Exit 1 is an ordinary result from these observation commands. Preserve
+/// higher exit codes and explicit assertion forms as potentially failed checks.
+pub(super) fn diagnostic_exit(argv: &[String], code: i64) -> bool {
+    if code != 1 {
+        return false;
+    }
+    let words = command_words(argv);
+    match words.first().map(|head| base(head)) {
+        Some("diff") => true,
+        Some("grep" | "egrep" | "fgrep" | "rg") => !quiet_search(&words[1..]),
+        Some("git") => {
+            let rest = git_subcommand(words);
+            match rest.first().map(String::as_str) {
+                Some("grep") => !quiet_search(&rest[1..]),
+                Some("diff") => !diff_asserts(rest),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
 /// Whether a command cannot verify a check: its exit status is not proven to come
 /// from a nontrivial command (see `command_words`, `trivial_script`). A script file
 /// is an ordinary project check, not an inline program.
@@ -474,7 +509,7 @@ pub fn trivial_command(argv: &[String]) -> bool {
         _ => {}
     }
     if [
-        ":", "ag", "basename", "cat", "cd", "date", "df", "dirname", "du", "echo", "env",
+        ":", "ag", "basename", "cat", "cd", "date", "df", "diff", "dirname", "du", "echo", "env",
         "export", "fd", "file", "find", "head", "hostname", "id", "less", "ls", "more",
         "printenv", "printf", "pwd", "readlink", "realpath", "set", "sleep", "sort", "stat",
         "tail", "tee", "tr", "tree", "true", "type", "uname", "uniq", "wc", "which",
@@ -485,20 +520,13 @@ pub fn trivial_command(argv: &[String]) -> bool {
         return true;
     }
     if program == "git" {
-        let mut rest = &w[1..];
-        while let Some(s) = rest.first().filter(|s| s.starts_with('-')) {
-            let n = if ["-C", "-c", "--git-dir", "--work-tree"].contains(&s.as_str()) {
-                2
-            } else {
-                1
-            };
-            rest = rest.get(n..).unwrap_or(&[]);
-        }
+        let rest = git_subcommand(w);
         return match rest.first().map(String::as_str) {
             None => true,
-            Some("diff") => !rest
-                .iter()
-                .any(|s| ["--check", "--exit-code", "--quiet"].contains(&s.as_str())),
+            Some("grep") => !quiet_search(&rest[1..]),
+            Some("diff") => !(diff_asserts(rest)
+                || rest.iter().any(|s| s == "--check")
+                    && !rest.iter().any(|s| s == "--no-index")),
             Some(s) => [
                 "branch",
                 "config",
@@ -616,6 +644,7 @@ mod evidence_policy_tests {
             ("bash", "umask 022; cargo test --locked"),
             ("/bin/sh", "umask 022 && cd packages/workspace-ui && timeout --kill-after=5 600 npx vitest run test/a.test.tsx"),
             ("bash", "export PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_TERM_COLOR=never; cargo test -p core"),
+            ("bash", "umask 022\nexport PATH=\"$HOME/bin:$PATH\"; exec npm test"),
             ("bash", "umask 022; exec timeout --kill-after=5 1500 \"$HOME/.cargo/bin/cargo\" test --locked -p x"),
             ("dash", "set -eu; set -o pipefail; cd 'crates/a b' && RUST_LOG=off cargo test -- 'name with spaces'"),
             ("bash", "umask 0022;cargo fmt --check"),
@@ -632,7 +661,7 @@ mod evidence_policy_tests {
             ("bash", "umask 022; cargo test || true"),
             ("bash", "cargo test > log 2>&1"),
             ("bash", "cargo test & wait"),
-            ("bash", "umask 022\ncargo test"),
+            ("bash", "cargo test\ntrue"),
             ("bash", "umask 022; cargo test $(echo -q)"),
             ("bash", "umask 022; cargo test `echo`"),
             ("bash", "$CHECK test"),
@@ -666,7 +695,7 @@ mod evidence_policy_tests {
         ]));
     }
 }
-fn latest(db: &Transaction<'_>, task: &str, kind: &str) -> CoreResult<Option<(i64, Value)>> {
+fn latest(db: &rusqlite::Connection, task: &str, kind: &str) -> CoreResult<Option<(i64, Value)>> {
     let row:Option<(i64,String)>=db.query_row("SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type=? ORDER BY id DESC LIMIT 1",
         (task,kind),|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     row.map(|(id, s)| Ok((id, serde_json::from_str(&s)?)))
@@ -733,6 +762,7 @@ fn schedule_review_tx(
     snapshot: &EvidenceSnapshot,
     after_drift: bool,
 ) -> CoreResult<()> {
+    crate::workspace::worktrees::assignments::require_integrated(db, task)?;
     let (state, revision) = domain::task_tx(db, task)?;
     if state
         != (if after_drift {
@@ -751,11 +781,14 @@ fn schedule_review_tx(
     }
     let observed = digest(snapshot).ok();
     let mut waiver = None;
+    let typed_outputs = crate::deliverables::runtime_contract(db, task)?
+        .is_some_and(|contract| contract["produces"].as_array().is_some_and(|outputs| !outputs.is_empty()));
     // Metadata-only or incomplete observations can be forged (mtime restored), so they
     // never support a waiver; the review then runs.
     let waivable = !after_drift
         && !snapshot.metadata_only
         && !snapshot.incomplete
+        && !typed_outputs
         && !super::automatic::enabled(db, task)?;
     if waivable && !nodes.iter().any(|n| n.1 == "review") {
         if let Some(d) = observed {
@@ -869,11 +902,27 @@ pub fn start_review_tx(
     }
     // The host records the packet first, so its binding is known here.
     let (revision_digest, binding) = review_digest_tx(db, task, assignment, snapshot)?;
+    let risk: Option<String> = db.query_row(
+        "SELECT json_extract(payload_json,'$.packet.review_strategy.risk') FROM runtime_events
+         WHERE task_id=? AND type='REVIEW_PACKET' AND json_extract(payload_json,'$.assignment_ref')=?
+         ORDER BY id DESC LIMIT 1",
+        (task, assignment), |r| r.get(0),
+    ).optional()?.flatten();
+    let mut payload = json!({"assignment_ref":assignment,"revision_digest":revision_digest,"binding":binding});
+    if let Some(risk) = risk {
+        payload["risk"] = json!(risk);
+        let (revision, node): (i64, String) = db.query_row(
+            "SELECT revision,node_id FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+            (task, assignment), |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        payload["revision"] = json!(revision);
+        payload["node"] = json!(node);
+    }
     event_tx(
         db,
         task,
         "REVIEW_STARTED",
-        tag_checkout(json!({"assignment_ref":assignment,"revision_digest":revision_digest,"binding":binding}), snapshot),
+        tag_checkout(payload, snapshot),
     )?;
     Ok(())
 }
@@ -1662,7 +1711,7 @@ pub fn record_result_tx(
     let report = result["report_ref"]
         .as_str()
         .ok_or(CoreError::Refused("assignment_report_missing"))?;
-    let attempt: Option<Option<String>> = db
+    let attempt: Option<String> = db
         .query_row(
             "SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?",
             (task, assignment),
@@ -1671,6 +1720,15 @@ pub fn record_result_tx(
         .optional()?
         .flatten();
     let attempt = attempt.ok_or(CoreError::Refused("assignment_report_missing"))?;
+    if !crate::required_reports::for_assignment(db, task, assignment)?.is_empty() {
+        let channel: Option<String> = db.query_row(
+            "SELECT channel_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=? AND attempt_id=?",
+            (task, assignment, &attempt), |r| r.get(0),
+        )?;
+        if !crate::required_reports::unread(db, task, assignment, channel.as_deref().unwrap_or(""), &attempt)?.is_empty() {
+            return refuse("required_reports_unread");
+        }
+    }
     let published:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM reports r JOIN task_events e ON e.task_id=r.task_id
         WHERE r.task_id=? AND r.id=? AND e.assignment_ref IN (?,?) AND e.event_type='worker_result' AND e.superseded=0
         AND json_extract(e.payload_json,'$.report_ref')=r.id)",(task,report,assignment,&attempt),|r|r.get(0))?;
@@ -1852,7 +1910,7 @@ pub fn record_result_tx(
     }
     Ok(())
 }
-pub(super) fn review_binding_tx(db: &Transaction<'_>, task: &str) -> CoreResult<(i64, String)> {
+pub(super) fn review_binding_tx(db: &rusqlite::Connection, task: &str) -> CoreResult<(i64, String)> {
     let (_, revision) = domain::task_tx(db, task)?;
     let review: Option<(String, Option<String>)> = db
         .query_row(
@@ -1923,6 +1981,102 @@ pub fn verification_preflight_tx(
     }
     super::pinned_checks::retire_superseded_tx(db, task)?;
     Ok(())
+}
+
+/// Cross-task reads distinguish recorded outcomes from evidence attributable to
+/// an exact review of the plan in force and the runtime's full check receipts.
+pub fn retained_verification_pass(
+    db: &rusqlite::Connection,
+    task: &str,
+    event: i64,
+    payload: &Value,
+) -> CoreResult<bool> {
+    let (_, revision) = domain::task_tx(db, task)?;
+    let (review, digest) = match review_binding_tx(db, task) {
+        Ok(binding) => binding,
+        Err(CoreError::Refused(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if event <= review || payload["revision"] != revision
+        || payload["review_event"] != review || payload["revision_digest"] != digest
+    {
+        return Ok(false);
+    }
+    let (epoch, plan): (i64, Option<String>) = db.query_row(
+        "SELECT o.epoch,t.plan_json FROM runtime_tasks t JOIN task_owners o ON o.task_id=t.task_id WHERE t.task_id=?",
+        [task], |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let Some(plan) = plan else { return Ok(false) };
+    let plan: Value = serde_json::from_str(&plan)?;
+    let (Some(commands), Some(checks)) = (plan["verification"].as_array(), payload["checks"].as_array()) else {
+        return Ok(false);
+    };
+    if commands.is_empty() || commands.len() != checks.len() {
+        return Ok(false);
+    }
+    let mut seen = BTreeSet::new();
+    for (argv, check) in commands.iter().zip(checks) {
+        let Some(reference) = check["receipt_ref"].as_str().filter(|s| !s.is_empty()) else {
+            return Ok(false);
+        };
+        if !seen.insert(reference) || check["argv"] != *argv || check["complete"] != true
+            || check["truncated"] == true || check["output_truncated"] == true
+            || check["exit_code"] != 0 || !check["failure"].is_null() || !check["signal"].is_null()
+            || check["owner_epoch"] != epoch || check["revision"] != revision
+            || check["revision_digest"] != digest || check["review_event"] != review
+            || !crate::workspace::worktrees::receipt_matches(db, task, check, true)?
+            || (check.get("checkout").is_some() && check["task"] != task)
+        {
+            return Ok(false);
+        }
+        let receipts = db.prepare(
+            "SELECT result_json FROM runtime_requests WHERE task_id=? AND actor='runtime-verifier'
+             AND operation='verification_command' AND json_extract(result_json,'$.receipt_ref')=? LIMIT 2",
+        )?.query_map((task, reference), |r| r.get::<_,String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if receipts.len() != 1 || serde_json::from_str::<Value>(&receipts[0])? != *check {
+            return Ok(false);
+        }
+        let outcomes: i64 = db.query_row(
+            "SELECT count(*) FROM runtime_events e, json_each(e.payload_json,'$.checks') c
+             WHERE e.task_id=? AND e.type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED')
+             AND json_extract(c.value,'$.receipt_ref')=?",
+            (task, reference), |r|r.get(0),
+        )?;
+        if outcomes != 1 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// An owner-accepted verification gap can settle the current result without a
+/// passing command. Retained acceptance must follow the exact current review.
+pub fn retained_verification_waiver(
+    db: &rusqlite::Connection,
+    task: &str,
+    event: i64,
+    payload: &Value,
+) -> CoreResult<bool> {
+    let (_, revision) = domain::task_tx(db, task)?;
+    let (review, _) = match review_binding_tx(db, task) {
+        Ok(binding) => binding,
+        Err(CoreError::Refused(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if event <= review || payload["revision"] != revision {
+        return Ok(false);
+    }
+    let plan: Option<String> = db.query_row("SELECT plan_json FROM runtime_tasks WHERE task_id=?",
+        [task], |r| r.get(0))?;
+    let plan: Option<Value> = plan.map(|raw| serde_json::from_str(&raw)).transpose()?;
+    if !plan.is_some_and(|plan| plan["verification"].as_array().is_some_and(Vec::is_empty)) {
+        return Ok(false);
+    }
+    let accepted = super::automatic::owner_accepted_commands(db, task)?;
+    Ok(payload["accepted_unverified"].as_array().is_some_and(|argv| {
+        !argv.is_empty() && argv.iter().all(|v| accepted.contains(v))
+    }))
 }
 /// Runtime CommandExecutor returns this observation; no model JSON is accepted.
 /// A receipt belongs to exactly one argv, revision and observed digest.
@@ -2683,6 +2837,8 @@ pub fn record_verification_tx(
         )?;
         let valid = v["complete"] == true
             && v["exit_code"] == 0
+            && v["failure"].is_null()
+            && v["signal"].is_null()
             && v["revision"] == revision
             && v["revision_digest"] == reviewed
             && v["review_event"] == review_event
@@ -2756,25 +2912,17 @@ pub fn record_verification_tx(
     Ok(passed)
 }
 pub fn submit_answer_tx(db: &Transaction<'_>, task: &str, text: &str) -> CoreResult<()> {
-    let (state, revision) = domain::task_tx(db, task)?;
-    let informational:bool=db.query_row("SELECT plan_json IS NULL
-        AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?)
-        AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator')
-        FROM runtime_tasks WHERE task_id=?",(task,task,task),|r|r.get(0))?;
-    if state != TaskState::Planning
-        || revision != 0
-        || !informational
-        || text.trim().is_empty()
-        || super::automatic::enabled(db, task)?
-        || domain::owner_rework_needs_plan(db, task)?
-    {
+    if domain::task_tx(db, task)?.0 != TaskState::Planning || text.trim().is_empty() {
         return refuse("direct_answer_not_allowed");
     }
+    let Some(ground) = super::reconciliation::informational_grounds(db, task)? else {
+        return refuse("direct_answer_not_allowed");
+    };
     db.execute(
         "UPDATE runtime_tasks SET synthesis=? WHERE task_id=?",
         (text, task),
     )?;
-    event_tx(db, task, "ANSWER_SUBMITTED", json!({"text":text}))?;
+    event_tx(db, task, "ANSWER_SUBMITTED", json!({"text":text,"strategy":{"mode":crate::strategy::Mode::Direct.name(),"ground":ground}}))?;
     domain::state_tx(db, task, TaskState::AnswerReady, None)
 }
 /// Older format-12 events retain the individual receipts only.
@@ -2932,7 +3080,7 @@ pub fn settle_delivered_legacy_input_tx(db: &Transaction<'_>, task: &str) -> Cor
 /// questions, owner messages not yet applied or delivered, open waits and a former
 /// runtime's owner message no coordinator turn has carried yet. Empty when nothing
 /// does.
-pub fn pending_input_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<Value>> {
+pub fn pending_input_tx(db: &rusqlite::Connection, task: &str) -> CoreResult<Vec<Value>> {
     let mut items = Vec::new();
     let questions = db
         .prepare("SELECT id FROM pending_questions WHERE task_id=? AND status='open'")?
@@ -2971,6 +3119,7 @@ pub fn complete_tx(
     task: &str,
     snapshot: &EvidenceSnapshot,
 ) -> CoreResult<()> {
+    crate::workspace::worktrees::assignments::require_integrated(db, task)?;
     let (state, revision) = domain::task_tx(db, task)?;
     if !matches!(state, TaskState::Reconciling | TaskState::AnswerReady) {
         return refuse("completion_not_expected");
@@ -2980,7 +3129,9 @@ pub fn complete_tx(
     // done by the owner's own close-as-is decision).
     let source: Option<String> = db
         .query_row(
-            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type IN (?,?) ORDER BY id DESC LIMIT 1",
+            "SELECT payload_json FROM runtime_events WHERE task_id=?1 AND type IN (?2,?3)
+             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1
+               AND type IN ('PLAN_ACCEPTED','TASK_REOPENED')),0) ORDER BY id DESC LIMIT 1",
             if state == TaskState::AnswerReady {
                 (task, "ANSWER_SUBMITTED", "ANSWER_SUBMITTED")
             } else {
@@ -2989,12 +3140,6 @@ pub fn complete_tx(
             |r| r.get(0),
         )
         .optional()?;
-    if let Some(source) = source {
-        let payload: Value = serde_json::from_str(&source)?;
-        if !super::reconciliation::goal_met(db, task, &payload)? {
-            return refuse("completion_goal_not_met");
-        }
-    }
     let (blocker, synthesis): (Option<String>, Option<String>) = db.query_row(
         "SELECT blocker,synthesis FROM runtime_tasks WHERE task_id=?",
         [task],
@@ -3002,6 +3147,16 @@ pub fn complete_tx(
     )?;
     if blocker.is_some() || synthesis.as_deref().is_none_or(|s| s.trim().is_empty()) {
         return refuse("completion_synthesis_or_blocker");
+    }
+    if let Some(source) = source {
+        let payload: Value = serde_json::from_str(&source)?;
+        if payload["text"].as_str() != synthesis.as_deref()
+            || !super::reconciliation::goal_met(db, task, &payload)?
+        {
+            return refuse("completion_goal_not_met");
+        }
+    } else if super::plan::task_outcomes(db, task)?.is_some() {
+        return refuse("completion_goal_not_met");
     }
     let stopped: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM task_stopped WHERE task_id=?)",
@@ -3043,15 +3198,8 @@ pub fn complete_tx(
     if capacity {
         return refuse("workers_still_live_or_unknown");
     }
-    let informational:bool=db.query_row("SELECT revision=0 AND plan_json IS NULL AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?)\n            AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator') FROM runtime_tasks WHERE task_id=?",(task,task,task),|r|r.get(0))?;
-    if state == TaskState::AnswerReady && informational {
-        if super::automatic::enabled(db, task)? {
-            return refuse("completion_answer_invariant");
-        }
-        let informational:bool=db.query_row("SELECT plan_json IS NULL AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?)
-            AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator')
-            FROM runtime_tasks WHERE task_id=?",(task,task,task),|r|r.get(0))?;
-        if revision != 0 || !informational {
+    if state == TaskState::AnswerReady && revision == 0 {
+        if super::reconciliation::informational_grounds(db, task)?.is_none() {
             return refuse("completion_answer_invariant");
         }
         let answer = latest(db, task, "ANSWER_SUBMITTED")?

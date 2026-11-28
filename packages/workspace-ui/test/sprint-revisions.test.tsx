@@ -26,8 +26,8 @@ const sprint: Sprint = { id: "sp", projectId: "p", description: "Data", title: "
   conversation: [], plan: { version: 1, items: [] }, materializedVersion: 1, taskIds: ["t1", "t2", "t3"], queueState: "running", pauseReason: null };
 const wire = (status: string, applied = false) => ({ revisionId: "sr_1", taskId: "t1", status, applied, reason: "The owner switched to CSV",
   changes: [{ op: "update", member_id: "t2", expected_version: "2", description: "Import CSV" }, { op: "propose_cancel", member_id: "t3", reason: "Not needed" },
-    { op: "add", key: "n1", title: "Validate CSV", description: "Validate", dependsOn: ["t2"] }],
-  held: ["t2", "t3"], updated: applied ? ["t2"] : [], added: applied ? ["t9"] : [] });
+    { op: "add", key: "n1", corrects: "t1", title: "Validate CSV", description: "Validate", dependsOn: ["t2"] }],
+  startedAffected: ["t1", "unloaded-card"], held: ["t2", "t3"], updated: applied ? ["t2"] : [], added: applied ? ["t9"] : [] });
 const graph = (status: string, applied = false): LiveSprintGraph => parseLiveSprintGraph({ contractVersion: 1, sprintId: "sp", graphRevision: REV, complete: true,
   priority: ["t1", "t2", "t3"], order: { mode: "hybrid", queueState: "running", working: [{ taskId: "t1", startOrder: "1" }],
     notStarted: [{ taskId: "t2", rank: null, reason: "sprint_revision_pending", next: false, conditional: false }, { taskId: "t3", rank: null, reason: "sprint_revision_pending", next: false, conditional: false }] },
@@ -74,6 +74,8 @@ describe("sprint revisions", () => {
     const edits = await open(`/m/${LOCAL_MACHINE_ID}/p/p/s/sp/plan`, () => graph("awaiting_owner"));
     expect(document.body.textContent).toContain("Sprint changes from task Lay the schema");
     expect(document.body.textContent).toContain("Nothing is cancelled for a proposal");
+    expect(document.body.textContent).toContain("Affected tasks that already startedLay the schemaunloaded-card");
+    expect(document.body.textContent).toContain("Corrects task Lay the schema");
     button("Apply")!.click();
     await settled();
     expect(edits).toEqual([{ action: "apply_revision", sprintId: "sp", revisionId: "sr_1", expectedGraphRevision: REV }]);

@@ -173,7 +173,7 @@ pub fn inside(cli: &Cli) -> Res<i32> {
         .arg(&tmp.0)
         .stderr(Stdio::null())
         .process_group(0);
-    for name in ["only", "journey-wayland", "baseline", "peer-timing"] {
+    for name in ["only", "journey-wayland", "baseline", "peer-timing", "history-delivery"] {
         if let Some(value) = cli.flag(name) {
             command.args([format!("--{name}"), value.to_string()]);
         }
@@ -315,6 +315,7 @@ pub(super) fn session(cli: &Cli) -> Res<i32> {
     );
     st.baseline = super::baseline_requested(cli)?;
     st.peer_timing = peer_timing;
+    st.history_delivery = cli.flag("history-delivery").map(str::to_owned);
     let mut j = J {
         run: run_,
         st,

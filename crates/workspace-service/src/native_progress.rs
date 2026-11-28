@@ -199,6 +199,15 @@ fn reason(e: &Event) -> Option<String> {
             },
         },
         "NATIVE_SESSION_START_FAILED" => {
+            if p["blocker"] == cortex_core::lifecycle::automatic::INVALID_SESSION_LAUNCH {
+                let diagnostic = &p["diagnostics"]["refusal"];
+                return Some(match (spelled(&diagnostic["field"]), spelled(&diagnostic["reason"])) {
+                    (Some(field), Some(reason)) => {
+                        format!("invalid engine launch configuration ({field}: {reason})")
+                    }
+                    _ => "invalid engine launch configuration".into(),
+                });
+            }
             match spelled(&p["blocker"]).or_else(|| spelled(&p["code"])) {
                 Some(code) => format!("an engine session did not start ({code})"),
                 None => "an engine session did not start".into(),
@@ -269,8 +278,13 @@ pub(crate) fn prompt_reported_tokens(usage: &Value) -> Option<Value> {
             }
         }
     }
-    let tokens = reported_tokens(usage)?;
-    (token_total(&tokens)? <= 9_007_199_254_740_991).then_some(tokens)
+    let mut tokens = reported_tokens(usage)?;
+    let total = token_total(&tokens)?;
+    if total > 9_007_199_254_740_991 {
+        return None;
+    }
+    tokens["totalTokens"] = json!(total);
+    Some(tokens)
 }
 
 /// A report's total: `totalTokens` when the engine gave it, else its four counters.
@@ -1034,6 +1048,10 @@ mod tests {
         assert_eq!(
             prompt_reported_tokens(&json!({"totalTokens":0,"cost":8})),
             Some(json!({"totalTokens":0}))
+        );
+        assert_eq!(
+            prompt_reported_tokens(&json!({"inputTokens":3,"cachedReadTokens":4})),
+            Some(json!({"inputTokens":3,"cachedReadTokens":4,"totalTokens":7}))
         );
         assert_eq!(
             reported_tokens(&json!({"inputTokens":3,"outputTokens":-1,"totalTokens":9,"x":1})),

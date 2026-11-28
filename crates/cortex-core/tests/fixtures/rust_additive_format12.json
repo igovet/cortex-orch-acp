@@ -1,5 +1,77 @@
 [
   {
+    "name": "runtime_open_commands_update_collision",
+    "type": "trigger",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE TRIGGER runtime_open_commands_update_collision\nBEFORE UPDATE ON runtime_events WHEN OLD.id IS NOT NEW.id\n AND EXISTS(SELECT 1 FROM runtime_events WHERE id=NEW.id\n  AND type IN ('NATIVE_COMMAND_STARTED','NATIVE_COMMAND_FINISHED','NATIVE_COMMAND_RECOVERED'))\nBEGIN\n INSERT INTO runtime_open_commands_dirty\n SELECT task_id FROM runtime_events WHERE id=NEW.id\n ON CONFLICT(task_id) DO NOTHING;\n DELETE FROM runtime_open_commands WHERE start_id=NEW.id;\nEND"
+  },
+  {
+    "name": "runtime_command_outcomes_ref",
+    "type": "index",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE INDEX runtime_command_outcomes_ref ON runtime_events(\n task_id, coalesce(json_extract(payload_json,'$.receipt.tool_call_ref'),json_extract(payload_json,'$.ref')), id\n) WHERE type IN ('NATIVE_COMMAND_FINISHED','NATIVE_COMMAND_RECOVERED')"
+  },
+  {
+    "name": "runtime_open_commands",
+    "type": "table",
+    "tbl_name": "runtime_open_commands",
+    "sql": "CREATE TABLE runtime_open_commands (\n task_id TEXT NOT NULL REFERENCES runtime_tasks(task_id) ON DELETE CASCADE,\n start_id INTEGER NOT NULL REFERENCES runtime_events(id) ON UPDATE CASCADE ON DELETE CASCADE,\n command_ref,\n PRIMARY KEY(task_id,start_id)\n) WITHOUT ROWID"
+  },
+  {
+    "name": "runtime_open_commands_change",
+    "type": "trigger",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE TRIGGER runtime_open_commands_change\nAFTER UPDATE ON runtime_events\nWHEN (OLD.type IN ('NATIVE_COMMAND_STARTED','NATIVE_COMMAND_FINISHED','NATIVE_COMMAND_RECOVERED')\n   OR NEW.type IN ('NATIVE_COMMAND_STARTED','NATIVE_COMMAND_FINISHED','NATIVE_COMMAND_RECOVERED'))\n AND (OLD.task_id IS NOT NEW.task_id OR OLD.id IS NOT NEW.id OR OLD.type IS NOT NEW.type\n  OR (CASE WHEN OLD.type='NATIVE_COMMAND_STARTED' THEN json_extract(OLD.payload_json,'$.ref')\n      ELSE coalesce(json_extract(OLD.payload_json,'$.receipt.tool_call_ref'),json_extract(OLD.payload_json,'$.ref')) END)\n   IS NOT (CASE WHEN NEW.type='NATIVE_COMMAND_STARTED' THEN json_extract(NEW.payload_json,'$.ref')\n      ELSE coalesce(json_extract(NEW.payload_json,'$.receipt.tool_call_ref'),json_extract(NEW.payload_json,'$.ref')) END))\nBEGIN\n INSERT INTO runtime_open_commands_dirty VALUES(OLD.task_id) ON CONFLICT(task_id) DO NOTHING;\n INSERT INTO runtime_open_commands_dirty VALUES(NEW.task_id) ON CONFLICT(task_id) DO NOTHING;\nEND"
+  },
+  {
+    "name": "runtime_open_commands_collision",
+    "type": "trigger",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE TRIGGER runtime_open_commands_collision\nBEFORE INSERT ON runtime_events\nWHEN EXISTS(SELECT 1 FROM runtime_events WHERE id=NEW.id\n AND type IN ('NATIVE_COMMAND_STARTED','NATIVE_COMMAND_FINISHED','NATIVE_COMMAND_RECOVERED'))\nBEGIN\n INSERT INTO runtime_open_commands_dirty\n SELECT task_id FROM runtime_events WHERE id=NEW.id\n ON CONFLICT(task_id) DO NOTHING;\n DELETE FROM runtime_open_commands WHERE start_id=NEW.id;\nEND"
+  },
+  {
+    "name": "runtime_open_commands_dirty",
+    "type": "table",
+    "tbl_name": "runtime_open_commands_dirty",
+    "sql": "CREATE TABLE runtime_open_commands_dirty (\n task_id TEXT PRIMARY KEY REFERENCES runtime_tasks(task_id) ON DELETE CASCADE\n) WITHOUT ROWID"
+  },
+  {
+    "name": "runtime_open_commands_event",
+    "type": "index",
+    "tbl_name": "runtime_open_commands",
+    "sql": "CREATE INDEX runtime_open_commands_event ON runtime_open_commands(start_id)"
+  },
+  {
+    "name": "runtime_open_commands_ref",
+    "type": "index",
+    "tbl_name": "runtime_open_commands",
+    "sql": "CREATE INDEX runtime_open_commands_ref ON runtime_open_commands(task_id,command_ref,start_id)"
+  },
+  {
+    "name": "runtime_open_commands_remove",
+    "type": "trigger",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE TRIGGER runtime_open_commands_remove\nAFTER DELETE ON runtime_events WHEN OLD.type IN ('NATIVE_COMMAND_STARTED','NATIVE_COMMAND_FINISHED','NATIVE_COMMAND_RECOVERED')\nBEGIN\n DELETE FROM runtime_open_commands WHERE start_id=OLD.id;\n INSERT INTO runtime_open_commands_dirty VALUES(OLD.task_id) ON CONFLICT(task_id) DO NOTHING;\nEND"
+  },
+  {
+    "name": "runtime_open_commands_settle",
+    "type": "trigger",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE TRIGGER runtime_open_commands_settle\nAFTER INSERT ON runtime_events WHEN NEW.type IN ('NATIVE_COMMAND_FINISHED','NATIVE_COMMAND_RECOVERED')\nBEGIN\n DELETE FROM runtime_open_commands WHERE task_id=NEW.task_id AND start_id<NEW.id\n  AND command_ref=coalesce(json_extract(NEW.payload_json,'$.receipt.tool_call_ref'),json_extract(NEW.payload_json,'$.ref'));\nEND"
+  },
+  {
+    "name": "runtime_open_commands_start",
+    "type": "trigger",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE TRIGGER runtime_open_commands_start\nAFTER INSERT ON runtime_events WHEN NEW.type='NATIVE_COMMAND_STARTED'\nBEGIN\n INSERT INTO runtime_open_commands(task_id,start_id,command_ref)\n SELECT NEW.task_id,NEW.id,json_extract(NEW.payload_json,'$.ref')\n WHERE NOT EXISTS(\n  SELECT 1 FROM runtime_events f WHERE f.task_id=NEW.task_id AND f.id>NEW.id\n   AND f.type IN ('NATIVE_COMMAND_FINISHED','NATIVE_COMMAND_RECOVERED')\n   AND coalesce(json_extract(f.payload_json,'$.receipt.tool_call_ref'),json_extract(f.payload_json,'$.ref'))=json_extract(NEW.payload_json,'$.ref')\n );\nEND"
+  },
+  {
+    "name": "assignment_worktrees",
+    "type": "table",
+    "tbl_name": "assignment_worktrees",
+    "sql": "CREATE TABLE assignment_worktrees (\n task_id TEXT NOT NULL,\n revision INTEGER NOT NULL,\n node_id TEXT NOT NULL,\n assignment_ref TEXT NOT NULL,\n owner_epoch INTEGER NOT NULL,\n state TEXT NOT NULL CHECK(state IN ('provisioning','bound','integrating','integrated')),\n plan_json TEXT NOT NULL,\n witness_json TEXT,\n integrated_digest TEXT,\n integrated_event INTEGER,\n PRIMARY KEY(task_id,revision,assignment_ref),\n CHECK((state='provisioning')=(witness_json IS NULL)),\n CHECK((state='integrated')=(integrated_digest IS NOT NULL AND integrated_event IS NOT NULL))\n)"
+  },
+  {
     "name": "code_editor_epoch",
     "type": "table",
     "tbl_name": "code_editor_epoch",
@@ -28,6 +100,18 @@
     "type": "table",
     "tbl_name": "code_writer_reservations",
     "sql": "CREATE TABLE code_writer_reservations (\n record_version INTEGER NOT NULL CHECK(record_version=1),\n id TEXT PRIMARY KEY NOT NULL, checkout TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL,\n paths TEXT CHECK(paths IS NULL OR json_valid(paths)),\n state TEXT NOT NULL CHECK(state IN ('reserved','ambiguous','released'))\n)"
+  },
+  {
+    "name": "fact_memory",
+    "type": "table",
+    "tbl_name": "fact_memory",
+    "sql": "CREATE TABLE fact_memory (\n sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n report_id TEXT NOT NULL REFERENCES reports(id) ON DELETE CASCADE,\n revision INTEGER NOT NULL,\n assignment_ref TEXT NOT NULL,\n attempt_ref TEXT NOT NULL,\n path TEXT NOT NULL,\n sha256 TEXT NOT NULL CHECK(length(sha256)=64),\n observation TEXT NOT NULL CHECK(observation IN ('read','write')),\n failure TEXT CHECK(failure IN ('missing_access','owner_decision','other_role_work','tool_unavailable','check_failed','check_failure_unverified')),\n failed_check TEXT CHECK(json_type(failed_check)='object'),\n UNIQUE(task_id, assignment_ref, path, observation)\n)"
+  },
+  {
+    "name": "fact_memory_path",
+    "type": "index",
+    "tbl_name": "fact_memory",
+    "sql": "CREATE INDEX fact_memory_path ON fact_memory(path, sequence DESC)"
   },
   {
     "name": "native_worktree_active_draft",
@@ -66,9 +150,39 @@
     "sql": "CREATE INDEX runtime_events_by_tool_call_ref ON runtime_events(task_id, json_extract(payload_json,'$.tool_call_ref'), type, id)"
   },
   {
+    "name": "runtime_events_completed_timing",
+    "type": "index",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE INDEX runtime_events_completed_timing ON runtime_events(type,id) WHERE type='WORKER_COMPLETED'"
+  },
+  {
+    "name": "runtime_events_delivery_attempt_timing",
+    "type": "index",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE INDEX runtime_events_delivery_attempt_timing ON runtime_events(type,task_id,json_extract(payload_json,'$.attempt'),id)\n WHERE type='NATIVE_ATTEMPT_DELIVERY'"
+  },
+  {
     "name": "runtime_events_finished_ref",
     "type": "index",
     "tbl_name": "runtime_events",
     "sql": "CREATE INDEX runtime_events_finished_ref ON runtime_events(task_id, json_extract(payload_json,'$.receipt.tool_call_ref'), id) WHERE type='NATIVE_COMMAND_FINISHED'"
+  },
+  {
+    "name": "runtime_events_settled_channel_time",
+    "type": "index",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE INDEX runtime_events_settled_channel_time ON runtime_events(task_id, json_extract(payload_json,'$.channel_id'), created_at) WHERE type='NATIVE_TURN_SETTLED'"
+  },
+  {
+    "name": "runtime_events_worker_released_assignment",
+    "type": "index",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE INDEX runtime_events_worker_released_assignment ON runtime_events(type, task_id, json_extract(payload_json,'$.assignment_ref')) WHERE type='WORKER_RELEASED'"
+  },
+  {
+    "name": "runtime_events_access_granted_assignment",
+    "type": "index",
+    "tbl_name": "runtime_events",
+    "sql": "CREATE INDEX runtime_events_access_granted_assignment ON runtime_events(task_id, json_extract(payload_json,'$.assignment_ref')) WHERE type='ACCESS_GRANTED'"
   }
 ]

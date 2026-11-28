@@ -21,10 +21,16 @@ pub struct Channel {
 }
 
 pub fn current() -> &'static Channel {
+    &table()[env!("CORTEX_WORKSPACE_CHANNEL")]
+}
+pub fn dev() -> &'static Channel {
+    &table()["dev"]
+}
+fn table() -> &'static BTreeMap<String, Channel> {
     static TABLE: OnceLock<BTreeMap<String, Channel>> = OnceLock::new();
-    &TABLE.get_or_init(|| {
+    TABLE.get_or_init(|| {
         serde_json::from_str(include_str!("../channels.json")).expect("channel table")
-    })[env!("CORTEX_WORKSPACE_CHANNEL")]
+    })
 }
 impl Channel {
     pub fn is_dev(&self) -> bool {

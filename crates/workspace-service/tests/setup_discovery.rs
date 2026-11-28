@@ -140,6 +140,10 @@ fn setup_and_full_composition_match_the_oracle() {
         // The retained Python optional version producer is deliberately disabled
         // by the read-effect contract. Absence must not be invented as success.
         for item in expected["engines"].as_array_mut().unwrap() {
+            if matches!(item["automatic_setup"].as_str(), Some("downloading" | "connecting" | "refreshing_models")) {
+                // Frozen captures know only the global writer lock.
+                item["automatic_setup"] = json!("interrupted");
+            }
             if item["engine"] == "opencode" && item["already_connected"].is_null() {
                 assert_eq!(item["status"], "not_downloaded");
                 item["status"] = json!("discovery_unavailable");
@@ -156,6 +160,11 @@ fn setup_and_full_composition_match_the_oracle() {
         if want["config"]["setup"]["opencode"]["status"] == "not_downloaded" {
             want["config"]["setup"]["opencode"]["status"] = json!("discovery_unavailable");
         }
+        for item in expected["engines"].as_array().unwrap() {
+            if let (Some(engine), Some(phase)) = (item["engine"].as_str(), item["automatic_setup"].as_str()) {
+                want["config"]["setup"][engine]["automaticPhase"] = json!(phase);
+            }
+        }
         assert_eq!(full.view, want, "{}", case["name"]);
         assert!(full.diagnostics.contains(&diagnostic));
         assert_eq!(before, snapshot(&f.0), "nonmutation {}", case["name"]);
@@ -170,6 +179,28 @@ fn provenance_and_no_process_capture() {
     for key in ["disposable_home", "fake_executables"] {
         assert_eq!(c["evidence"][key], true);
     }
+}
+#[test]
+fn staged_setup_failure_is_visible_without_reclassifying_the_connection() {
+    let f = Fixture::new();
+    let observe = |status: &[u8]| {
+        f.write("config/cortex/first-run-codex-acp.json", status);
+        f.reader().settings_with_setup_readers(
+            &json!({"surfaces":{}}), 1800000000.0, None, &f.0.join("workspace"), &f.env(),
+        ).unwrap().view["config"]["setup"]["codex-acp"].clone()
+    };
+    let current = observe(br#"{"phase":"setup_failed","stage":"checking_saved_catalog","reason":"unsafe_storage"}"#);
+    assert_eq!(current["automaticPhase"], "setup_failed");
+    assert_eq!(current["automaticStage"], "checking_saved_catalog");
+    assert_eq!(current["reason"], "unsafe_storage");
+    let historical = observe(br#"{"phase":"setup_failed"}"#);
+    assert_eq!(historical["status"], current["status"]);
+    assert_eq!(historical["automaticPhase"], "setup_failed");
+    assert!(historical["automaticStage"].is_null());
+    assert!(historical["reason"].is_null());
+    let unsafe_data = observe(br#"{"phase":"setup_failed","stage":"/private/path","reason":"secret contents"}"#);
+    assert!(unsafe_data["automaticStage"].is_null());
+    assert!(unsafe_data["reason"].is_null());
 }
 #[test]
 fn unsafe_status_roots_and_locks_refuse_without_partial_settings_or_repair() {
@@ -202,7 +233,7 @@ fn unsafe_status_roots_and_locks_refuse_without_partial_settings_or_repair() {
             "config/cortex/first-run-codex-acp.json",
             br#"{"phase":"downloading"}"#,
         );
-        let lock = f.write("config/cortex/automatic-setup.lock", b"");
+        let lock = f.write("config/cortex/automatic-setup-codex-acp.lock", b"");
         let manifest = f.write("data/cortex/engines/codex-acp/2.3.0/node_modules/@agentclientprotocol/codex-acp/package.json",br#"{"version":"2.3.0","bin":"dist/entry.js"}"#);
         f.write("data/cortex/engines/codex-acp/2.3.0/node_modules/@agentclientprotocol/codex-acp/dist/entry.js",b"// inert");
         f.write("bin/node", b"#!/bin/sh\nexit 98\n");

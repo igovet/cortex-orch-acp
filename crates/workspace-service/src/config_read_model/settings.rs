@@ -399,6 +399,12 @@ pub fn settings_view(o: &Value) -> ModelResult<Value> {
             setup[engine] = json!({"status":item.get("status").unwrap_or(&json!("not_downloaded")),
                 "automatic":truth(&item["automatic_setup"]),"reason":item["automatic_setup_reason"],
                 "autoConnectDisabled":truth(&item["auto_connect_disabled"])});
+            if let Some(phase) = item["automatic_setup"].as_str() {
+                setup[engine]["automaticPhase"] = json!(phase);
+            }
+            if let Some(stage) = item["automatic_setup_stage"].as_str() {
+                setup[engine]["automaticStage"] = json!(stage);
+            }
         }
     }
     let user = rows(&r["sources"])

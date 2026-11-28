@@ -5,7 +5,6 @@ use cortex_core::{
     access,
     channels::{self, Credential, Identity},
     lifecycle::{self, waits},
-    scheduler::policy,
     store::executor::StoreExecutor,
     CoreError, CoreResult,
 };
@@ -29,12 +28,7 @@ async fn recv<T>(r: tokio::sync::oneshot::Receiver<CoreResult<T>>) -> CoreResult
 }
 fn writer(db: &rusqlite::Transaction<'_>, c: &Credential) -> CoreResult<Identity> {
     let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
-    if i.role != "worker"
-        || policy::read_only(
-            i.profile.as_deref().unwrap_or(""),
-            i.stage.as_deref().unwrap_or(""),
-        )
-    {
+    if crate::native_engine_policy::read_only(&i) {
         return Err(CoreError::Refused("writing_worker_required"));
     }
     let assignment = i
@@ -53,8 +47,8 @@ fn writer(db: &rusqlite::Transaction<'_>, c: &Credential) -> CoreResult<Identity
     Ok(i)
 }
 /// A writing worker, or (for reads only) any other authenticated role. Outside Auto a
-/// non-writer runs `outside_command` inside a read-only whole-host view; in Auto every
-/// role and stage runs it on the host exactly like a writing worker.
+/// non-writer runs `outside_command` inside a read-only whole-host view. Auto
+/// uses the host route. A plan node declared read-only is refused at intake.
 fn actor(db: &rusqlite::Transaction<'_>, c: &Credential, write: bool) -> CoreResult<(Identity, bool)> {
     match writer(db, c) {
         Ok(i) => Ok((i, false)),
@@ -214,6 +208,9 @@ async fn execute_as(
     let n = name.clone();
     let (mode,incoming,saved,who,ru,ro)=recv(executor.write(move|db|{
         let (i,ro)=actor(db,&c,write)?;
+        if i.read_only {
+            return Err(CoreError::Refused("read_only_outside_command_refused"));
+        }
         // Assignment scope grants project-relative targets only. No mode or
         // outside consent can widen it for a managed Codex channel.
         if scoped {
@@ -246,8 +243,8 @@ async fn execute_as(
         return Ok(saved);
     }
     let cause = rerouted.as_ref().and_then(|n| n["reason"].as_str());
-    // Administrative commands always require a separate owner decision in Auto.
-    // This covers both the command_run reroute and a direct outside_command call.
+    // Record the administrative classification for Auto host commands,
+    // including direct outside calls and command_run reroutes.
     let administrative = mode == "auto" && name == "outside_command"
             && crate::native_commands::administrative(
                 &serde_json::from_value::<Vec<String>>(args["argv"].clone()).unwrap_or_default(),
@@ -270,8 +267,8 @@ async fn execute_as(
             .map(|p| path.starts_with(p))
             .unwrap_or(true)
     });
-    // Auto decides eligible outside effects, Cortex private state included; all
-    // modes refuse writes to a live store file.
+    // Auto decides eligible outside effects. A declared home-store write is
+    // refused in every mode, including when its sidecar does not exist yet.
     use cortex_engine::permission::PathClass;
     let class = match crate::native_engine_policy::path_class(&root, &path) {
         PathClass::Ordinary
@@ -293,7 +290,10 @@ async fn execute_as(
         PathClass::Ordinary => "outside_command",
     };
     use crate::native_owner_decisions::Owner;
-    let (approved, decider) = if class == PathClass::LiveStore && write && mode != "auto" {
+    let sealed_write = class == PathClass::LiveStore && write
+        && (mode != "auto"
+            || crate::native_store_policy::in_home_store(&std::env::vars_os().collect(), &path));
+    let (approved, decider) = if sealed_write {
         (false, "runtime".to_owned())
     } else if ro {
         (true, "read_only_sandbox".to_owned())
@@ -329,7 +329,7 @@ async fn execute_as(
         }
     };
     let result = async {
-        if class == PathClass::LiveStore && write && mode != "auto" {
+        if sealed_write {
             return Err(CoreError::Refused("cortex_live_store"));
         }
         if !approved {
@@ -515,7 +515,7 @@ pub(super) async fn admit_protected(
         "rawInput":{"path":absolute}},
         "options":cortex_engine::permission::one_shot_options(ru)});
     use crate::native_owner_decisions::Owner;
-    let (allowed, decider) = if rule == "cortex_live_store" && mode != "auto" {
+    let (allowed, decider) = if rule == "cortex_live_store" {
         (false, "runtime".to_owned())
     } else if mode == "auto" {
         (true, format!("mode:{mode}"))

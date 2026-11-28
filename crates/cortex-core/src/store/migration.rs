@@ -1,11 +1,18 @@
 //! Verified format-11 -> 12 migration and offline restore.
 //! Mirrors migrate.py:141-275 and rollback:278-377. Maintenance holds the
 //! exclusive access fence; restore also excludes live reusable Rust connections.
+mod relocation;
+mod return_to_project;
+pub use return_to_project::return_to_project;
+pub(crate) use return_to_project::{PENDING as RETURN_PENDING, returned_locally};
 use super::{
     locks::{self, AccessLock},
     schema, ProjectKey,
 };
 use crate::{error::refuse, CoreError, CoreResult};
+pub(crate) use relocation::{
+    relocate12, retained_identity, verify_retained_original, COMPLETE, INTENT,
+};
 use rusqlite::{backup::Backup, config::DbConfig, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -138,6 +145,9 @@ pub fn restore(
         return refuse("rollback_requires_confirmation");
     }
     let dir = key.directory();
+    if dir != key.anchor_directory() {
+        return refuse("relocated_store_restore_unsupported");
+    }
     locks::private_directory(&dir, false)?;
     let parent = backup
         .parent()
@@ -151,6 +161,9 @@ pub fn restore(
     let _connections =
         AccessLock::acquire(&dir.join(".connections.lock"), true, true, Duration::ZERO)?;
     key.validate_sidecars()?;
+    if super::location::read_anchor(&key.database())?.is_some() {
+        return refuse("relocated_store_restore_unsupported");
+    }
     let log = dir.join("rollback.log");
     if log.symlink_metadata().is_ok() {
         locks::regular(&log)?;

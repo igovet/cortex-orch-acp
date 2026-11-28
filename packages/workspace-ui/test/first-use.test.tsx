@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync, rmSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { nativeServiceHome, NativeService } from "./native-machine";
@@ -66,15 +67,57 @@ async function machine() {
   return {id,home,repo,state,env,git,helper,service,s,p,command,facts,overview,ready};
 }
 
+/** Resolve the service's exact Dev store in this disposable fixture, whether it is local or home-backed. */
+function openFixtureStore(m: Awaited<ReturnType<typeof machine>>) {
+  // Load SQLite in Node, outside Vite's jsdom module transform.
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+  const project = realpathSync(m.repo);
+  const anchorPath = resolve(project, ".cortex-dev/cortex.sqlite3");
+  expect(lstatSync(anchorPath).isFile() && realpathSync(anchorPath) === anchorPath).toBe(true);
+  const hasProjects = (db: InstanceType<typeof DatabaseSync>) =>
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_projects'").get() !== undefined;
+  const bindingOf = (db: InstanceType<typeof DatabaseSync>) => {
+    const binding = db.prepare("SELECT binding_json FROM store_location WHERE singleton=1").get()?.binding_json;
+    if (typeof binding !== "string") throw new Error("Fixture store binding is missing");
+    return JSON.parse(binding) as { directory: string; project_root: string; channel: string };
+  };
+  const anchor = new DatabaseSync(anchorPath, { readOnly: true });
+  let binding;
+  try { binding = hasProjects(anchor) ? undefined : bindingOf(anchor); }
+  finally { anchor.close(); }
+
+  let path = anchorPath;
+  if (binding) {
+    expect(binding).toMatchObject({ project_root: project, channel: ".cortex-dev" });
+    expect(isAbsolute(binding.directory)).toBe(true);
+    const directory = realpathSync(binding.directory);
+    const within = relative(realpathSync(m.state), directory);
+    expect(within && within !== ".." && !within.startsWith(".." + sep) && !isAbsolute(within)).toBe(true);
+    expect(directory).toBe(binding.directory);
+    path = resolve(directory, "cortex.sqlite3");
+    expect(lstatSync(path).isFile()).toBe(true);
+  }
+  // SQLite mode=rw refuses a missing file, including one that disappeared since the binding was verified.
+  const uri = pathToFileURL(path);
+  uri.searchParams.set("mode", "rw");
+  const db = new DatabaseSync(uri.href);
+  try {
+    expect(hasProjects(db)).toBe(true);
+    if (binding) expect(bindingOf(db)).toEqual(binding);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
 it("renders pending, uncaptured and empty command output from the native service on both feeds", async () => {
   const m = await machine();
   await m.service.call("projects.activate", { projectId: m.id });
   await expect.poll(async () => (await m.service.call("projects.status", { projectId: m.id }) as { ready: boolean }).ready).toBe(true);
   const at = "2026-11-24T01:00:00Z";
-  // Load SQLite in Node, not through Vite’s jsdom module transform.
-  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
   // Seed only synthetic engine records in the disposable Dev project. No engine is started.
-  const db = new DatabaseSync(resolve(m.repo, ".cortex-dev/cortex.sqlite3"));
+  const db = openFixtureStore(m);
   try {
     db.exec("BEGIN");
     db.prepare("INSERT OR IGNORE INTO workspace_projects(project_id,project_root,activated_by,activated_at) VALUES (?,?,'fixture',?)").run(m.id, m.repo, at);

@@ -1,4 +1,7 @@
 //! No-paid test peer. Never starts a model, engine or network connection.
+#[path = "../../../../tests/fixtures/plan-choice-defaults.rs"]
+mod fixture_choices;
+
 use cortex_engine::wire;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -191,6 +194,7 @@ async fn steering_fixture(server: &Value, snapshot: &Value) -> String {
         }
         if msg["text"] == "Amend pending work and guide one worker" {
             let target = snapshot["live_attempts"].as_array().unwrap().iter().find(|t| t["node"] == "work").unwrap();
+            assert!(snapshot["locked_nodes"].as_array().unwrap().contains(&json!("work")));
             let mut plan = snapshot["plan"].clone();
             plan["tasks"][0]["objective"] = json!("Illegally replace the live work");
             let invalid = json!({"name":"steer_plan","arguments":{"source_request":request,
@@ -198,12 +202,21 @@ async fn steering_fixture(server: &Value, snapshot: &Value) -> String {
             let refused = rpc(&mut input, &mut output, 3, "tools/call", invalid).await;
             assert!(refused.to_string().contains("active_plan_node_already_claimed"), "{refused}");
             let mut plan = snapshot["plan"].clone();
-            let third = plan["tasks"].as_array_mut().unwrap().iter_mut().find(|n| n["id"] == "third").unwrap();
+            let third = plan["tasks"].as_array_mut().unwrap().iter_mut().find(|n| n["id"] == "obsolete").unwrap();
+            third["id"] = json!("third");
             third["objective"] = json!("Use the amended pending objective");
+            let mut cycle = plan.clone();
+            cycle["tasks"].as_array_mut().unwrap().iter_mut().find(|n| n["id"] == "third").unwrap()["dependencies"] = json!(["third"]);
+            let cyclic = json!({"name":"steer_plan","arguments":{"source_request":request,
+                "request_key":"cycle","expected_plan":snapshot["plan_digest"],"plan":cycle}});
+            let refused = rpc(&mut input, &mut output, 10, "tools/call", cyclic).await;
+            assert!(refused.to_string().contains("dependency_cycle"), "{refused}");
             let routed = json!({"name":"steer_plan","arguments":{"source_request":request,
                 "request_key":"amend","expected_plan":snapshot["plan_digest"],"plan":plan}});
             let amended = rpc(&mut input, &mut output, 4, "tools/call", routed.clone()).await;
             assert_eq!(amended["result"]["structuredContent"]["changed"], true, "{amended}");
+            assert_eq!(amended["result"]["structuredContent"]["nodes"],
+                json!({"added":["third"],"changed":[],"cancelled":["obsolete"]}));
             let replay = rpc(&mut input, &mut output, 5, "tools/call", routed).await;
             assert_eq!(amended["result"], replay["result"]);
             let guidance = json!({"name":"steer_worker","arguments":{"source_request":request,
@@ -239,6 +252,9 @@ async fn steering_fixture(server: &Value, snapshot: &Value) -> String {
 fn contract_defaults(mut params: Value, mode: &str) -> Value {
     let name = params["name"].as_str().map(str::to_owned);
     let arguments = &mut params["arguments"];
+    if name.as_deref() == Some("plan_submit") {
+        fixture_choices::fill_plan_choices(&mut arguments["plan"]);
+    }
     match name.as_deref() {
         Some("plan_submit") if arguments["plan"]["outcomes"].is_null() => {
             arguments["plan"]["outcomes"] =
@@ -1224,7 +1240,7 @@ pub async fn main() {
                                     std::fs::write(".git/owner-language-final-stage", "").unwrap();
                                 }
                                 json!({"name":"plan_submit","arguments":{"request_key":node,"plan":{
-                                    "tasks":[{"id":node,"role":"backend-dev","objective":"Exercise a fixture stage","dependencies":[],"scope":["work.txt"],"model":"auto"}],
+                                    "tasks":[{"id":node,"role":"general","objective":"Exercise a fixture stage","dependencies":[],"scope":["work.txt"],"model":"auto"}],
                                     "verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]}}})
                             }
                             _ => panic!("unexpected language fixture phase: {context}"),
@@ -1233,6 +1249,10 @@ pub async fn main() {
                         reconciliation_fixture(mode, &full_scenario, &context)
                     {
                         params
+                    } else if mode == "desktop-coordinator" && full_scenario.starts_with("typed-deliverables")
+                        && context["state"] == "RECONCILING"
+                    {
+                        json!({"name":"synthesis_submit","arguments":{"text":"Typed output fixture complete."}})
                     } else if mode == "desktop-coordinator" && full_scenario == "repair-failed-test"
                     {
                         if context["state"] == "RECONCILING" {
@@ -1246,7 +1266,7 @@ pub async fn main() {
                                     });
                             let node = if repair { "fix-output" } else { "work" };
                             json!({"name":"plan_submit","arguments":{"request_key":node,"plan":{
-                                "tasks":[{"id":node,"role":"backend-dev","objective":"Write the expected output","dependencies":[],"scope":["work.txt"],"model":"auto"}],
+                                "tasks":[{"id":node,"role":"general","objective":"Write the expected output","dependencies":[],"scope":["work.txt"],"model":"auto"}],
                                 "verification":[["/usr/bin/cmp","expected.txt","work.txt"]]}}})
                         }
                     } else if mode == "desktop-coordinator"
@@ -1301,7 +1321,10 @@ pub async fn main() {
                             .unwrap_or_default()
                             .trim()
                             == "slow-check";
-                        let mut tasks = json!([{"id":"work","role":"backend-dev","objective":"Change work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}]);
+                        let mut tasks = json!([{"id":"work","role":"general","objective":"Change work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}]);
+                        if full_scenario.starts_with("typed-deliverables") && context["revision"].as_u64().is_some_and(|v| v > 0) {
+                            tasks[0]["id"] = json!(format!("typed-replan-{}", context["revision"]));
+                        }
                         if full_scenario == "separate-task-hold" {
                             tasks[0]["scope"] = json!(["separate.txt"]);
                         }
@@ -1312,10 +1335,11 @@ pub async fn main() {
                             || rolling || active_steering || steering_regression
                             || full_scenario == "reconcile-worker-replan"
                         {
-                            tasks.as_array_mut().unwrap().push(json!({"id":"second","role":"backend-dev","objective":"Change other.txt","dependencies":[],"scope":["other.txt"],"model":"auto"}));
+                            tasks.as_array_mut().unwrap().push(json!({"id":"second","role":"general","objective":"Change other.txt","dependencies":[],"scope":["other.txt"],"model":"auto"}));
                         }
                         if rolling || active_steering {
-                            tasks.as_array_mut().unwrap().push(json!({"id":"third","role":"backend-dev","objective":"Change third.txt after work.txt","dependencies":["work"],"scope":["third.txt"],"model":"auto"}));
+                            let id = if active_steering { "obsolete" } else { "third" };
+                            tasks.as_array_mut().unwrap().push(json!({"id":id,"role":"general","objective":"Change third.txt after work.txt","dependencies":["work"],"scope":["third.txt"],"model":"auto"}));
                         }
                         // Owner messages handed over after verified work: this fixture's
                         // messages need no further change, so it answers directly.
@@ -1408,7 +1432,9 @@ pub async fn main() {
                         if language_fixture && mode == "desktop-worker" && assignment["node"] != "first" {
                             // A material change is needed to exercise independent review, not its no-change waiver.
                             std::fs::write("work.txt", assignment["node"].as_str().unwrap()).unwrap();
-                        } else if mode == "desktop-worker" && !consultant && !language_fixture {
+                        } else if mode == "desktop-worker" && !consultant && !language_fixture
+                            && full_scenario != "typed-deliverables-auto"
+                        {
                             std::fs::write(
                                 if is_second {
                                     "other.txt"
@@ -1421,6 +1447,12 @@ pub async fn main() {
                                     && assignment["node"] == "fix-output"
                                 {
                                     "expected"
+                                } else if full_scenario == "typed-deliverables" {
+                                    "typed output"
+                                } else if full_scenario == "typed-deliverables-renew" {
+                                    "renewed typed output"
+                                } else if full_scenario == "typed-deliverables-consumer-renew" {
+                                    "consumed renewed output"
                                 } else if guided {
                                     "directed"
                                 } else {
@@ -1542,6 +1574,8 @@ pub async fn main() {
                 {
                     let mut params: Value = serde_json::from_str(&text[5..]).unwrap();
                     let expected = params.as_object_mut().unwrap().remove("__fixture_expect");
+                    let delayed_terminal_ack = params.as_object_mut().unwrap()
+                        .remove("__fixture_delayed_terminal_ack") == Some(Value::Bool(true));
                     // A fixture that tests a missing contract field opts out of the defaults.
                     if params.as_object_mut().unwrap().remove("__no_defaults").is_none() {
                         params = contract_defaults(params, mode);
@@ -1806,6 +1840,79 @@ pub async fn main() {
                         relay.wait().await.unwrap();
                         continue;
                     }
+                    if matches!(full_scenario.as_str(), "typed-deliverables-consumer" | "typed-deliverables-consumer-renew")
+                        && mode == "desktop-coordinator"
+                        && !std::path::Path::new(".git/typed-output-read").exists()
+                    {
+                        let producer = std::fs::read_to_string(".git/typed-producer-id").unwrap();
+                        let read = |id, version| json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                            "params":{"name":"sprint_task_result","arguments":{"member_id":producer,
+                                "deliverable_name":"sample","deliverable_version":version}}});
+                        wire::write_frame(&mut stdin, &read(791,"2.0")).await.unwrap();
+                        let wrong = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                        assert!(wrong["error"].is_object() || wrong["result"]["isError"] == true, "{wrong}");
+                        wire::write_frame(&mut stdin, &read(792,"1.0")).await.unwrap();
+                        let right = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                        let renew = full_scenario == "typed-deliverables-consumer-renew";
+                        assert_eq!(right["result"]["structuredContent"]["deliverable"]["data"],
+                            json!({"answer":if renew {43} else {42}}), "{right}");
+                        assert_eq!(right["result"]["structuredContent"]["binding_status"],
+                            if renew {"prospective_replan"} else {"bound"}, "{right}");
+                        std::fs::write(".git/typed-output-read", "ok").unwrap();
+                    }
+                    let automatic_producer = full_scenario == "typed-deliverables-auto"
+                        && assignment["sprint_deliverables"]["produces"].as_array().is_some_and(|outputs| !outputs.is_empty());
+                    if (matches!(full_scenario.as_str(), "typed-deliverables" | "typed-deliverables-renew")
+                        || automatic_producer) && mode == "desktop-worker"
+                        && params["name"] == "result_submit"
+                    {
+                        let call = async |input: &mut tokio::process::ChildStdin,
+                                          output: &mut BufReader<tokio::process::ChildStdout>,
+                                          id: u64,
+                                          name: &str,
+                                          arguments: Value| {
+                            wire::write_frame(input, &json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).await.unwrap();
+                            let reply = wire::read_frame(output).await.unwrap().unwrap();
+                            assert!(reply.get("error").is_none() && reply["result"]["isError"] != true, "{reply}");
+                            reply["result"]["structuredContent"].clone()
+                        };
+                        let renew = full_scenario == "typed-deliverables-renew";
+                        let omit = (renew && assignment["node"] == "typed-replan-1")
+                            || (automatic_producer && assignment["node"] == "work");
+                        if renew {
+                            let report = std::fs::read_to_string("typed-original-report.txt").unwrap();
+                            let mut stale = params.clone();
+                            stale["arguments"]["report"] = json!(report);
+                            stale["arguments"]["request_key"] = json!("stale-typed-result");
+                            wire::write_frame(&mut stdin, &json!({"jsonrpc":"2.0","id":800,"method":"tools/call","params":stale})).await.unwrap();
+                            let reply = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                            assert!(reply.to_string().contains("result_report_not_owned"), "{reply}");
+                        }
+                        if automatic_producer && !omit {
+                            let read = call(&mut stdin, &mut stdout, 796, "project_read",
+                                json!({"path":"work.txt"})).await;
+                            let expected = read["full_content_sha256"].as_str().expect("complete fixture read");
+                            call(&mut stdin, &mut stdout, 797, "project_write",
+                                json!({"path":"work.txt","expected_sha256":expected,"content":"typed output",
+                                    "request_key":"auto-typed-write"})).await;
+                        }
+                        let draft = call(&mut stdin, &mut stdout, 801, "create_draft",
+                            json!({"template":"general","request_key":"typed-draft"})).await;
+                        let draft_id = draft["draft_id"].as_str().unwrap();
+                        let markdown = format!("{}\n\n{}",
+                            draft["required_first_line"].as_str().unwrap(),
+                            params["arguments"]["report"].as_str().unwrap());
+                        let written = call(&mut stdin, &mut stdout, 802, "draft_write",
+                            json!({"draft_id":draft_id,"content":markdown,"request_key":"typed-write"})).await;
+                        assert_eq!(written["outcome"], "written", "{written}");
+                        let artifacts = if omit { json!([]) } else {
+                            json!([{"kind":"json","name":"sample","version":"1.0","data":{"answer":if renew {43} else {42}}}])
+                        };
+                        let published = call(&mut stdin, &mut stdout, 803, "write_report",
+                            json!({"draft_id":draft_id,"request_key":"typed-publish","title":"Typed output",
+                                "summary":"Fixture JSON object.","author":"worker","artifacts":artifacts})).await;
+                        params["arguments"]["report"] = json!(published["report_id"].as_str().unwrap());
+                    }
                     if mode == "desktop-reviewer" && params["name"] == "result_submit" {
                         // A reviewer finishes its coverage before its verdict: read every
                         // visible project file completely through the channel.
@@ -1934,6 +2041,20 @@ pub async fn main() {
                         })
                         .await
                         .expect("sibling release signal missing");
+                    }
+                    if delayed_terminal_ack {
+                        assert_eq!(mode, "native-host");
+                        assert_eq!(params["name"], "result_submit");
+                        assert!(accepted, "{reply}");
+                        // The terminal result revokes broker authority immediately,
+                        // well before the delayed ACP reply is sent.
+                        wire::write_frame(&mut stdin, &json!({"jsonrpc":"2.0","id":90,"method":"tools/call",
+                            "params":{"name":"project_write","arguments":{"path":"after-terminal-write.txt","content":"must not write",
+                            "expected_sha256":"absent","request_key":"after-terminal-result"}}}))
+                            .await.unwrap();
+                        let refused = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                        assert!(refused.get("error").is_some() || refused["result"]["isError"] == true, "{refused}");
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     }
                     // A real engine reports a failed tool call as that call's result and ends
                     // the turn normally; ACP `refusal` means the model declined, which the

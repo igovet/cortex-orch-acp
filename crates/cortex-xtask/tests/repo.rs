@@ -290,7 +290,7 @@ fn the_packaged_skills_are_complete_and_agents_are_not_a_payload_entry() {
                 && e.path().join("SKILL.md").is_file()
         })
         .count();
-    assert_eq!(workers, 23, "22 specialists and the consultant");
+    assert_eq!(workers, 5, "five canonical worker profiles");
     assert!(!root.join("agents").exists());
     assert!(root
         .join("integrations/paseo/plugin-integrity.json")

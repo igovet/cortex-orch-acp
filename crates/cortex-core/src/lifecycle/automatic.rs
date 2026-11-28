@@ -335,24 +335,23 @@ pub fn projection(db: &Connection, task: &str) -> CoreResult<Option<Value>> {
 
 /// Runtime-built input to the same consultant node and packet builder used by
 /// a normal escalation. Pending until that path records CONSULTATION_REQUIRED.
-pub(super) fn consultation(db: &Connection, task: &str) -> CoreResult<Option<Value>> {
+pub(super) fn consultation(db: &Connection, task: &str, revision: i64) -> CoreResult<Option<(i64, Value)>> {
     let Some((id, request)) = latest(db, task, "AUTOMATIC_CONSULTATION_REQUESTED")? else {
         return Ok(None);
     };
-    let scheduled: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='CONSULTATION_REQUIRED' AND id>?)",
-        (task, id), |r| r.get(0),
-    )?;
-    if scheduled {
+    if request["revision"] != revision || super::plan::consultation_consumed(db, task, id, revision)? {
         return Ok(None);
     }
     let stop = request["continuation_event"]
         .as_i64()
         .ok_or(CoreError::Refused("automatic_evidence_missing"))?;
     let raw: String = db.query_row(
-        "SELECT payload_json FROM runtime_events WHERE task_id=? AND id=? AND type='AUTOMATIC_CONTINUATION'",
-        (task, stop), |r| r.get(0),
-    )?;
+        "SELECT payload_json FROM runtime_events
+         WHERE task_id=? AND id=? AND id<? AND type='AUTOMATIC_CONTINUATION'
+         AND json_extract(payload_json,'$.strategy')='consult'
+         AND json_extract(payload_json,'$.revision')=?",
+        (task, stop, id, revision), |r| r.get(0),
+    ).optional()?.ok_or(CoreError::Refused("automatic_evidence_missing"))?;
     let evidence: Value = serde_json::from_str(&raw)?;
     let reports: Vec<_> = evidence["reports"]
         .as_array()
@@ -361,13 +360,13 @@ pub(super) fn consultation(db: &Connection, task: &str) -> CoreResult<Option<Val
         .filter_map(|r| r["reportId"].as_str())
         .take(16)
         .collect();
-    Ok(Some(
+    Ok(Some((id,
         json!({"operation":"escalation_request", "revision":request["revision"], "automatic":true,
         "proposal":{"question":"What should the coordinator change so that the task finishes, given the recorded failures and the approaches already tried, without waiving review, checks or permissions?",
             "reason":format!("Automatic continuation {}: {} (runtime event {stop}; evidence {})",
                 request["count"].as_i64().unwrap_or(evidence["count"].as_i64().unwrap_or(0)),
                 request["reason"], evidence["events"]), "report_ids":reports}}),
-    ))
+    )))
 }
 
 /// A coordinator cannot turn a failed or unobserved mandatory check into a
@@ -658,6 +657,7 @@ const COORDINATOR_INTERRUPTION_SERIES_LIMIT: i64 = 6;
 const COORDINATOR_TURN_INTERRUPTED: &str = "native_turn_outcome_unknown";
 /// The pause kind of an infrastructure loop the runtime waits out by itself.
 pub const INFRASTRUCTURE_PAUSE: &str = "infrastructure";
+pub const INVALID_SESSION_LAUNCH: &str = "native_session_launch_invalid";
 /// Model-facing note of a continuation that takes no rung: the attempt was
 /// interrupted by the infrastructure, the host or the owner, not by the work.
 const INFRA_NOTE: &str = "The previous attempt was interrupted by the infrastructure, the host or the owner (recorded below), not by the work. Continue on the same approach; do not change a plan only because of the interruption.";
@@ -755,6 +755,7 @@ fn infrastructure_stop(
     }
     Ok(match reason {
         "worker_stopped_by_owner" => Some("owner_paused"),
+        INVALID_SESSION_LAUNCH => Some("invalid_launch_arguments"),
         "supervisor_spawn_failed" | "native_session_start_failed" => Some("engine_failure"),
         "worker_retry_limit" => retry_limit_class(db, task, revision)?,
         "worker_failed" => {
@@ -1371,7 +1372,7 @@ pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRes
                     Verdict::Break {
                         action: "ask_owner",
                     }
-                } else if h.count >= INFRA_LOOP {
+                } else if reason == INVALID_SESSION_LAUNCH || h.count >= INFRA_LOOP {
                     Verdict::Break {
                         action: "infrastructure_wait",
                     }

@@ -392,7 +392,7 @@ impl Phone {
                     .get(&machine.machine_id)
                     .map(|link| link.connection.state().borrow().clone());
                 let (state, path, last) = machine_connection(seen, machine.last_connected_ms);
-                json!({"id": machine.machine_id, "name": machine.name, "state": state, "path": path, "lastConnectedAt": last})
+                json!({"id": machine.machine_id, "name": machine.name, "state": state, "path": path, "lastConnectedAt": last, "pairedAt": machine.paired_at_ms})
             })
             .collect();
         json!({"active": inner.active, "machines": machines})

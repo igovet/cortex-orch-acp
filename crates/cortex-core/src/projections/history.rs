@@ -652,7 +652,8 @@ fn fits(items: &mut Vec<HistoryRow>, bytes: &mut usize, mut item: HistoryRow) ->
 }
 /// The task's bound session, the runtime task its attempts are recorded under, and the page's cursor binding.
 fn bound(db: &Connection, project: &str, p: &Page) -> CoreResult<(String, String, String)> {
-    let e=row(db,"SELECT e.acp_session_id,e.runtime_task_id FROM workspace_executions e JOIN workspace_tasks t USING(task_id) WHERE t.project_id=? AND t.task_id=?", [project,&p.target])?.ok_or(CoreError::Refused("not_found"))?;
+    let e=row(db,"SELECT e.acp_session_id,e.runtime_task_id FROM workspace_executions e JOIN workspace_tasks t USING(task_id)
+        WHERE t.project_id=? AND t.task_id=? AND (t.execution_id=e.execution_id OR t.execution_id IS NULL)", [project,&p.target])?.ok_or(CoreError::Refused("not_found"))?;
     let session = field(&e, "acp_session_id").unwrap_or("").to_owned();
     // Worker attempts are recorded under the runtime task, not the workspace task the page is asked for.
     let runtime = field(&e, "runtime_task_id").unwrap_or("").to_owned();
@@ -832,6 +833,43 @@ pub(super) fn earlier(
 }
 /// The newest display position of a session: each table's own maximum through its (session, seq) index.
 const MAXIMUM_SQL: &str = "SELECT max(coalesce((SELECT max(seq) FROM host_transcript WHERE session_id=?1),-1),coalesce((SELECT max(seq) FROM host_updates WHERE session_id=?2),-1))";
+// These are the same two indexed end seeks used by MAXIMUM_SQL. Only the
+// current delta's bounded task IDs participate; no history bodies are read.
+const HEADS_SQL: &str = "
+    SELECT t.task_id, e.execution_id,
+           max(coalesce((SELECT seq FROM host_transcript WHERE session_id=e.acp_session_id ORDER BY seq DESC LIMIT 1),-1),
+               coalesce((SELECT seq FROM host_updates WHERE session_id=e.acp_session_id ORDER BY seq DESC LIMIT 1),-1)),
+           NOT EXISTS(SELECT 1 FROM pending_questions q WHERE q.task_id=e.runtime_task_id)
+    FROM json_each(?1) ids
+    CROSS JOIN workspace_tasks t ON t.task_id=ids.value AND t.project_id=?2
+    CROSS JOIN workspace_executions e ON e.execution_id=t.execution_id AND e.task_id=t.task_id
+    CROSS JOIN acp_host_sessions s ON s.session_id=e.acp_session_id AND s.task_id=e.runtime_task_id AND s.project_root=?3";
+
+pub(super) fn heads(
+    db: &Connection,
+    project: &str,
+    root: &str,
+    ids: &[&str],
+) -> CoreResult<Vec<workspace_protocol::read::HistoryHead>> {
+    if ids.is_empty() || ids.len() > workspace_protocol::read::HISTORY_HEAD_LIMIT {
+        return Ok(Vec::new());
+    }
+    let encoded = serde_json::to_string(ids)?;
+    let mut stmt = db.prepare(HEADS_SQL)?;
+    let mut rows = stmt.query((encoded, project, root))?;
+    let mut heads = Vec::new();
+    while let Some(row) = rows.next()? {
+        let maximum: i64 = row.get(2)?;
+        let Some(position) = maximum.checked_add(1) else { continue };
+        heads.push(workspace_protocol::read::HistoryHead {
+            task_id: row.get(0)?,
+            execution_id: row.get(1)?,
+            position: ver(position)?,
+            questions_empty: row.get(3)?,
+        });
+    }
+    Ok(heads)
+}
 const TRANSCRIPT_SQL: &str = "SELECT seq,kind,text,NULL,created_at,message_id FROM host_transcript WHERE session_id=?1 AND seq>?2 AND seq<=?3 ORDER BY seq LIMIT ?4";
 const UPDATES_SQL: &str = "SELECT seq,'update',NULL,update_json,created_at,NULL FROM host_updates WHERE session_id=?1 AND seq>?2 AND seq<=?3 ORDER BY seq LIMIT ?4";
 /// A backward read's rows of each table before a position (`?2`) and after `?3`, newest first.
@@ -858,13 +896,13 @@ mod tests {
     fn fixture() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE workspace_tasks(task_id TEXT, project_id TEXT);
+            "CREATE TABLE workspace_tasks(task_id TEXT, project_id TEXT, execution_id TEXT);
              CREATE TABLE workspace_executions(execution_id TEXT, task_id TEXT, runtime_task_id TEXT, acp_session_id TEXT);
              CREATE TABLE host_transcript(session_id TEXT, seq INTEGER, kind TEXT, text TEXT, message_id TEXT, created_at TEXT);
              CREATE TABLE host_updates(session_id TEXT, seq INTEGER, update_json TEXT, created_at TEXT);
              CREATE TABLE delegation_provisioning(task_id TEXT, attempt_id TEXT, role_id TEXT);
              INSERT INTO delegation_provisioning VALUES ('r','xa_c','orchestrator'),('r','xa_w','worker-mobile-dev'),('t','xa_t','worker-mobile-dev');
-             INSERT INTO workspace_tasks VALUES ('t','p');
+             INSERT INTO workspace_tasks VALUES ('t','p','e');
              INSERT INTO workspace_executions VALUES ('e','t','r','s');",
         )
         .unwrap();
@@ -995,6 +1033,43 @@ mod tests {
         drop(add);
         tx.commit().unwrap();
         db
+    }
+
+    #[test]
+    fn history_heads_seek_only_bound_sessions_and_match_the_history_page() {
+        let db = retained(100);
+        db.execute_batch(
+            "INSERT INTO acp_host_sessions VALUES ('s','/fixture','r','{}','{}','[]','now',NULL);
+             INSERT INTO workspace_executions VALUES ('older','t','previous','different',1,1,'now');
+             INSERT INTO host_updates VALUES ('different',900,'{}','now');",
+        )
+        .unwrap();
+        let read = || heads(&db, "p", "/fixture", &["t", "missing"]).unwrap();
+        let expected = page(&db, "p", &Page { target: "t".into(), cursor: None, limit: 20 }).unwrap();
+        assert_eq!(read(), [workspace_protocol::read::HistoryHead {
+            task_id: "t".into(), execution_id: "e".into(),
+            position: expected.high_watermark, questions_empty: true,
+        }]);
+        db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,created_at) VALUES ('q','r','q','private','now')", []).unwrap();
+        assert!(!read()[0].questions_empty);
+        assert!(heads(&db, "other", "/fixture", &["t"]).unwrap().is_empty());
+        assert!(heads(&db, "p", "/other", &["t"]).unwrap().is_empty());
+        assert!(heads(&db, "p", "/fixture", &["t"; 65]).unwrap().is_empty());
+
+        let mut plan = db.prepare(&format!("EXPLAIN QUERY PLAN {HEADS_SQL}")).unwrap();
+        let details = plan.query_map(("[\"t\"]", "p", "/fixture"), |row| row.get::<_, String>(3)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        for table in ["host_transcript", "host_updates", "q", "t", "e", "s"] {
+            assert!(details.iter().any(|detail| detail.starts_with(&format!("SEARCH {table} "))), "{table}: {details:?}");
+        }
+        assert!(details.iter().filter(|detail| detail.starts_with("SCAN ")).all(|detail| detail.starts_with("SCAN ids ")), "{details:?}");
+        let (small, _) = steps(&db, read);
+        db.execute_batch("WITH RECURSIVE rows(seq) AS (
+            SELECT 1000 UNION ALL SELECT seq+1 FROM rows WHERE seq<11000)
+            INSERT INTO host_updates SELECT 's',seq,'{}','now' FROM rows").unwrap();
+        let (large, heads) = steps(&db, read);
+        assert_eq!(heads[0].position.get(), 11001);
+        assert!(large <= small + 30, "history growth increased seek cost: {small} → {large}");
     }
 
     /// Every tool row merges its call's earlier updates. Through the session index alone that

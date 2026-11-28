@@ -11,10 +11,235 @@ use super::{
     native::*,
     settings::{self, Lock},
 };
-use cortex_core::{workspace as core_workspace, OpenMode};
+use cortex_core::{workspace as core_workspace, CoreResult, OpenMode};
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+const PUBLICATION: &str = "sprintMaterializationInFlight";
+const OPERATION: &str = "internal.sprint.materialize";
+const REVISION_OPERATION: &str = "internal.sprint.revision";
+const CHANGED_FIELDS: &[&str] = &[
+    "planning", "materializedVersion", "materializedTaskIds", "taskIds",
+    "planningAttempt", "planningFailure",
+];
+
+fn unconfirmed() -> Refused {
+    refuse(
+        "machine_outcome_unknown",
+        "The saved sprint's tasks could not all be confirmed. Refresh the project before trying again.",
+    )
+}
+
+fn digest(value: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
+}
+
+/// A product file may have been durably replaced before its SQLite transaction
+/// committed. Project readers use the receipt in the same transaction as the
+/// drafts and outbox rows to decide which snapshot is visible. Writers hold
+/// the machine lock, so their next save naturally removes the publication marker.
+pub(crate) fn resolve_publication(project: &str, product: &mut Value) -> Result<()> {
+    resolve_publication_with(product, |marker| {
+        let root = Path::new(marker["root"].as_str().ok_or_else(unconfirmed)?);
+        let store = context::open_now(root, OpenMode::LiveReadOnly)?.ok_or_else(unconfirmed)?;
+        store.read(|db| publication_receipt(db, project, marker))
+            .map_err(|_| unconfirmed())
+    })
+}
+
+pub(super) fn resolve_publication_on(
+    db: &rusqlite::Connection,
+    project: &str,
+    product: &mut Value,
+) -> CoreResult<()> {
+    resolve_publication_with(product, |marker| {
+        publication_receipt(db, project, marker).map_err(|_| unconfirmed())
+    }).map_err(|err| cortex_core::CoreError::Refused(err.code))
+}
+
+fn publication_receipt(db: &rusqlite::Connection, project: &str, marker: &Value) -> CoreResult<Option<String>> {
+    let unknown = || cortex_core::CoreError::Refused("machine_outcome_unknown");
+    let token = marker["token"].as_str().ok_or_else(unknown)?;
+    let root = marker["root"].as_str().ok_or_else(unknown)?;
+    let actor = crate::actor();
+    let bound: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workspace_projects WHERE project_id=? AND project_root=? AND activated_by=?)",
+        (project, root, &actor),
+        |row| row.get(0),
+    )?;
+    if !bound {
+        return Err(unknown());
+    }
+    let operation = match marker["operation"].as_str() {
+        None if marker["operation"].is_null() => OPERATION,
+        Some(REVISION_OPERATION) => REVISION_OPERATION,
+        _ => return Err(unknown()),
+    };
+    let receipt = db.query_row(
+        "SELECT digest FROM workspace_requests WHERE project_id=? AND actor_id=? AND request_id=? AND operation=?",
+        (project, &actor, token, operation),
+        |row| row.get(0),
+    ).optional()?;
+    if receipt.is_none() {
+        let ids = marker["taskIds"].as_array().ok_or_else(unknown)?;
+        let mut exists = db.prepare("SELECT EXISTS(SELECT 1 FROM workspace_tasks WHERE task_id=?)")?;
+        for id in ids {
+            let id = id.as_str().ok_or_else(unknown)?;
+            if exists.query_row([id], |row| row.get::<_, bool>(0))? {
+                return Err(unknown());
+            }
+        }
+        if operation == REVISION_OPERATION {
+            let versions = marker["draftVersions"].as_object().ok_or_else(unknown)?;
+            let mut query = db.prepare("SELECT version FROM workspace_tasks WHERE task_id=? AND project_id=?")?;
+            for (id, version) in versions {
+                let actual: Option<i64> = query.query_row((id, project), |row| row.get(0)).optional()?;
+                if actual.is_none() || actual != version.as_i64() {
+                    return Err(unknown());
+                }
+            }
+        }
+    }
+    Ok(receipt)
+}
+
+fn resolve_publication_with(
+    product: &mut Value,
+    receipt: impl FnOnce(&Value) -> Result<Option<String>>,
+) -> Result<()> {
+    let Some(mut marker) = product.as_object_mut().and_then(|p| p.remove(PUBLICATION)) else {
+        return Ok(());
+    };
+    let stored = marker.as_object_mut().and_then(|marker| marker.remove("fingerprint"));
+    let fingerprint = digest(&json!([product, marker]));
+    if stored.as_ref().and_then(Value::as_str) != Some(fingerprint.as_str()) {
+        return Err(unconfirmed());
+    }
+    if let Some(receipt) = receipt(&marker)? {
+        return if receipt == fingerprint { Ok(()) } else { Err(unconfirmed()) };
+    }
+    if marker["operation"] == REVISION_OPERATION {
+        return restore_revision(product, &marker);
+    }
+    // SQLite exposed no commit for this exact publication, so reverse only the
+    // changes that this writer made. The original plan and history never moved.
+    let sprint = product["sprints"].as_array_mut()
+        .and_then(|sprints| sprints.iter_mut().find(|sprint| sprint["id"] == marker["sprintId"]))
+        .ok_or_else(unconfirmed)?;
+    let ids = sprint["taskIds"].as_array().ok_or_else(unconfirmed)?.clone();
+    if marker["taskIds"].as_array() != Some(&ids) {
+        return Err(unconfirmed());
+    }
+    let saved = sprint.as_object_mut().ok_or_else(unconfirmed)?;
+    let previous = marker["previous"].as_object().ok_or_else(unconfirmed)?;
+    for &key in CHANGED_FIELDS {
+        if let Some(value) = previous.get(key) {
+            saved.insert(key.into(), value.clone());
+        } else {
+            saved.remove(key);
+        }
+    }
+    let tasks = product["tasks"].as_object_mut().ok_or_else(unconfirmed)?;
+    for id in ids {
+        let id = id.as_str().ok_or_else(unconfirmed)?;
+        if tasks.get(id).is_none_or(|record| record["sprintId"] != marker["sprintId"]) {
+            return Err(unconfirmed());
+        }
+        tasks.remove(id);
+    }
+    Ok(())
+}
+
+/// A revision changes only the live roster and its named task overlays. Retain
+/// their before-images until SQLite exposes the exact matching receipt.
+pub(super) fn stage_revision(
+    product: &mut Value,
+    root: &str,
+    sprint: &str,
+    token: &str,
+    roster: &Value,
+    new_tasks: &[String],
+    previous_tasks: Value,
+    draft_versions: Value,
+) -> String {
+    let mut marker = json!({"operation":REVISION_OPERATION,"root":root,"token":token,"sprintId":sprint,
+        "taskIds":new_tasks,"previousRoster":roster,"previousTasks":previous_tasks,"draftVersions":draft_versions});
+    let fingerprint = digest(&json!([product, marker]));
+    marker["fingerprint"] = json!(fingerprint);
+    product[PUBLICATION] = marker;
+    fingerprint
+}
+
+pub(super) fn record_revision_receipt(
+    db: &rusqlite::Connection,
+    project: &str,
+    actor: &str,
+    token: &str,
+    fingerprint: &str,
+) -> CoreResult<()> {
+    db.execute(
+        "INSERT INTO workspace_requests(project_id,actor_id,request_id,operation,digest,receipt_json)
+         VALUES (?,?,?,?,?,'{}')",
+        (project, actor, token, REVISION_OPERATION, fingerprint),
+    )?;
+    Ok(())
+}
+
+pub(super) fn finish_revision(
+    store: &cortex_core::Store,
+    path: &Path,
+    project: &str,
+    product: &mut Value,
+    committed: bool,
+) -> Result<()> {
+    if committed {
+        product.as_object_mut().ok_or_else(unconfirmed)?.remove(PUBLICATION);
+    } else {
+        let marker = &product[PUBLICATION];
+        if store.read(|db| publication_receipt(db, project, marker)).map_err(|_| unconfirmed())?.is_some() {
+            return Err(unconfirmed());
+        }
+        resolve_publication_with(product, |_| Ok(None))?;
+    }
+    // Losing cleanup leaves the verifiable marker. Every reader uses the receipt
+    // to select the committed or prior projection even when no writer can clean up.
+    let _ = settings::write_json(path, product);
+    Ok(())
+}
+
+fn restore_revision(product: &mut Value, marker: &Value) -> Result<()> {
+    let sprint = product["sprints"].as_array_mut()
+        .and_then(|sprints| sprints.iter_mut().find(|sprint| sprint["id"] == marker["sprintId"]))
+        .ok_or_else(unconfirmed)?;
+    let added = marker["taskIds"].as_array().ok_or_else(unconfirmed)?;
+    let before = marker["previousRoster"].as_array().ok_or_else(unconfirmed)?;
+    let roster = sprint["taskIds"].as_array().ok_or_else(unconfirmed)?;
+    if roster.len() != before.len() + added.len() || !roster.starts_with(before) || !roster.ends_with(added) {
+        return Err(unconfirmed());
+    }
+    sprint["taskIds"] = marker["previousRoster"].clone();
+    let tasks = product["tasks"].as_object_mut().ok_or_else(unconfirmed)?;
+    for id in added {
+        let id = id.as_str().ok_or_else(unconfirmed)?;
+        if tasks.get(id).is_none_or(|record| record["sprintId"] != marker["sprintId"]) {
+            return Err(unconfirmed());
+        }
+        tasks.remove(id);
+    }
+    let previous = marker["previousTasks"].as_object().ok_or_else(unconfirmed)?;
+    for (id, record) in previous {
+        if record["sprintId"] != marker["sprintId"]
+            || tasks.get(id).is_none_or(|current| current["sprintId"] != marker["sprintId"])
+        {
+            return Err(unconfirmed());
+        }
+        tasks.insert(id.clone(), record.clone());
+    }
+    Ok(())
+}
 
 /// The identity of the task a plan item becomes: the same sprint, plan version and
 /// key always name the same task, so no retry can create it twice.
@@ -60,6 +285,8 @@ struct Item<'a> {
     depends: Vec<&'a str>,
     checkout: Option<&'a Value>,
     complexity: &'a str,
+    produces: Vec<cortex_core::deliverables::Output>,
+    consumes: Vec<cortex_core::deliverables::Input>,
 }
 
 fn invalid_plan(detail: impl std::fmt::Display) -> Refused {
@@ -75,6 +302,8 @@ fn ordered(items: &[Value]) -> Result<Vec<Item<'_>>> {
     if items.is_empty() {
         return Err(invalid_plan("it has no tasks"));
     }
+    crate::native_driver::sprints::check_deliverables(items)
+        .map_err(|error| refuse(error.code, &error.detail))?;
     let mut parsed = Vec::with_capacity(items.len());
     let mut keys = HashSet::new();
     for (n, item) in items.iter().enumerate() {
@@ -129,6 +358,8 @@ fn ordered(items: &[Value]) -> Result<Vec<Item<'_>>> {
             depends,
             complexity,
             checkout: item.get("checkout").filter(|c| !c.is_null()),
+            produces: cortex_core::deliverables::outputs(item).expect("validated outputs"),
+            consumes: cortex_core::deliverables::inputs(item).expect("validated inputs"),
         });
     }
     let graph: Vec<_> = parsed.iter().map(|item| (item.key, item.depends.clone())).collect();
@@ -162,6 +393,51 @@ fn strays(product: &Value, sprint: &Value) -> Vec<Value> {
         })
         .map(|(id, _)| json!(id))
         .collect()
+}
+
+fn confirm_created(root: &Path, project: &str, product: &Value, sprint: &Value) -> Result<Value> {
+    let ids = sprint.get("materializedTaskIds").unwrap_or(&sprint["taskIds"]);
+    let entries = ids.as_array().filter(|ids| !ids.is_empty()).ok_or_else(unconfirmed)?;
+    if sprint.get("materializedTaskIds").is_some() {
+        let sprint_id = sprint["id"].as_str().ok_or_else(unconfirmed)?;
+        let version = sprint["materializedVersion"].as_u64().ok_or_else(unconfirmed)?;
+        let items = sprint["plan"]["items"].as_array().ok_or_else(unconfirmed)?;
+        let expected = ordered(items)?.into_iter()
+            .map(|item| json!(task_id(project, sprint_id, version, item.key)))
+            .collect::<Vec<_>>();
+        if sprint["plan"]["version"] != version || *entries != expected {
+            return Err(unconfirmed());
+        }
+    }
+    let store = context::open(root, OpenMode::LiveReadOnly)?.ok_or_else(unconfirmed)?;
+    let confirmed = store.read(|db| {
+        let mut task = db.prepare("SELECT EXISTS(SELECT 1 FROM workspace_tasks WHERE task_id=? AND project_id=?)")?;
+        let mut seen = HashSet::new();
+        for id in entries {
+            let Some(id) = id.as_str() else { return Ok(false) };
+            if !seen.insert(id) {
+                return Ok(false);
+            }
+            if sprint.get("materializedTaskIds").is_some() && product["tasks"][id]["purged"] == true {
+                continue;
+            }
+            if product["tasks"][id]["sprintId"] != sprint["id"] {
+                return Ok(false);
+            }
+            if !task.query_row((id, project), |row| row.get::<_, bool>(0))? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }).map_err(|_| unconfirmed())?;
+    if !confirmed {
+        return Err(unconfirmed());
+    }
+    Ok(ids.clone())
+}
+
+pub(super) fn validate_items(items: &Value) -> Result<()> {
+    ordered(items.as_array().ok_or_else(|| invalid_plan("it has no tasks"))?).map(|_| ())
 }
 
 #[cfg(test)]
@@ -205,10 +481,7 @@ pub fn materialize_routed(
     let path = product_path(state, project)?;
     let prior = settings::read_json(&path, json!({}))?;
     let mut product = product(state, project)?;
-    let index = product["sprints"]
-        .as_array()
-        .and_then(|s| s.iter().position(|s| s["id"] == sprint_id))
-        .ok_or_else(|| refuse("unknown_sprint", "Unknown sprint."))?;
+    let index = super::sprint_live::sprint_index(&product, project, sprint_id)?;
     let sprint = product["sprints"][index].clone();
     if !sprint["archivedAt"].is_null() || sprint["deleting"] == true {
         return Err(refuse(
@@ -219,7 +492,8 @@ pub fn materialize_routed(
     if !sprint["materializedVersion"].is_null() {
         // Created already: the same plan answers with its tasks, never a second set.
         if sprint["materializedVersion"].as_u64() == Some(version) {
-            return Ok(json!({"done":true,"created":0,"taskIds":sprint["taskIds"],
+            let ids = confirm_created(root, project, &product, &sprint)?;
+            return Ok(json!({"done":true,"created":0,"taskIds":ids,
                 "strayTaskIds":strays(&product, &sprint)}));
         }
         return Err(refuse(
@@ -287,6 +561,14 @@ pub fn materialize_routed(
                 .map(|c| c["kind"].clone())
                 .unwrap_or_else(|| json!("main"));
             let mut options = json!({"checkout":{"kind":checkout}});
+            if !item.produces.is_empty() || !item.consumes.is_empty() {
+                let mut consumes = item.consumes.clone();
+                for input in &mut consumes {
+                    input.from = ids[input.from.as_str()].clone();
+                }
+                options["sprintDeliverables"] =
+                    json!({"sprintId":sprint_id,"produces":item.produces,"consumes":consumes});
+            }
             if checkout == "worktree" && sprint["checkout"]["shared"] == true {
                 options["sprintWorktree"] = json!({"sprintId":sprint_id,
                     "title":sprint["title"].as_str().filter(|t| !t.trim().is_empty()).unwrap_or("sprint")});
@@ -322,13 +604,12 @@ pub fn materialize_routed(
     if !product["tasks"].is_object() {
         return Err(refuse("state_unreadable", "Saved tasks are unreadable."));
     }
-    for (item, assigned) in order.iter().zip(&assigned) {
+    for ((item, assigned), options) in order.iter().zip(&assigned).zip(&options) {
         let id = &ids[item.key];
-        let mut record = product["tasks"]
-            .get(id)
-            .cloned()
-            .filter(Value::is_object)
-            .unwrap_or_else(|| json!({}));
+        if product["tasks"].get(id).is_some() {
+            return Err(refuse("payload_conflict", "A planned task identity already exists."));
+        }
+        let mut record = json!({});
         record["sprintId"] = json!(sprint_id);
         match assigned {
             Some(a) => {
@@ -343,6 +624,10 @@ pub fn materialize_routed(
             }
         }
         record["dependencies"] = json!(item.depends.iter().map(|d| &ids[d]).collect::<Vec<_>>());
+        if let Some(contract) = options.get("sprintDeliverables") {
+            record["produces"] = contract["produces"].clone();
+            record["consumes"] = contract["consumes"].clone();
+        }
         record["planning"] = json!(false);
         if let Some(title) = item
             .title
@@ -362,6 +647,7 @@ pub fn materialize_routed(
     saved["planning"] = json!("created");
     saved["materializedVersion"] = json!(version);
     saved["taskIds"] = json!(task_ids);
+    saved["materializedTaskIds"] = json!(task_ids);
     for key in ["planningAttempt", "planningFailure"] {
         saved.as_object_mut().unwrap().remove(key);
     }
@@ -373,16 +659,41 @@ pub fn materialize_routed(
     })?;
     let store_root = store.key().root().to_string_lossy().into_owned();
     let actor = crate::actor();
+    let token = format!("sprint-materialize-{}", settings::unique());
+    let mut previous = serde_json::Map::new();
+    for &key in CHANGED_FIELDS {
+        if let Some(value) = sprint.get(key) {
+            previous.insert(key.into(), value.clone());
+        }
+    }
+    let mut marker = json!({"root":store_root,"token":token,"sprintId":sprint_id,"previous":previous,
+        "taskIds":task_ids});
+    let fingerprint = digest(&json!([product, marker]));
+    marker["fingerprint"] = json!(fingerprint);
+    product[PUBLICATION] = marker;
     let wrote = std::cell::Cell::new(false);
     let result = store.write(|db| {
         let created = core_workspace::create_drafts_tx(db, &store_root, project, &actor, &drafts)?;
+        if created != drafts.len() {
+            // A confirmed retry returned above. An identity already present here
+            // has no confirmed materialization binding and must not be adopted.
+            return Err(cortex_core::CoreError::Refused("payload_conflict"));
+        }
         #[cfg(test)]
         if FAIL.with(|f| f.get()) == 1 {
             return Err(cortex_core::CoreError::Refused("injected_failure"));
         }
+        db.execute(
+            "INSERT INTO workspace_requests(project_id,actor_id,request_id,operation,digest,receipt_json) VALUES (?,?,?,?,?,'{}')",
+            (project, &actor, &token, OPERATION, &fingerprint),
+        )?;
         wrote.set(true);
         settings::write_json(&path, &product)
             .map_err(|e| cortex_core::CoreError::Refused(e.code))?;
+        #[cfg(test)]
+        if FAIL.with(|f| f.get()) == 3 {
+            std::process::exit(83);
+        }
         #[cfg(test)]
         if FAIL.with(|f| f.get()) == 2 {
             return Err(cortex_core::CoreError::Refused("injected_failure"));
@@ -391,17 +702,25 @@ pub fn materialize_routed(
     });
     match result {
         Ok(created) => {
-            let product = super::native::product(state, project)?;
+            #[cfg(test)]
+            if FAIL.with(|f| f.get()) == 4 {
+                std::process::exit(84);
+            }
+            product.as_object_mut().unwrap().remove(PUBLICATION);
+            // Compact the committed projection. A lost cleanup still leaves the
+            // original, verifiable marker and the durable SQLite receipt.
+            let _ = settings::write_json(&path, &product);
             Ok(json!({"done":true,"created":created,"taskIds":task_ids,
                 "strayTaskIds":strays(&product, &product["sprints"][index])}))
         }
         Err(error) => {
             // The drafts rolled back; the saved sprint goes back to the plan it had.
-            if wrote.get() && settings::write_json(&path, &prior).is_err() {
-                return Err(refuse(
-                    "machine_outcome_unknown",
-                    "Creating the tasks failed and the sprint could not be restored. Refresh before trying again.",
-                ));
+            if wrote.get() {
+                let committed = store.read(|db| publication_receipt(db, project, &product[PUBLICATION]))
+                    .map_err(|_| unconfirmed())?;
+                if committed.is_some() || settings::write_json(&path, &prior).is_err() {
+                    return Err(unconfirmed());
+                }
             }
             Err(if error.code() == "unauthorized" {
                 refuse(

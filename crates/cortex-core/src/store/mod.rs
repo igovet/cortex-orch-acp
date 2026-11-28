@@ -14,6 +14,7 @@ pub mod migration;
 mod compaction;
 mod outbox;
 pub mod owner_file_leases;
+pub(crate) mod open_commands;
 pub mod publication;
 mod retention;
 pub use compaction::{CompactionBudget, CompactionReport};
@@ -135,8 +136,13 @@ impl Store {
         sqlite_wait: Duration,
         acp_session: Option<&str>,
     ) -> CoreResult<Option<Self>> {
-        let key = location::resolve(key, mode, access_wait)?;
+        let location::Resolution {
+            key,
+            _anchor: location_guard,
+            binding,
+        } = location::resolve_open(key, mode, access_wait)?;
         let initialize = mode == OpenMode::Initialize;
+        let create = initialize && binding.is_none();
         let directory = key.directory();
         let release = key.channel() == StoreChannel::Release;
         if release {
@@ -159,20 +165,23 @@ impl Store {
                 return refuse("legacy_storage_root_detected");
             }
         }
-        locks::private_directory(&directory, initialize)?;
+        locks::private_directory(&directory, create)?;
         let inspection = mode == OpenMode::InspectImmutable;
         let read_only = inspection || mode == OpenMode::LiveReadOnly;
-        let lock = AccessLock::acquire(
-            &key.directory().join(".access.lock"),
-            initialize,
-            initialize || inspection,
-            if initialize {
-                Duration::ZERO
-            } else {
-                access_wait
-            },
-        )?;
-        if initialize {
+        let lock = match location_guard {
+            Some(guard) => guard,
+            None => AccessLock::acquire(
+                &directory.join(".access.lock"),
+                create,
+                initialize || inspection,
+                if initialize {
+                    Duration::ZERO
+                } else {
+                    access_wait
+                },
+            )?,
+        };
+        if create {
             locks::create_private_database(&key.database())?;
         }
         key.validate_sidecars()?;
@@ -211,6 +220,9 @@ impl Store {
         // Recognize a schema-free SQLite container for the release diagnostic
         // even on a read-only open; that mode still cannot initialize it.
         let version = schema::validate_header(&db, initialize || release)?;
+        if let Some(binding) = binding.as_ref() {
+            location::check_binding(&db, binding)?;
+        }
         if version == 0 {
             if release && key.has_legacy_storage()? {
                 return refuse("legacy_storage_root_detected");
@@ -295,6 +307,9 @@ impl Store {
             if initialize {
                 locks::open_private(&key.directory().join(".publication.lock"), true, false)?;
                 ignore_in_git(&key.directory())?;
+                if binding.is_some() {
+                    administration::record_open(&directory)?;
+                }
             }
         }
         use std::os::unix::fs::MetadataExt;

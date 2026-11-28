@@ -2,13 +2,16 @@
 //! Blocking Store methods must run on a dedicated executor, never a Tokio reactor.
 pub mod access;
 pub mod assignment_brief;
+pub mod required_reports;
 pub mod channels;
+pub mod deliverables;
 pub mod error;
 pub mod events;
 pub mod external;
 pub mod input;
 pub mod io_priority;
 pub mod lifecycle;
+pub mod observability;
 pub mod ownership;
 pub mod permission_decisions;
 pub mod pipeline;
@@ -18,6 +21,7 @@ pub mod recovery_context;
 pub mod routing;
 pub mod scheduler;
 pub mod store;
+pub mod strategy;
 #[cfg(feature = "test-observations")]
 #[doc(hidden)]
 pub mod test_observations;

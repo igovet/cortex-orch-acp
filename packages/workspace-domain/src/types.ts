@@ -8,7 +8,7 @@ export type Tier = "flagship" | "deep" | "standard" | "light";
 /** Read-only facts of a registered connection. Credentials themselves are never here. */
 export type ConnectionDetail = { connectionId: string; provider: string; authMode: string; keyKind: string | null; endpoint: string | null; launchCommand: string; credential: string; qualified: boolean; createdAt: string; updatedAt: string };
 export type EngineConnection = { id: string; engine: EngineId; label: string; note: string; sessions: number; state: "connected" | "needs_login" | "unavailable"; checkedAt: number | null; detail: ConnectionDetail };
-export type EngineSetup = { status: "not_downloaded" | "downloaded_no_login" | "ready_to_connect" | "connected"; automatic: boolean; reason: string | null; autoConnectDisabled: boolean };
+export type EngineSetup = { status: "not_downloaded" | "downloaded_no_login" | "ready_to_connect" | "connected" | "discovery_unavailable"; automatic: boolean; automaticPhase?: string; automaticStage?: string; reason: string | null; autoConnectDisabled: boolean };
 export type CatalogueModel = { routeId?: string; id: string; label: string; efforts: string[]; observed: boolean; contextWindow?: number; previousRouteIds?: string[] };
 export type EngineCatalogue = { observedAt: number | null; failed: boolean; models: CatalogueModel[] };
 export type Problem = { path: string; message: string };
@@ -112,7 +112,7 @@ export type TaskStatus = "draft" | "working" | "needs_you" | "stopping" | "pause
 /** Exactly what the owner accepted. `open` keeps the checks that had not passed, so an override can never read as a clean pass. */
 export type Acceptance = { automatic?: boolean; version: number; digest: string; at?: number | null; open?: { failed: number; not_run: number; unverified: number } | null };
 /** `url`: the address GitHub CLI reported for a pull request, recorded only when it is https on the repository's remote host. */
-export type Integration = { method: "squash" | "pr" | "commit"; targetBranch: string; digest: string; automatic?: boolean; committed?: boolean; mock?: true; message?: string; title?: string; draft?: boolean; url?: string };
+export type Integration = { worktreeCleanup?: string; method: "squash" | "pr" | "commit"; targetBranch: string; digest: string; automatic?: boolean; committed?: boolean; mock?: true; message?: string; title?: string; draft?: boolean; url?: string };
 /** One side of a conflict block as the three-way view shows it. `hit` lists the lines that differ. */
 export type CodeSide = { ref: string; start: number; lines: string[]; hit: number[] };
 export type BlockChoice = "ours" | "theirs" | "both" | "cortex";
@@ -163,6 +163,8 @@ export type Task = {
   checkout: Checkout; targetBranch: string | null; dependencies: string[];
   status: TaskStatus; resumeStatus: "working" | "needs_you"; issue: string | null;
   executionId: string | null; result: Result | null; workspaceDigest: string | null;
+  /** Runtime authority observed for this exact execution. Used only to scope local text drafts. */
+  draftBinding?: { runtimeTaskId: string; ownerEpoch: string; sessionId: string };
   acceptance: Acceptance | null;
   /** `pending`: the machine had not finished checking this result against the project folder when it answered; Accept stays off with that reason until a later read settles it. */
   reviewActions?: { accept: boolean; reason: string | null; unblockAction: "wait" | "request_changes" | "rerun_checks" | "refresh" | null; pending?: boolean;
@@ -289,10 +291,10 @@ export type SprintOrder = { mode: SprintRunMode; queueState: "idle" | "running" 
  * A revision of unstarted drafts proposed by a sprint task after the owner changed it (`sprint_revision_submit`). `awaiting_owner`
  * waits for Apply or Reject on its card; `held` names the drafts that do not start meanwhile.
  */
-export type SprintRevisionChange = { op: "update" | "add" | "propose_cancel"; memberId: string | null; key: string | null; title: string | null; description: string | null; dependsOn: string[] | null; reason: string | null };
+export type SprintRevisionChange = { op: "update" | "add" | "propose_cancel"; corrects?: string; memberId: string | null; key: string | null; title: string | null; description: string | null; dependsOn: string[] | null; reason: string | null };
 export type SprintRevision = {
   revisionId: string; taskId: string | null; status: "review" | "changes_requested" | "approved" | "awaiting_owner" | "applied" | "rejected" | "apply_refused" | "superseded";
-  applied: boolean; reason: string; changes: SprintRevisionChange[]; held: string[]; updated: string[]; added: string[];
+  applied: boolean; reason: string; startedAffected?: string[]; changes: SprintRevisionChange[]; held: string[]; updated: string[]; added: string[];
 };
 export type LiveSprintGraph = { contractVersion: 1; sprintId: string; graphRevision: string; complete: boolean; members: LiveSprintMember[]; priority: string[]; order: SprintOrder; revisions?: SprintRevision[] };
 export type WorkerStatus = "working" | "waiting_you" | "pending" | "not_started" | "paused" | "completed" | "failed" | "cancelled" | "unknown";
@@ -330,6 +332,8 @@ export type Activity = {
   refusal?: string;
 };
 export type WorkerResult = {
+  /** Present only when the submitted result recorded partial delivery and its outstanding work. */
+  objectiveStatus?: "partial"; remaining?: string[]; blockerDetail?: string;
   summary: string; checks: Check[]; reportId?: string; mock?: true;
   /** "failed" when the worker itself reported its assignment failed; absent for a finished result. */
   outcome?: "failed";
@@ -396,6 +400,7 @@ export type PlanNode = { id: string; title: string; who: string; workerId: strin
 export type DecisionTarget = { kind: "task"; taskId: string; title: string } | { kind: "report"; reportId: string; role: string } | { kind: "rule"; path: string };
 export type Decision = {
   id: string; kind: "question" | "permission"; from: string; workerId: string | null; at: number | null;
+  draftBinding?: { executionId: string; ownerEpoch: string; sessionId: string; requirementRevision: string };
   /** The runtime's resolved task language, when available in the question projection. */
   language?: "ru" | "en";
   /** `sub` says what choosing the option does; `recommended` marks the runtime's recommended answer. */
@@ -557,7 +562,8 @@ export type WorkspaceCommand =
   | { type: "stop_task"; taskId: string; confirmed: boolean; now?: number }
   | { type: "set_task_settings"; taskId: string; settings: Partial<TaskSettings> }
   | { type: "close_task"; taskId: string; confirmed: boolean; now: number } & (
-      { choice: "as_is" | "cancel" | "external" | "already_in_target" | "remove_worktree" }
+      { choice: "as_is" | "cancel" | "already_in_target" | "remove_worktree" }
+      | { choice: "external"; executionId?: string; expectedVersion?: string }
       | { choice: "unconfirmed"; executionId: string; expectedVersion: string }
     )
   | { type: "rerun_check"; taskId: string; digest: string; checkIndex: number }
@@ -595,7 +601,7 @@ export type WorkspaceCommand =
   | { type: "materialize_plan"; sprintId: string; version: number; now?: number }
   | { type: "cancel_planning" | "resume_planning"; sprintId: string }
   | { type: "rename_sprint"; sprintId: string; title: string }
-  | { type: "close_sprint"; sprintId: string; confirmed: boolean }
+  | { type: "close_sprint"; projectId?: string; sprintId: string; confirmed: boolean }
   /** Merges the shared sprint worktree branch into the sprint target once, then removes that worktree. */
   | { type: "merge_sprint"; sprintId: string; confirmed: boolean }
   | { type: "delete_sprint"; projectId: string; sprintId: string; confirmed: boolean }

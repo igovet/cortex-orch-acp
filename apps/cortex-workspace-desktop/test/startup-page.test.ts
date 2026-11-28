@@ -29,3 +29,14 @@ it("has no inline style element, so the code editor and terminal keep their styl
   expect(html).not.toMatch(/<style[\s>]/i);
   expect(html).not.toMatch(/\sstyle=/i);
 });
+
+it.each(["desktop", "android"])("resolves the %s native entry from nested conversation URLs", async platform => {
+  const { resolveConfig } = await import("vite");
+  const root = at(`../../cortex-workspace-${platform}/`);
+  const config = await resolveConfig({ root, configFile: root + "vite.config.ts", logLevel: "silent" }, "build");
+  for (const route of ["/m/local/t/task", "/m/local/t/task/workers/worker"]) {
+    const document = new URL(route, "https://tauri.localhost");
+    const asset = new URL(config.base + "assets/index.js", document);
+    expect(asset.pathname).toBe("/assets/index.js");
+  }
+});

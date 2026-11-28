@@ -11,7 +11,7 @@
 //! verifies the pass as `revision_binding: {kind: "work_set"}`. Files outside the
 //! set (another task's concurrent work) may differ; that is the binding's limit.
 use cortex_core::{
-    lifecycle::worker_checks, scheduler::policy, store::executor::StoreExecutor, CoreError,
+    lifecycle::worker_checks, scheduler::policy, CoreError,
     CoreResult, Store,
 };
 use serde_json::Value;
@@ -21,7 +21,6 @@ use std::{
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 /// A work set with more files or bytes than this is not hashed: such a run binds
@@ -85,6 +84,16 @@ fn listed(root: &Path, roots: &BTreeSet<String>) -> Option<BTreeSet<String>> {
 /// listed as a file, an unreadable entry).
 pub(crate) fn state(root: &Path, path: &str, budget: &mut u64) -> Option<String> {
     let at = root.join(path);
+    let mut parent = at.parent()?;
+    // A lexical in-scope path may traverse a symlink outside the checkout.
+    // An absent descendant still binds to absence under its nearest parent.
+    loop {
+        match parent.canonicalize() {
+            Ok(real) if real.starts_with(root) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => parent = parent.parent()?,
+            _ => return None,
+        }
+    }
     let meta = match at.symlink_metadata() {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some("absent".into()),
@@ -118,7 +127,14 @@ pub(crate) fn state(root: &Path, path: &str, budget: &mut u64) -> Option<String>
         read += n as u64;
         hasher.update(&buffer[..n]);
     }
-    if read > *budget {
+    let unchanged = |observed: &std::fs::Metadata| {
+        (observed.dev(), observed.ino(), observed.mode(), observed.len(), observed.ctime(), observed.ctime_nsec())
+            == (meta.dev(), meta.ino(), meta.mode(), meta.len(), meta.ctime(), meta.ctime_nsec())
+    };
+    if read > *budget
+        || !unchanged(&reader.get_ref().metadata().ok()?)
+        || !unchanged(&at.symlink_metadata().ok()?)
+    {
         return None;
     }
     *budget -= read;
@@ -181,60 +197,6 @@ pub(crate) async fn observe(root: PathBuf, work_set: Vec<String>) -> Option<Stri
         .ok()
         .flatten()
 }
-/// After a launched `command_run`, wait until its process ended and its receipt
-/// settled, observe the work set again and retain both observations. An unsettled
-/// receipt (an unknown outcome, a later re-settle) records nothing: its observation
-/// could precede the end of the process.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn finish(
-    executor: Arc<StoreExecutor>,
-    running: crate::native_commands::Running,
-    task: String,
-    assignment: String,
-    reference: String,
-    root: PathBuf,
-    work_set: Vec<String>,
-    start: String,
-    checkout: Option<Value>,
-) {
-    tokio::spawn(async move {
-        let done = running.lock().await.get(&reference).map(|r| r.done.clone());
-        if let Some(mut done) = done {
-            if done.wait_for(|d| *d).await.is_err() {
-                return;
-            }
-        }
-        let (t, r) = (task.clone(), reference.clone());
-        let Ok(settled) = executor.read(move |db| {
-            Ok(db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND operation='command_run'
-                 AND json_extract(result_json,'$.tool_call_ref')=? AND json_extract(result_json,'$.settled')=1)",
-                (&t, &r),
-                |row| row.get::<_, bool>(0),
-            )?)
-        }) else {
-            return;
-        };
-        if !matches!(settled.await, Ok(Ok(true))) {
-            return;
-        }
-        let Some(end) = observe(root, work_set.clone()).await else {
-            return;
-        };
-        if let Ok(written) = executor.publication(move |store| {
-            if let Some(checkout) = &checkout {
-                if !crate::native_project::retained_checkout_matches(store, &task, checkout)? {
-                    return Ok(());
-                }
-            }
-            store.write(|db| worker_checks::record_work_set_tx(
-                db, &task, &reference, &assignment, &work_set, &start, &end,
-            ))
-        }) {
-            let _ = written.await;
-        }
-    });
-}
 /// The verified work-set binding of a cited passed run at submission: its retained
 /// observation is stable, belongs to this assignment, the set's files are unchanged
 /// now, and this assignment wrote nothing outside the set since the run started.
@@ -267,7 +229,8 @@ pub(crate) fn binding_at_submission(
         Some(_) => return Ok(None),
         None => {
             let root = store.key().root();
-            if store.read(|db| Ok(crate::native_project::task_root(db, task)? != root))? {
+            if store.read(|db| Ok(crate::native_project::task_root(db, task)? != root
+                || cortex_core::workspace::worktrees::assignments::root_on(db, task, assignment)?.is_some()))? {
                 return Ok(None);
             }
             root.to_path_buf()

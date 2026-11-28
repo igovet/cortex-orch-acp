@@ -51,9 +51,10 @@ pub(crate) mod side_chat;
 pub(crate) mod sprint_graph;
 mod sprint_dag;
 pub(crate) mod sprint_live;
+pub(crate) mod sprint_deliverables;
 pub(crate) mod sprint_files;
 pub(crate) mod sprint_revision;
-mod sprint_materialize;
+pub(crate) mod sprint_materialize;
 pub(crate) mod sprint_result;
 mod task_actions;
 pub(crate) mod task_rework;
@@ -136,6 +137,62 @@ fn worktree_directory(state: &std::path::Path) -> cortex_core::CoreResult<std::p
         return Err(CoreError::Refused("unsafe_worktree_root"));
     }
     Ok(directory)
+}
+
+pub(crate) fn prepare_assignment_checkout(
+    store: &cortex_core::Store,
+    state: Option<&std::path::Path>,
+    task: &str,
+    owner: &cortex_core::ownership::OwnerEpoch,
+    assignment: &str,
+    engine_supported: bool,
+) -> cortex_core::CoreResult<bool> {
+    use cortex_core::{workspace::worktrees::assignments, CoreError};
+    let selected = store.read(|db| assignments::selected(db, task, assignment))?;
+    if !selected {
+        return Ok(true);
+    }
+    let defer = |reason| {
+        store.write(|db| assignments::defer(db, task, owner, assignment, reason))?;
+        Ok(false)
+    };
+    if !engine_supported {
+        return defer("worktree_engine_route_unavailable");
+    }
+    let Some(state) = state else { return defer("worktree_host_unavailable"); };
+    if store.read(|db| assignments::resolve_on(store.key(), db, task, owner, assignment))?.is_some() {
+        return Ok(true);
+    }
+    let root = store.key().root();
+    let lock = settings::Lock::try_new(state, &git::repo_lock(root))
+        .map_err(|e| CoreError::Refused(e.code))?;
+    let Some(_repo) = lock else { return defer("assignment_worktree_target_busy"); };
+    if !assignments::eligible_target(store, task, owner, assignment)? {
+        return defer("assignment_worktree_conflict");
+    }
+    let directory = match worktree_directory(state) {
+        Ok(directory) => directory,
+        Err(error) => return defer(error.code()),
+    };
+    assignments::provision(store, task, owner, assignment, &directory)?;
+    Ok(true)
+}
+
+pub(crate) fn settle_assignment_checkouts(
+    store: &cortex_core::Store,
+    state: Option<&std::path::Path>,
+    task: &str,
+    owner: &cortex_core::ownership::OwnerEpoch,
+) -> cortex_core::CoreResult<()> {
+    use cortex_core::{workspace::worktrees::assignments, CoreError};
+    if !store.read(|db| assignments::unsettled(db, task))? {
+        return Ok(());
+    }
+    let state = state.ok_or(CoreError::Refused("worktree_host_unavailable"))?;
+    let _repo = settings::Lock::try_new(state, &git::repo_lock(store.key().root()))
+        .map_err(|e| CoreError::Refused(e.code))?
+        .ok_or(CoreError::Refused("assignment_worktree_target_busy"))?;
+    assignments::integrate_ready(store, task, owner)
 }
 
 /// Operations that need a registered project.
@@ -243,6 +300,7 @@ pub struct Helper {
     /// The machine's own settings (models, efforts, storage). Local file reads that must never queue behind a slow repository.
     settings: std::sync::Arc<Semaphore>,
     pub(super) actions: std::sync::Arc<Semaphore>,
+    owner_accepts: std::sync::Arc<Semaphore>,
     pub(super) sprint_links: std::sync::Arc<Semaphore>,
 }
 impl Default for Helper {
@@ -252,6 +310,7 @@ impl Default for Helper {
             inspections: std::sync::Arc::new(Semaphore::new(2)),
             settings: std::sync::Arc::new(Semaphore::new(2)),
             actions: std::sync::Arc::new(Semaphore::new(4)),
+            owner_accepts: std::sync::Arc::new(Semaphore::new(1)),
             sprint_links: std::sync::Arc::new(Semaphore::new(4)),
         }
     }
@@ -781,11 +840,15 @@ impl crate::Service {
         }
         // Reads, settings and repository inspections answer the owner's screen and start
         // no task process: they run at the session's disk priority (`io_priority`), and
-        // they have no deadline (`owner_read`). Only an action's deadline is used below.
+        // they have no deadline (`owner_read`). Manual Accept also waits for its
+        // reply, while remaining an action with its own bounded admission lane.
         let owner_read = owner_read(&call.op, &call.params);
+        let owner_accept = workspace_protocol::read::owner_accept_op(&call.op, &call.params);
+        let wait_for_reply = owner_read || owner_accept;
         let deadline = tokio::time::Instant::now() + HELPER_DEADLINE;
         // Every read has a lane of its own, so a slow read never holds an action's slot.
         let slots = match call.op.as_str() {
+            _ if owner_accept => self.helper.owner_accepts.clone(),
             "overview" | "project.config.read" | "config.read" => self.helper.settings.clone(),
             "repo.snapshot" => self.helper.inspections.clone(),
             "product.sprint" if call.params["action"] == "live_graph" => self.helper.reads.clone(),
@@ -802,8 +865,8 @@ impl crate::Service {
             // unbounded queue of threads blocked on the machine-state lock.
             self.helper.sprint_links.clone().try_acquire_owned()
                 .map_err(|_| failure("machine_busy"))?
-        } else if owner_read {
-            // A read queues for its lane however long that takes: never `machine_busy`.
+        } else if wait_for_reply {
+            // Owner reads and manual Accept wait for their own lane.
             slots.acquire_owned().await.map_err(|_| failure("service_stopping"))?
         } else {
             tokio::time::timeout_at(deadline, slots.acquire_owned())
@@ -814,6 +877,8 @@ impl crate::Service {
         let config = self.config.clone();
         let state = config.state_dir.clone();
         let editor = self.editor.clone();
+        let observe_relocation = (call.op == "repo.file.lease.acquire")
+            .then(|| self.relocation_observer(call.project_id.clone().unwrap_or_default()));
         // A sprint deletion pass can outlive the caller that asked for it (its bounded owner
         // action may answer first, and a purge in progress is never cut short). Whatever it
         // changed is announced when it ends, so no screen keeps a read from part-way through.
@@ -827,6 +892,9 @@ impl crate::Service {
             let _disk = owner_read.then(cortex_core::io_priority::raised);
             let _waits = owner_read.then(context::owner_read);
             let result = (|| {
+                if owner_accept && send.is_closed() {
+                    return Err(failure("machine_tool_cancelled"));
+                }
                 let intent = if matches!(call.op.as_str(), "git" | "git_init") {
                     if send.is_closed() { return Err(failure("machine_tool_cancelled")); }
                     match ledger::Intent::begin(&state, &call.op, call.project_id.as_deref().unwrap_or(""), root.as_deref(), &call.params) {
@@ -837,9 +905,9 @@ impl crate::Service {
                 } else {None};
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
                 let result = runtime.block_on(async {
-                    // An owner read runs until it completes; an action until its deadline.
+                    // Other actions still use the ordinary deadline.
                     let until = async {
-                        if owner_read { std::future::pending::<()>().await } else { tokio::time::sleep_until(deadline).await }
+                        if wait_for_reply { std::future::pending::<()>().await } else { tokio::time::sleep_until(deadline).await }
                     };
                     tokio::select! {
                         reply = async {
@@ -849,7 +917,7 @@ impl crate::Service {
                                 let root = root.as_deref().ok_or_else(|| native::refuse("project_required", "Unknown project."))?;
                                 let git = git::Git::for_service(&config);
                                 let mut git = if owner_read { git.owner_read() } else { git };
-                                editor::run(&editor, &call.op, root, &state, project, &call.params, &mut git).await
+                                editor::run(&editor, &call.op, root, &state, project, &call.params, &mut git, observe_relocation).await
                             } else if call.op == "product.task" && call.params["action"] == "archive" {
                                 let root = root.as_deref().ok_or_else(|| native::refuse("project_required", "Unknown project."))?;
                                 task_actions::run_archive(root, project, &state, &call.params, archive_runtime.as_ref()).await
@@ -860,7 +928,7 @@ impl crate::Service {
                         _ = until => Err(native::refuse("machine_tool_timeout",
                             "The operation deadline expired. A write may have completed; inspect before retrying.")),
                         _ = send.closed() => Err(native::refuse("machine_tool_cancelled",
-                            "The caller disconnected. Inspect Git before retrying a write.")),
+                            "The caller disconnected. Read the current state before retrying a write.")),
                     }
                 });
                 // The retained wrapper emitted no JSON for AttributeError; clients
@@ -889,8 +957,8 @@ impl crate::Service {
             })();
             let _ = send.send(result);
         })?;
-        // The helper answers by its own deadline (an action) or when it completes (a read).
-        let reply = if owner_read {
+        // Manual Accept and owner reads wait for the helper's reply.
+        let reply = if wait_for_reply {
             receive.await.map_err(|_| failure("machine_tool_failed"))??
         } else {
             tokio::time::timeout_at(deadline, receive)
@@ -992,6 +1060,58 @@ mod lane_tests {
         *READ_DELAY.lock().unwrap() = None;
         assert!(began.elapsed() >= HELPER_DEADLINE * 2);
         assert_eq!(reply.unwrap()["ok"], true);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_accept_waits_past_the_previous_queue_and_execution_deadline() {
+        let base = std::env::temp_dir().join(format!("cw-slow-accept-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let project = base.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let service = Service::bind(Config {
+            runtime_dir: base.join("runtime"),
+            state_dir: base.join("state"),
+            allowed_root: base.clone(),
+            launch: LaunchSpec::bare(),
+            request_timeout: Duration::from_secs(30),
+            shutdown_timeout: Duration::from_millis(100),
+            event_capacity: 16,
+        }).await.unwrap();
+        let registered = service.register(&project, "Disposable").await.unwrap();
+        let project_id = registered["projectId"].as_str().unwrap().to_owned();
+        let accept = || service.machine(MachineCall {
+            op: "product.task".into(),
+            project_id: Some(project_id.clone()),
+            params: json!({"action":"accept"}),
+        });
+        let held = service.helper.owner_accepts.clone().acquire_owned().await.unwrap();
+        let ordinary = service.helper.actions.clone().acquire_many_owned(4).await.unwrap();
+        let (reply, ()) = tokio::join!(accept(), async {
+            tokio::time::sleep(HELPER_DEADLINE * 2).await;
+            drop(held);
+        });
+        assert_eq!(reply.unwrap()["code"], "invalid_task");
+        *READ_DELAY.lock().unwrap() = Some(("product.task", Duration::from_millis(300)));
+        let (result, ()) = tokio::join!(accept(), tokio::time::sleep(HELPER_DEADLINE * 2));
+        *READ_DELAY.lock().unwrap() = None;
+        assert_eq!(result.unwrap()["code"], "invalid_task");
+
+        let held = service.helper.owner_accepts.clone().acquire_owned().await.unwrap();
+        let (mut peer, socket) = tokio::net::UnixStream::pair().unwrap();
+        let client = tokio::spawn(service.clone().client(socket));
+        crate::write_frame(&mut peer, &json!({
+            "jsonrpc":"2.0","id":1,"method":"machine.call",
+            "params":{"op":"product.task","projectId":project_id,"params":{"action":"accept"}}
+        })).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!client.is_finished());
+        drop(peer);
+        tokio::time::timeout(Duration::from_secs(1), client).await.unwrap().unwrap().unwrap();
+        drop(held);
+        assert_eq!(service.helper.owner_accepts.available_permits(), 1);
+        drop(ordinary);
         let _ = std::fs::remove_dir_all(&base);
     }
 

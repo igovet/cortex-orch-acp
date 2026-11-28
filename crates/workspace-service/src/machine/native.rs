@@ -151,11 +151,16 @@ pub fn product_path(state: &Path, project: &str) -> Result<PathBuf> {
     Ok(state.join("product").join(format!("{project}.json")))
 }
 pub fn product(state: &Path, project: &str) -> Result<Value> {
+    let mut saved = settings::read_json(&product_path(state, project)?, json!({}))?;
+    super::sprint_materialize::resolve_publication(project, &mut saved)?;
+    normalize_product(state, project, saved)
+}
+
+pub(super) fn normalize_product(state: &Path, project: &str, mut saved: Value) -> Result<Value> {
     // Unmarked files predate Hybrid: their "automatic" meant queueing and
     // acceptance, never automatic integration. The next product write persists
     // the migrated values and marker together in the same atomic replacement.
     let mut value = json!({"tasks":{},"sprints":[],"drafts":{},"messages":[],"comments":{}});
-    let mut saved = settings::read_json(&product_path(state, project)?, json!({}))?;
     // Inline bodies saved by an earlier version move to private files once.
     super::attachment_files::migrate(state, project, &mut saved)?;
     if saved.get("sprintRunModeVersion").is_none() {
@@ -290,8 +295,8 @@ pub async fn run(
             // The profile's routes as they are now; unreadable settings leave
             // every task on the owner's default coordinator.
             let resolver = super::config_read::environment(config).ok().and_then(|env| {
-                let key = super::context::key(root).ok()?;
-                crate::native_routes::RouteResolver::load(root, &key.directory(), env).ok()
+                let directory = super::context::directory(root).ok()?;
+                crate::native_routes::RouteResolver::load(root, &directory, env).ok()
             });
             super::sprint_materialize::materialize_routed(root, project, state, params, &|c| {
                 resolver.as_ref()?.sprint_route(c).ok().flatten()
@@ -301,8 +306,8 @@ pub async fn run(
             let root = root.ok_or_else(|| refuse("project_required", "Unknown project."))?;
             // Revision-added tasks route by complexity like a created sprint's tasks.
             let resolver = super::config_read::environment(config).ok().and_then(|env| {
-                let key = super::context::key(root).ok()?;
-                crate::native_routes::RouteResolver::load(root, &key.directory(), env).ok()
+                let directory = super::context::directory(root).ok()?;
+                crate::native_routes::RouteResolver::load(root, &directory, env).ok()
             });
             super::sprint_live::owner_action(root, state, project, params, &|c| {
                 resolver.as_ref()?.sprint_route(c).ok().flatten()

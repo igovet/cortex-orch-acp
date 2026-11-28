@@ -1,3 +1,5 @@
+mod project_stores;
+
 use std::sync::Arc;
 use tokio::io::BufReader;
 use workspace_service::native_routes::{ConfiguredRoutes, RouteEnvironment};
@@ -23,6 +25,16 @@ async fn acp_main() {
         );
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "project-stores") {
+        match project_stores::run(&args[1..]) {
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                eprintln!("cortex-acp: {}", error.code());
+                eprintln!("Usage: cortex-acp project-stores list | delete STORE_ID --confirm | cleanup-original STORE_ID --confirm | return-to-project PROJECT STORE_ID --confirm");
+                std::process::exit(1);
+            }
+        }
+    }
     // Same executable serves the ancestry-authenticated, secret-free MCP relay.
     let result = if args.len() == 1 {
         cortex_engine::broker::relay(std::path::Path::new(&args[0]))
@@ -53,6 +65,10 @@ async fn acp_main() {
                             std::process::exit(1);
                         }
                     }
+                }
+                if let Err(error) = workspace_service::store_locations::configure(&environment.state) {
+                    eprintln!("cortex_acp: project store root unavailable: {}", error.code());
+                    std::process::exit(1);
                 }
                 // Detached like Python's daemon thread; it ends with the process.
                 let _first_run = cortex_acp::startup::first_run(&environment);

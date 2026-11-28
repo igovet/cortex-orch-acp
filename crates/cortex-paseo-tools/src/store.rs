@@ -224,11 +224,16 @@ pub fn placeholders(count: usize) -> String {
     vec!["?"; count].join(",")
 }
 
-/// Open `<root>/.cortex/cortex.sqlite3` read-only and run `body` in one
+/// Open the configured project store read-only and run `body` in one
 /// query-only snapshot. Any open refusal is reported as `Fail::Sql` (the
 /// reader cannot read the store) with its code on stderr for diagnostics.
 pub fn read<T>(root: &str, body: impl FnOnce(&Connection) -> Result<T, Fail>) -> Result<T, Fail> {
-    let key = ProjectKey::new(root, StoreChannel::Release).map_err(refused)?;
+    let channel = if workspace_protocol::channel::current().is_dev() {
+        StoreChannel::Dev
+    } else {
+        StoreChannel::Release
+    };
+    let key = project_key(root, channel).map_err(refused)?;
     if key.root().to_str() != Some(root) {
         // A linked worktree's own directory names another store.
         eprintln!("cortex-paseo-tools: project_root_not_logical");
@@ -243,6 +248,16 @@ pub fn read<T>(root: &str, body: impl FnOnce(&Connection) -> Result<T, Fail>) ->
         })
         .map_err(refused)?;
     outcome.unwrap_or(Err(Fail::Sql))
+}
+
+pub(crate) fn project_key(root: &str, channel: StoreChannel) -> cortex_core::CoreResult<ProjectKey> {
+    let environment = workspace_service::native_routes::RouteEnvironment::for_user()?;
+    let state = if channel == StoreChannel::Dev {
+        workspace_protocol::channel::dev().state_dir(&environment.state).join("state")
+    } else {
+        environment.state
+    };
+    cortex_core::store::StoreRoot::new(&state, channel)?.project_key(root)
 }
 
 fn refused(error: cortex_core::CoreError) -> Fail {

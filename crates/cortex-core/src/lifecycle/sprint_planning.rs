@@ -57,7 +57,7 @@ pub fn require_read_only_plan(db: &Connection, task: &str, plan: &Value) -> Core
         .as_array()
         .into_iter()
         .flatten()
-        .any(|n| !policy::read_only(n["role"].as_str().unwrap_or(""), "execution"));
+        .any(|n| !policy::plan_node_read_only(n));
     if writes {
         return refuse("read_only_task_writer_refused");
     }
@@ -346,12 +346,15 @@ pub fn verify_tx(db: &Transaction<'_>, task: &str) -> CoreResult<bool> {
     let (review_event, reviewed) = super::completion::review_binding_tx(db, task)?;
     let review: Option<String> = db
         .query_row(
-            "SELECT node_id FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='review'
+            "SELECT CASE WHEN status='completed' AND json_extract(result_json,'$.verdict')='APPROVE'
+                    THEN node_id ELSE NULL END
+             FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='review'
              ORDER BY rowid DESC LIMIT 1",
             (task, revision),
             |r| r.get(0),
         )
-        .optional()?;
+        .optional()?
+        .flatten();
     let plan = latest(db, task)?.map(|(id, _)| id);
     let scheduled: Option<i64> = match &review {
         Some(node) => db
@@ -390,11 +393,28 @@ pub fn verify_tx(db: &Transaction<'_>, task: &str) -> CoreResult<bool> {
 pub fn latest(db: &Connection, task: &str) -> CoreResult<Option<(i64, Value)>> {
     let row: Option<(i64, String)> = db
         .query_row(
-            "SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type=? ORDER BY id DESC LIMIT 1",
+            "SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type=? AND actor='runtime' ORDER BY id DESC LIMIT 1",
             (task, SUBMITTED),
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
     row.map(|(id, raw)| Ok((id, serde_json::from_str::<Value>(&raw)?["tasks"].clone())))
         .transpose()
+}
+
+/// The runtime verification receipt must identify the newest submission. A
+/// completion or verification for an earlier plan never publishes a revision.
+pub fn verified_latest(db: &Connection, task: &str) -> CoreResult<Option<(i64, Value)>> {
+    let Some((event, tasks)) = latest(db, task)? else {
+        return Ok(None);
+    };
+    let verified: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id>?
+         AND type='VERIFICATION_PASSED' AND actor='runtime'
+         AND json_extract(payload_json,'$.runtime')='sprint_plan'
+         AND json_extract(payload_json,'$.plan_event')=?)",
+        (task, event, event),
+        |row| row.get(0),
+    )?;
+    Ok(verified.then_some((event, tasks)))
 }

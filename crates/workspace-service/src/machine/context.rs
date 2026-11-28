@@ -14,6 +14,9 @@ pub(super) fn core(error: CoreError) -> Refused {
 pub fn key(root: &Path) -> Result<cortex_core::ProjectKey> {
     crate::native_runtime::key(root).map_err(core)
 }
+pub(super) fn directory(root: &Path) -> Result<PathBuf> {
+    crate::store_locations::directory(key(root)?).map_err(core)
+}
 thread_local! {
     /// Set on the thread that serves one of the owner's screen reads (see `machine::owner_read`).
     static OWNER_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -85,36 +88,57 @@ pub(super) fn set_worktree(record: &mut Value, w: &cortex_core::workspace::workt
 }
 
 pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) -> Result<Value> {
-    let mut value = super::native::product(state, project)?;
-    if !value["tasks"].is_object() {
-        return Err(refuse("state_unreadable", "Saved tasks are unreadable."));
-    }
-    let options = match open(root, OpenMode::LiveReadOnly)? {
-        None => Vec::new(),
+    let (mut value, options) = match open(root, OpenMode::LiveReadOnly)? {
+        None => (super::native::product(state, project)?, Vec::new()),
         Some(store) => {
-            let rows = store.read(|db| {
-            let mut query = db.prepare("SELECT t.task_id,o.options_json FROM workspace_tasks t
-                JOIN workspace_task_options o USING(task_id) WHERE t.project_id=? ORDER BY t.sequence LIMIT 10001")?;
-            let rows = query.query_map([project], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
-                .collect::<std::result::Result<Vec<_>,_>>()?;
-            if rows.len() > 10000 { return Err(CoreError::Refused("machine_reply_too_large")); }
-            rows.into_iter().map(|(task, options)| {
-                let owned = cortex_core::workspace::worktrees::owned_on(db, project, &task)?;
-                let unavailable = owned.as_ref().and_then(|_| {
-                    cortex_core::workspace::worktrees::desktop_checkout_on(
-                        db, store.key(), project, Some(&task), None
-                    ).err()
-                });
-                let missing = unavailable.is_some();
-                let cleanup_retry_ready = if owned.is_some() {
-                    cortex_core::workspace::worktrees::close_cleanup_retry_ready_on(
-                        db, store.key(), project, &task,
-                        !missing || matches!(unavailable, Some(CoreError::Refused("worktree_closed"))),
-                    )?
-                } else { None };
-                Ok((task, options, owned, missing, cleanup_retry_ready))
-            }).collect::<CoreResult<Vec<_>>>()
-        }).map_err(core)?;
+            let path = product_path(state, project)?;
+            let mut snapshot = None;
+            for _ in 0..3 {
+                let (mut saved, file) = settings::read_json_snapshot(&path, json!({}))?;
+                let observed = store.read(|db| {
+                    let mut query = db.prepare("SELECT t.task_id,o.options_json FROM workspace_tasks t
+                        JOIN workspace_task_options o USING(task_id) WHERE t.project_id=? ORDER BY t.sequence LIMIT 10001")?;
+                    let rows = query.query_map([project], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
+                        .collect::<std::result::Result<Vec<_>,_>>()?;
+                    if rows.len() > 10000 { return Err(CoreError::Refused("machine_reply_too_large")); }
+                    // A publication can replace the JSON before committing the options.
+                    // Read its receipt in this SQLite snapshot and retry if the file was
+                    // replaced while this snapshot was being established.
+                    if !settings::json_snapshot_is_current(&path, file.as_ref())
+                        .map_err(|e| CoreError::Refused(e.code))?
+                    {
+                        return Ok(None);
+                    }
+                    super::sprint_materialize::resolve_publication_on(db, project, &mut saved)?;
+                    let options = rows.into_iter().map(|(task, options)| {
+                        let owned = cortex_core::workspace::worktrees::owned_on(db, project, &task)?;
+                        let unavailable = owned.as_ref().and_then(|_| {
+                            cortex_core::workspace::worktrees::desktop_checkout_on(
+                                db, store.key(), project, Some(&task), None
+                            ).err()
+                        });
+                        let missing = unavailable.is_some();
+                        let cleanup_retry_ready = if owned.is_some() {
+                            cortex_core::workspace::worktrees::close_cleanup_retry_ready_on(
+                                db, store.key(), project, &task,
+                                !missing || matches!(unavailable, Some(CoreError::Refused("worktree_closed"))),
+                            )?
+                        } else { None };
+                        Ok((task, options, owned, missing, cleanup_retry_ready))
+                    }).collect::<CoreResult<Vec<_>>>()?;
+                    Ok(Some(options))
+                }).map_err(core)?;
+                if let Some(options) = observed {
+                    snapshot = Some((saved, options));
+                    break;
+                }
+            }
+            let (saved, rows) = snapshot
+                .ok_or_else(|| refuse("machine_busy", "Saved project state changed. Refresh the project."))?;
+            let mut value = super::native::normalize_product(state, project, saved)?;
+            if !value["tasks"].is_object() {
+                return Err(refuse("state_unreadable", "Saved tasks are unreadable."));
+            }
             super::task_rework::project(&store, project, &mut value, false)?;
             owner_closed(&store, project, &mut value)?;
             // Files attached to answers are kept like message files. An answer recorded
@@ -124,6 +148,7 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
                 if let Ok(Some(_lock)) = settings::Lock::try_new(state, "machine.lock") {
                     let path = product_path(state, project)?;
                     let mut fresh = settings::read_json(&path, json!({}))?;
+                    super::sprint_materialize::resolve_publication(project, &mut fresh)?;
                     if super::attachment_files::answer_references(
                         &store, state, project, &mut fresh,
                     )? {
@@ -131,9 +156,12 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
                     }
                 }
             }
-            rows
+            (value, rows)
         }
     };
+    if !value["tasks"].is_object() {
+        return Err(refuse("state_unreadable", "Saved tasks are unreadable."));
+    }
     let has_git = git.is_repo(root).await?;
     let mut branch = None;
     let mut base = None;
@@ -231,20 +259,26 @@ pub(super) fn owner_closed(store: &Store, project: &str, value: &mut Value) -> R
     let closed = store
         .read(|db| cortex_core::projections::owner_closed(db, project, &key))
         .map_err(core)?;
-    for (task, at) in closed {
+    for (task, at, external) in closed {
         let record = &mut value["tasks"][&task];
         if !record.is_object() {
             *record = json!({});
         }
-        if !record["status"].is_null() || !record["archive"].is_null() {
+        if (!external && !record["status"].is_null()) || !record["archive"].is_null() {
             continue;
         }
         record["status"] = json!("done");
-        if record["closedAs"].is_null() {
+        if external {
+            record["closedAs"] = json!("external");
+            record["acceptance"] = Value::Null;
+            record["integration"] = Value::Null;
+            record["automaticReady"] = json!(false);
+            record["work"] = json!("unmerged");
+        } else if record["closedAs"].is_null() {
             record["closedAs"] = json!("as_is");
         }
         record["notVerifiedByCortex"] = json!(true);
-        if record["doneAt"].is_null() {
+        if external || record["doneAt"].is_null() {
             record["doneAt"] = json!(at
                 .and_then(|n| u64::try_from(n).ok())
                 .unwrap_or_else(now_ms));

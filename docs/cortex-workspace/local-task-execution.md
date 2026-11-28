@@ -304,6 +304,11 @@ automated blockers or outcome counts. The persisted acceptance retains the
 owner's original version/digest values, exact open counts and a fresh legacy
 checkout digest. Informational answers need no invented verification.
 
+Manual Accept waits for the service's answer on its own lane, which runs one
+acceptance at a time. Git, checkout observation and lock limits still report
+their own failures. A lost connection ends the caller's wait. Read the current
+result and saved decision before trying Accept again.
+
 The machine lock protects the overlay. Acceptance revalidates under Core's
 immediate writer transaction through the private JSON replacement, preventing
 Start/owner-state changes between validation and save. It neither completes the
@@ -600,7 +605,7 @@ replayed after uncertainty. Pause revokes old channels; resume requires a new
 continuation rather than reviving the old engine. Capacity remains held until
 an owned wait confirms process exit; unknown effects remain ambiguous.
 
-Native sessions compose the canonical coordinator and all 23 worker profiles from
+Native sessions compose the canonical coordinator and the five worker profiles from
 an embedded generated bundle. Required shared skills are inlined, conditional
 skills/references remain available through role-authorized `read_skill`, and only
 Codex receives the schema-derived served-tool supplement. Check freshness with
@@ -1242,9 +1247,28 @@ A task that has never started offers **Edit task…** in its title bar and board
 
 **New task** on a created sprint adds a draft even while its queue is active. It inherits the sprint checkout choice. A new member joins the sprint's roster with no links and the lowest priority; existing tasks and dependencies are not rewritten, and its links and priority can then be edited (see [Live sprint graph and execution order](#live-sprint-graph-and-execution-order)). Editing a pending member changes only its request, not the original planning document or dependency graph. Adding after queue completion leaves the queue paused until the owner continues it. If saving succeeds but linking is unconfirmed, the UI opens the saved task and explains the partial effect rather than creating another copy.
 
-**Close sprint…** is visible beside the sprint actions (in the sprint's actions menu when the title band is narrow) and asks for confirmation. It stops the queue and planner and moves the sprint and its member tasks to the Archive together. A task that has started must be Done; conflicting completion records or a merge or pull-request operation still running also block closure. The refusal names the blocking tasks, and nothing moves to the Archive until the blockers are resolved. Not-started tasks, including queued slots, are archived as drafts. Done tasks keep their completion, and already archived members stay archived. Closure does not accept, cancel, merge, delete or discard work.
+**Close sprint…** asks for confirmation. It pauses the queue, stops the planner
+and moves the sprint and its members to the Archive together. The service checks each member against
+its registered project and current execution. Started work must have recorded
+completion or an explicit owner closure, and its processes and effects must
+have settled. Verified completion requires matching current check receipts.
+Close as is, external completion and cancellation retain their owner disposition
+without certifying checks. Missing or conflicting records and active merge or
+pull-request operations block the whole archive. The refusal names the blocking
+members. Confirmed drafts are archived as drafts, and already archived members
+keep their archive. Closing a sprint leaves the checkout and Git branches in place.
 
 The closed sprint leaves active lists and appears under **Archive → Closed sprints** with its retained Summary. Restore returns an archived member to the project without a sprint; restoring an unfinished task never starts it. A closed sprint cannot be reopened, restart its queue or accept new members. Sprints closed on older versions are not retroactively archived with their tasks.
+
+Sidebar sprint rows show the count of completed members out of the saved
+membership. The tooltip and accessible name give the counts working, waiting
+for the owner, and not started. Review and merge steps that need the owner
+count as waiting, as does a working member with an open actionable question.
+The completed count follows the board's Done column. Work completed outside
+Cortex and work closed as is without verification are disclosed as subsets of
+Done. The separate Closed, not verified column has its own count. When some
+member statuses are unavailable, the displayed completed count is a lower
+bound. The sidebar uses the project data it already holds.
 
 Age-based cleanup of a Done task newly archived by sprint closure counts from that task's completion: add the normal auto-archive delay configured at closure, then the machine's archive retention period. Closing the sprint does not reset that clock or cut out the normal auto-archive delay. If completion is unknown, age-based cleanup is unavailable. Archived drafts have no age-based cleanup; explicit deletion still requires the existing checkout and unmerged-work safeguards. Archiving never removes a worktree or a branch.
 
@@ -1274,7 +1298,7 @@ Only a clean worktree with recorded app-creation provenance and a matching Git c
 
 ## Live sprint graph and execution order
 
-A created sprint has two graphs. The **approved plan** (`Plan vN`) is the plan version that Create tasks materialized; it is read-only history in the desktop and is not written by the live-graph actions. The pre-existing generic sprint patch can still write `plan`, `history` and `materializedVersion` unless the service is separately hardened. The **live sprint** is what the service actually runs: every task bound to the sprint, including drafts added later with **New task**, with the dependencies saved on each task (`product.tasks[id].dependencies`). After creation the sprint page opens on **Live sprint**. **Approved plan vN** and past versions stay one press away, read-only, and keep each plan row's task state, matched to its task by stable task ID. A line on the live page says how many tasks are not matched to the plan or whose links differ from it.
+A created sprint has two graphs. The **approved plan** (`Plan vN`) is the plan version that Create tasks materialized. The service protects the materialized plan and its history from generic sprint updates. The **live sprint** is what the service actually runs: every task bound to the sprint, including drafts added later with **New task**, with the dependencies saved on each task (`product.tasks[id].dependencies`). After creation the sprint page opens on **Live sprint**. **Approved plan vN** and past versions stay one press away, read-only, and keep each plan row's task state, matched to its task by stable task ID. A line on the live page says how many tasks are not matched to the plan or whose links differ from it.
 
 **Reading.** `product.sprint` action `live_graph {sprintId}` returns the ordered roster, each member's `readStatus` (`confirmed`, `missing`, `unreadable`, `purged`), its direct prerequisites (`dependencies`, null when the member could not be read, never an empty list), `editable`, `canBePredecessor`, `approvedPlanKey`, the effective `priority` order, a `graphRevision` token and the execution `order`. A missing or unreadable member makes `complete` false; the desktop then shows a placeholder and disables every edit. The read refuses rather than clipping above 1,000 roster entries or 10,000 stored dependency entries.
 
@@ -1294,11 +1318,17 @@ The live read and both edits are owner actions of the local desktop. Paired remo
 
 When the owner changes a running sprint task (an owner message delivered to its coordinator, an owner rework request, or an owner answer to the coordinator's or a worker's question) while other tasks of the sprint are still unstarted drafts, the runtime records `SPRINT_IMPACT_CHECK_REQUIRED` for that task. A worker's replan or scope request is not such a change. At each coordinator turn of a sprint member the service records which members are still drafts with no execution identity (`SPRINT_MEMBER_BOUND`); the check is required only while one of them is left. Until a verdict for the newest trigger is recorded, completion is refused (`sprint_impact_pending`, recorded once as `SPRINT_IMPACT_PENDING`) and the coordinator's next planning or reconciling turn names the trigger.
 
-The coordinator reads the drafts with `sprint_graph` `include: "pending_descriptions"` (full descriptions, versions, links and the live `graphRevision`, in pages of about 48 KB with a cursor) and calls `sprint_revision_submit`. The tool's schema carries its contract. Verdict `unchanged` resolves the check. Verdict `revise` names the trigger, the `base_graph_revision` and up to 50 changes: `update` (an unstarted draft at its `expected_version`: title, description and/or its whole link set), `add` (a new draft with key, title, description and links to members or other new keys) and `propose_cancel`. Under the machine lock the service refuses a change of a started, finished, archived or purged task (`sprint_member_read_only`), a stale draft version (`stale_version`) or graph (`stale_graph_revision`), and runs the same ID-only validator as Create tasks and owner link edits (`dependency_self`, `dependency_missing`, `dependency_cross_sprint`, `dependency_duplicate`, `dependency_cycle`) plus the prerequisite rule (`predecessor_unavailable` for a new link to a cancelled or unavailable task). A refusal names the change and rule; the coordinator corrects it in the same turn.
+The coordinator reads the drafts with `sprint_graph` `include: "pending_descriptions"` (full descriptions, versions, links and the live `graphRevision`, in pages of about 48 KB with a cursor) and calls `sprint_revision_submit`. The tool's schema carries its contract. Verdict `unchanged` resolves the check. The coordinator can also propose a revision when work reveals a change to the remaining sprint. A revision uses the `base_graph_revision` and up to 50 changes. When an impact check is open, the coordinator supplies its newest trigger: `update` (an unstarted draft at its `expected_version`: title, description and/or its whole link set), `add` (a new draft with key, title, description and links to members or other new keys) and `propose_cancel`. Under the machine lock the service refuses a change of a started, finished, archived or purged task (`sprint_member_read_only`), a stale draft version (`stale_version`) or graph (`stale_graph_revision`), and runs the same ID-only validator as Create tasks and owner link edits (`dependency_self`, `dependency_missing`, `dependency_cross_sprint`, `dependency_duplicate`, `dependency_cycle`) plus the prerequisite rule (`predecessor_unavailable` for a new link to a cancelled or unavailable task). A refusal names the change and rule; the coordinator corrects it in the same turn.
 
-A recorded revision gets a mandatory independent review (a fresh read-only reviewer, `_sprint_revision_review_N`), which never binds the task's own review or completion and neither waits for nor blocks writers. Findings return the task to the coordinator for a new revision; after three reviewed revisions for one trigger the last one goes to the owner with its findings. While a revision waits for its review or the owner's decision, the drafts it changes are not started: the queue shows them with the reason `sprint_revision_pending` and records no hold, and independent drafts continue. An approved revision of an **Automatic** sprint is applied by the runtime: every draft change, every new draft (appended to the roster, last in priority), the saved product record and `SPRINT_REVISION_APPLIED` (with digests of the graph before and after and the replaced titles, links and descriptions) commit together or not at all, after the versions and the whole graph are checked again. An owner-chosen title is kept. In a **Hybrid** or **Manual** sprint the owner sees the card **Sprint changes from task X** (Russian interface: «Изменения спринта от задачи X») on the Live sprint page and chooses **Apply** (`product.sprint` action `apply_revision {sprintId, revisionId, expectedGraphRevision}`) or **Reject** (`reject_revision {sprintId, revisionId}`); both are local desktop actions refused to paired devices. Proposed cancellations are only shown on that card, also in Automatic (after the other changes are applied the card offers **Dismiss**); the service never cancels a task for them. Before an owner decision the service checks the drafts and the graph again, and **Apply** also names the `graphRevision` the owner saw. A revision that cannot be applied any more is recorded as refused and the coordinator submits a new one.
+A follow-up can correct a running or completed card. The new card depends on the original execution and records which card it corrects. A queued direct consumer must depend on the correction. The runtime carries forward the declared artifact contracts and rebinds queued consumers' declared inputs to the corrective card. When an affected consumer has already started and can still produce a result, the proposal must include a paired follow-up that depends on the correction. The owner decides on revisions that affect existing downstream executions in every queue mode. The original execution and its work history remain available. The reviewer receives the runtime-derived artifact contracts for the proposed state, including the corrective card’s ID and the new producer for each rebound input. The runtime compares those contracts with the candidate at application. If they have changed, or an older typed proposal was reviewed without this evidence, the proposal needs a fresh independent review before application.
 
-The trigger task's conversation shows one runtime line in the task's language when the check resolves: "Проверены оставшиеся задачи спринта: без изменений", "…: изменено N, добавлено M" or that the changes wait for the owner (English: "Checked the sprint's remaining tasks: no changes" and so on). A changed task's Details on Live sprint say "changed by task X" (Russian «изменено задачей X»), held drafts show "Waits for a sprint revision" in the order, and the sprint Summary lists the revision history. The live read (`live_graph`) carries the newest 20 revisions as `revisions` (`revisionId`, proposing `taskId`, `status`, `applied`, `reason`, `changes`, `held`, `updated`, `added`, `previous`, `findings`). Previous titles, links and descriptions are kept in the revision record; there is no separate draft-version table. Nothing here writes the approved plan, its history or `materializedVersion`, lifts Pause or deletes anything.
+Each declared output must have a current, accepted immutable worker report before producer review and verification. The runtime checks the independent review and verification proof again before completing the producer. A missing output returns the producer to its coordinator with the artifact name, version and evidence issue. Prior reports remain available for planning the repair. The queue starts a dependent when it confirms the repaired producer’s reviewed, verified output.
+
+A recorded revision gets a mandatory independent review (a fresh read-only reviewer, `_sprint_revision_review_N`), which never binds the task's own review or completion and neither waits for nor blocks writers. Findings return the task to the coordinator for a new revision; after three reviewed revisions for one trigger the last one goes to the owner with its findings. While a revision waits for its review or the owner's decision, the drafts it changes are not started: the queue shows them with the reason `sprint_revision_pending` and records no hold, and independent drafts continue. An approved revision of an **Automatic** sprint applies after review when the runtime can proceed without an owner decision: every draft change, every new draft (appended to the roster, last in priority), the saved product record and `SPRINT_REVISION_APPLIED` (with digests of the graph before and after and the replaced titles, links and descriptions) commit together or not at all, after the versions and the whole graph are checked again. An owner-chosen title is kept. In a **Hybrid** or **Manual** sprint the owner sees the card **Sprint changes from task X** (Russian interface: «Изменения спринта от задачи X») on the Live sprint page and chooses **Apply** (`product.sprint` action `apply_revision {sprintId, revisionId, expectedGraphRevision}`) or **Reject** (`reject_revision {sprintId, revisionId}`); both are local desktop actions refused to paired devices. Proposed cancellations are only shown on that card, also in Automatic (after the other changes are applied the card offers **Dismiss**); the service never cancels a task for them. Before an owner decision the service checks the drafts and the graph again, and **Apply** also names the `graphRevision` the owner saw. A revision that cannot be applied any more is recorded as refused and the coordinator submits a new one. The staged product record carries the affected overlays and roster as they were before settlement. An exact receipt commits in SQLite with the draft versions, artifact input bindings, new cards and revision event. After interruption, readers use this receipt to select the old or committed graph. An interrupted retry reuses the same corrective card identities.
+
+To request a change from the sprint Summary, open **Request a sprint revision**, choose the affected running task and send the change in its conversation. The shortcut appears in an open sprint while it has both a live working member and an unstarted draft.
+
+The trigger task's conversation shows one runtime line in the task's language when the check resolves: "Проверены оставшиеся задачи спринта: без изменений", "…: изменено N, добавлено M" or that the changes wait for the owner (English: "Checked the sprint's remaining tasks: no changes" and so on). A changed task's Details on Live sprint say "changed by task X" (Russian «изменено задачей X»), held drafts show "Waits for a sprint revision" in the order, and the sprint Summary lists the revision history. The live read (`live_graph`) carries the newest 20 revisions as `revisions` (`revisionId`, proposing `taskId`, `status`, `applied`, `reason`, `changes`, `held`, `updated`, `added`, `previous`, `findings`, `startedAffected`). Previous titles, links and descriptions are kept in the revision record; there is no separate draft-version table. Nothing here writes the approved plan, its history or `materializedVersion`, lifts Pause or deletes anything.
 
 ## Choices and checkout
 
@@ -1331,6 +1361,15 @@ A plain project folder opens and runs in place even when Git is not installed. G
 
 ### Separate worktrees
 
+On desktop, **Where the task will work** shows the registered folder, the last
+read branch and the files listed in its latest available Git snapshot. It shows
+active and uncertain task states from the selected project's board and names
+other tasks' checkouts when the project facts identify them. Missing evidence
+is shown as unknown. The panel docks on the right when the inspector is open
+in a wide window. It stays below the composer in smaller windows. The wide
+inspector retains its earlier contents under **Machine details**. Worktree
+creation still happens on Start. **Save draft** saves the selected mode.
+
 **Start** creates the worktree under the machine's configured root, at
 `<root>/<repository-id>/<slug>-<12-character-suffix>`, with branch
 `cw/<slug>-<12-character-suffix>`. It starts from the project's committed HEAD,
@@ -1340,7 +1379,7 @@ branches and checkout paths remain unchanged, including legacy names and after a
 default-root change. The default root is
 `$XDG_DATA_HOME/cortex-workspace/worktrees`, or
 `~/.local/share/cortex-workspace/worktrees` when the service has no XDG data override. The dev service sets XDG data to `<channel-state>/data`, so its default is `<channel-state>/data/cortex-workspace/worktrees`. Overview reports the absolute default separately from the saved root; the real reset control and example use that value. Changing or resetting the root never moves existing worktrees. Settings reject roots inside Git checkouts or registered non-Git projects, and locations occupied by files or lacking write/search permission. A writable external folder such as `/mnt/Big_Storage/.cortex/worktrees` is allowed; the `.cortex` name alone does not make it a project store. A refused save retains the draft and a persistent readable reason beside Save. The actual linked checkout is the ACP session cwd and permanent runtime
-task workspace; it shares the main repository's **one store per channel**: `.cortex/cortex.sqlite3` for release/default ACP, `.cortex-dev/cortex.sqlite3` for Workspace Dev. Dev never opens the release store; see [channel ownership](backlog/CW-S12.md).
+task workspace; it shares the main repository's **one private home store per channel**. See [channel ownership](backlog/CW-S12.md).
 Native execution, review and verification use the bound checkout. Changes reads
 its baseline-to-current diff, including its untracked files; Code and task Git
 operations use its exact checkout ID. A missing or changed checkout leaves
@@ -1520,11 +1559,13 @@ intermediate part, `final: true` on the last), to keep each item compact without
 dropping scope, dependencies, owner decisions or acceptance criteria, and not to
 repeat the plan as prose. It points to the tool's advertised limits and states
 no numbers itself. The runtime checks every part with the parts before it
-and, at the final part, the whole assembled plan: unique keys, dependencies that
-name only keys of the whole plan, no cycles, non-empty descriptions and at most
+and, at the final part, the whole assembled plan: unique non-blank keys,
+unique dependencies that name only keys of the whole plan, no cycles, non-empty descriptions and at most
 512 KiB of UTF-8 JSON for the whole plan. A refusal names the failing item
 (1-based index over the whole plan, and key) and rule so the coordinator corrects
 it in the same turn. A plan identical to the previous assembled plan is refused.
+Owner edits use the same content and graph validation. An edit adds one version
+to the retained history and is refused if another edit published that version first.
 The review receives the whole assembled plan. Every recorded
 plan gets a mandatory independent review against the sprint request and the
 studied evidence (coverage of the description, self-contained items, sane
@@ -1539,8 +1580,12 @@ asks for), the next submitted plan starts a fresh review budget. An approved pla
 plan and the one that review approved; the task then completes through the
 ordinary completion gate.
 
-When the planning task completes, the service turns its newest plan into the
-sprint's proposal (a new plan version) and shows **Create tasks**. A completed
+When the planning task completes, the service checks that the verification
+receipt names its newest submission, then publishes that proposal as a new plan
+version and shows **Create tasks**. Publication rechecks the saved sprint under
+the machine lock. The service also checks the linked execution and its completion
+event before admitting an automatic planning continuation, so a stale observation
+cannot send a continuation after the owner's Stop or planner replacement. A completed
 task without a new plan, after the owner asked something and the coordinator
 answered, keeps the current proposal. A task that completes without any plan is
 asked once, in its own conversation, to submit one; if it completes again
@@ -1623,16 +1668,22 @@ summary of the task's direct predecessors and dependents. The coordinator can
 use the read-only `sprint_graph` tool to page through the sprint graph or inspect
 the selected task's neighbours. `sprint_task_result` opens a member's durable
 state, the recorded synthesis, answered questions, write restrictions, the latest
-recorded verification for its plan revision, and its immutable published report
-catalogue. Answers and reports have separate continuations. A manual closure
-retains its recorded verification warning. A report body is available through the same bounded cursor
-pages as an ordinary report read. Both tools are coordinator-only and the
+recorded verification for its current review and plan revision, and its
+immutable published report catalogue. A passing observation requires the exact
+current review and a complete set of matching runtime check receipts. A new
+review, plan or reopen supersedes the earlier observation. A changed verification
+procedure and checks the owner accepted as unverified are identified separately. A manual
+closure retains its recorded verification warning. Answers and reports have
+separate continuations. Reports identify whether the exact ID and digest were
+bound to a completed assignment of the current revision, a historical assignment,
+or neither. Each page validates the report's digest. The catalogue records
+publication metadata. Both tools are coordinator-only and the
 runtime derives the sprint from the authenticated task, so a task cannot select
 another sprint or an arbitrary project task.
 
 The result view reports whether recorded file writes are confirmed in the
-recipient checkout, missing or unknown. A missing receipt,
-ambiguous observation or unreadable file remains unknown. A queue dependency
+recipient's actual checkout, missing or unknown. An older write without an exact
+receipt key, an ambiguous observation or an unreadable file remains unknown. A queue dependency
 still controls scheduling exactly as before. Hybrid acceptance does not by
 itself mean that code from a predecessor is present in the recipient checkout.
 Native execution that cannot establish a supported separate-worktree route
@@ -1649,13 +1700,13 @@ together with the sprint's transition to created: all drafts, with the sprint's
 route and checkout kind (a sprint-wide checkout wins over a plan item's own),
 the plan item's title, sprint membership, dependencies mapped from plan keys to
 task identities and the inherited target branch, and the sprint's
-`planning: created`, `materializedVersion` and `taskIds`. The drafts are written
-in one project-store transaction and the saved sprint record is replaced inside
-that same transaction. Any failure rolls the drafts back and leaves the sprint
-ready with the same plan; if the saved record was already replaced, it is
-restored to the copy read under the lock. A plan of any size is one transition,
-so a closed window, a lost connection or a service restart never leaves part of
-a plan created.
+`planning: created`, `materializedVersion` and `taskIds`. A durable
+project-store transaction records the drafts and a receipt for the saved sprint
+publication. If the service exits before commit, readers use the previous plan
+and roster and Create tasks can be retried. If the service exits after commit,
+the matching receipt makes the created state visible, and a retry returns the
+original task identities. If the store or publication cannot be confirmed, the
+service refuses to report success.
 
 Each task's identity is derived from the sprint, the plan version and the plan
 key, so the same plan always names the same tasks. A repeated **Create tasks**
@@ -1739,7 +1790,9 @@ that could not be confirmed. A folder without Git keeps Close as is and Set up G
 
 When a remote exists, a separate line reports pushed/unpushed from the target's last-fetched tracking reference, or unknown if none is available. It never fetches or pushes and never blocks closure. With no remote, no push-status line is shown.
 
-Board cards are not draggable. **Done outside the app…** in the Board or List task menu, the task page menu, or the task's command palette opens confirmation; nothing changes until the owner confirms. Running/stopping/unknown tasks must be stopped and confirmed first; an active merge must be aborted. The service rechecks these conditions, persists `closedAs=external` and Done, clears active acceptance/integration labels, and retains files and historical evidence without inventing checks. A fresh window reads the same closure.
+Board cards are not draggable. **Done outside the app…** in the Board or List task menu, the task page menu, or the task's command palette opens confirmation. Pause a running task first, and abort an active merge before closing. On a paused task, the dialog identifies the worker or coordinator whose exit Cortex still needs to confirm. Leave the dialog open and use **Check stop and close** after it stops. The service validates the current execution and version and rechecks exit evidence and dispatched effects. When closure succeeds, the sprint queue stays paused in its existing run mode. Closure leaves files and Git history intact.
+
+The owner disposition appears as Done with the external completion label and clears active acceptance and integration labels. Historical evidence stays available. Reopening the window reads the same closure.
 
 An item the owner closed **as is**, like an externally finished item, settles sprint dependencies and is never started again by the queue. Its Not verified warning remains; closure does not invent successful checks or a merge. An already-paused queue can recover through **Continue queue**, without repairing saved data; the owner decision does not silently undo a pause. Cancellation still blocks the queue. A live or unknown execution must settle before the queue can start a dependent task.
 
@@ -2142,6 +2195,17 @@ state. It survives window closure; **Edit** removes the queued item only after a
 and restores text and attachments to the composer. Existing composer text is
 preserved before the restored text. A failed send retains the draft and files;
 an ambiguous response is not automatically retried.
+Desktop and Android restore unsent conversation text and each question's
+text on the same device when the matching conversation or pending question
+opens again. Drafts are scoped to the app profile or phone pairing, machine,
+project, conversation, and known execution, owner and session identities.
+Each question in a group has a separate draft. Only the text is restored.
+Selected options and attachments must be prepared again. Nothing is sent
+automatically. A successful acknowledgement removes only the version sent;
+a refusal preserves the text and a later edit survives an earlier reply.
+Use **Discard text draft** or **Discard answer draft** to clear the current
+text. If device storage is unavailable, the field remains editable and the
+app indicates that local retention failed.
 
 A file crosses the local wire as bytes once: when the owner attaches it (picker,
 drop or paste), the form uploads it with `machine.call` `product.attachment`

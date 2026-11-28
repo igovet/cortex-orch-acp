@@ -65,11 +65,10 @@ pub(crate) fn runtime_environment(command: &mut Command, config: &crate::Config)
                     .clone()
                     .unwrap_or_else(|| config.state_dir.join(leaf))
             } else if key == "XDG_STATE_HOME" {
-                config
-                    .launch
-                    .dev_state
-                    .clone()
-                    .unwrap_or_else(|| config.state_dir.join(leaf))
+                crate::native_routes::RouteEnvironment::workspace_dev_state(
+                    &config.state_dir,
+                    config.launch.dev_state.as_deref(),
+                )
             } else {
                 config.state_dir.join(leaf)
             };

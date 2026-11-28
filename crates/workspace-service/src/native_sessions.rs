@@ -12,6 +12,7 @@ use cortex_core::{
         runtime::{RuntimeAction, RuntimeRequest},
         waits,
     },
+    observability::{Category, Outcome, Scope},
     ownership::OwnerEpoch,
     ports::ProcessObservation,
     scheduler::{self, Reservation, ReservationKind},
@@ -303,10 +304,17 @@ impl NativeHost {
     pub(super) async fn execution_checkout(
         &self, task: &str, owner: &OwnerEpoch,
     ) -> CoreResult<cortex_core::workspace::worktrees::ExecutionCheckout> {
+        self.execution_checkout_for(task, owner, None).await
+    }
+
+    async fn execution_checkout_for(
+        &self, task: &str, owner: &OwnerEpoch, assignment: Option<&str>,
+    ) -> CoreResult<cortex_core::workspace::worktrees::ExecutionCheckout> {
         let task = task.to_owned();
         let owner = owner.clone();
+        let assignment = assignment.map(str::to_owned);
         receive(self.executor.publication(move |store| {
-            cortex_core::workspace::worktrees::resolve(store, &task, &owner)
+            cortex_core::workspace::worktrees::resolve_for_assignment(store, &task, &owner, assignment.as_deref())
         })?).await
     }
 
@@ -355,11 +363,21 @@ impl NativeHost {
         shared: bool,
     ) -> CoreResult<Self> {
         let root = key.root().to_owned();
+        let home_store_enabled = key.store_root().is_some();
         let executor = Arc::new(if shared {
             StoreExecutor::open_shared(key)?
         } else {
             StoreExecutor::open(key)?
         });
+        if home_store_enabled {
+            executor
+                .publication(|store| {
+                    crate::native_store_policy::register_key(store.key());
+                    Ok(())
+                })?
+                .blocking_recv()
+                .map_err(|_| CoreError::Refused("session_host_closed"))??;
+        }
         // No legacy task is silently adopted. A stopped legacy process does not
         // make its unfinished tasks native or prove that their effects settled.
         let legacy_active = executor.read(|db| {
@@ -564,7 +582,11 @@ impl NativeHost {
         {
             return Err(CoreError::Refused("invalid_session_route"));
         }
-        let checkout = self.execution_checkout(&task, &owner).await?;
+        let assignment = match &who {
+            SessionRole::Worker { assignment } => Some(assignment.clone()),
+            SessionRole::Coordinator | SessionRole::ActiveSteering | SessionRole::OwnerDecision { .. } => None,
+        };
+        let checkout = self.execution_checkout_for(&task, &owner, assignment.as_deref()).await?;
         let root = checkout.path().to_path_buf();
         let worktree = checkout.worktree.as_ref().map(|tree| tree.id.clone());
         let engine_kind = route.launch.engine;
@@ -582,10 +604,6 @@ impl NativeHost {
             SessionRole::OwnerDecision { obstacle } => Some(obstacle.clone()),
             _ => None,
         };
-        let assignment = match &who {
-            SessionRole::Worker { assignment } => Some(assignment.clone()),
-            SessionRole::Coordinator | SessionRole::ActiveSteering | SessionRole::OwnerDecision { .. } => None,
-        };
         let deciding = decision.is_some();
         if let Some(wait) = &wait {
             wait.ticket.as_ref().unwrap().select(
@@ -593,6 +611,7 @@ impl NativeHost {
             );
         }
         let mut queued = false;
+        let mut slot_wait = Duration::ZERO;
         let mut provider_wait: Option<String> = None;
         let hold_changed = &self.route_holds.changed;
         enum Decision<T> {
@@ -654,7 +673,11 @@ impl NativeHost {
             let model = route.model.clone();
             let gate = managed.as_ref().map(|(attempt, _)| attempt.reservation_gate());
             let decision = decision.clone();
-            let result = receive(self.executor.write(move |db| {
+            let launch_checkout = worktree.clone();
+            let result = receive(self.executor.publication(move |store| store.write(|db| {
+                if let Some(assignment) = assignment.as_deref() {
+                    cortex_core::workspace::worktrees::assignments::require_launch(db, &task, &owner, assignment, launch_checkout.as_deref())?;
+                }
                 let principal = match &assignment {
                     Some(assignment) => Principal::Worker { assignment },
                     None if steering => Principal::ActiveSteering,
@@ -720,6 +743,11 @@ impl NativeHost {
                     },
                     None => None,
                 };
+                if assignment.is_some() || lifecycle::domain::task_tx(db, &task)?.0 == cortex_core::TaskState::Reconciling {
+                    cortex_core::deliverables::continue_tx(store, db, &task)?;
+                } else if !steering && decision.is_none() {
+                    cortex_core::deliverables::require_available(store, db, &task)?;
+                }
                 let credential = channels::issue_tx(db, &task, &owner, principal)?;
                 let identity =
                     channels::authenticate(db, &credential.channel_id, credential.secret(), false)?;
@@ -734,6 +762,12 @@ impl NativeHost {
                     identity.stage.as_deref(),
                     engine_kind,
                 )?;
+                let competency_modules = if let Some(assignment) = &identity.assignment {
+                    let modules = lifecycle::plan::assignment_competencies(db, &task, assignment)?;
+                    crate::native_instructions::append_competencies(&mut instructions, &modules)?
+                } else {
+                    Vec::new()
+                };
                 let automatic = lifecycle::automatic::enabled(db, &task)?;
                 if identity.role == "coordinator" {
                     // The no-stop policy holds for every task, not only Automatic ones.
@@ -788,8 +822,8 @@ impl NativeHost {
                         }))?;
                     }
                 }
-                Ok(Decision::Reserved((credential, reservation, instructions, automatic)))
-            })?)
+                Ok(Decision::Reserved((credential, reservation, instructions, competency_modules, automatic)))
+            }))?)
             .await;
             match result {
                 Ok(Decision::RecheckRoute) => continue,
@@ -811,6 +845,7 @@ impl NativeHost {
                     let Some(wait) = &mut wait else {
                         unreachable!("unqueued dispatch never returns a wait");
                     };
+                    let parked = std::time::Instant::now();
                     tokio::select! {
                         _ = &mut changed => {},
                         _ = &mut route_wake => {},
@@ -818,6 +853,7 @@ impl NativeHost {
                         // Reconcile release and authority from other store writers too.
                         _ = tokio::time::sleep(Duration::from_secs(1)) => {},
                     }
+                    slot_wait += parked.elapsed();
                 }
                 Ok(Decision::Reserved(admitted)) => break Ok(admitted),
                 Err(error) => break Err(error),
@@ -826,6 +862,12 @@ impl NativeHost {
         if let Some(wait) = &mut wait {
             // The transaction committed before the next contender can reserve.
             drop(wait.ticket.take());
+        }
+        if let (Some(assignment), true) = (assignment.as_ref(), queued) {
+            crate::native_timing::record(
+                &self.executor, &task, Scope::Assignment(assignment.clone()), Category::CapacityWait,
+                crate::native_timing::outcome(&admitted), slot_wait,
+            ).await;
         }
         if let (Err(error), true, Some(assignment)) = (&admitted, queued, assignment.clone()) {
             let (task, outcome) = (task.clone(), error.code().to_owned());
@@ -864,7 +906,7 @@ impl NativeHost {
                 eprintln!("workspace-service: provider wait end was not recorded ({})", record.code());
             }
         }
-        let (credential, reservation, instructions, automatic) = admitted?;
+        let (credential, reservation, instructions, competency_modules, automatic) = admitted?;
         if let Some(error) = managed.as_ref().and_then(|(_, watches)| watches.interruption())
             .or_else(|| wait.as_ref().and_then(WorkerLaunch::interruption))
         {
@@ -872,7 +914,7 @@ impl NativeHost {
             return Err(error);
         }
         if let Some(id) = &worktree {
-            let current = self.execution_checkout(&task, &owner).await.and_then(|current| {
+            let current = self.execution_checkout_for(&task, &owner, assignment.as_deref()).await.and_then(|current| {
                 if current.path() != root || current.worktree.as_ref().map(|w| &w.id) != Some(id) {
                     Err(CoreError::Refused("worktree_binding_invalid"))
                 } else {
@@ -943,10 +985,10 @@ impl NativeHost {
             } else {
                 vec![]
             };
-            Ok((view(&i), scopes))
+            Ok((view(&i), scopes, i.read_only))
         })?)
         .await;
-        let (identity, scopes) = match authority {
+        let (identity, scopes, declared_read_only) = match authority {
             Ok(authority) => authority,
             Err(error) => {
                 self.settle_unstarted(credential, reservation).await?;
@@ -995,13 +1037,18 @@ impl NativeHost {
             // then no MCP call can run (tools need a bound session), so a start that
             // fails before binding has had no effect and may start once more.
             let mut bound = false;
+            let launch_started = std::time::Instant::now();
             let started = async {
-                let gateway = Gateway::new(policy.clone(), credentials().map_err(|_| Error::Invalid)?);
+                let broker_credentials = credentials().map_err(|_| Error::InvalidField {
+                    field: "broker_credentials".into(),
+                    reason: "generation_failed",
+                })?;
+                let gateway = Gateway::new(policy.clone(), broker_credentials);
                 broker = Some(Broker::new(&route.broker_parent, Arc::new(gateway))?);
                 phase = "external_mcp";
                 // External MCP processes have their own authority, not the
                 // task's worktree view. Keep them off this route.
-                if worktree.is_none() && !steering && !deciding {
+                if worktree.is_none() && !steering && !deciding && !declared_read_only {
                     self.mcp
                     .attach(
                         &identity,
@@ -1180,6 +1227,14 @@ impl NativeHost {
                 Ok::<_, Error>(s)
             }
             .await;
+            crate::native_timing::record(
+                &self.executor,
+                &identity.task,
+                Scope::Channel(credential.channel_id.clone()),
+                Category::EngineLaunch,
+                crate::native_timing::outcome(&started),
+                launch_started.elapsed(),
+            ).await;
             let error = match started {
                 Ok(s) => break (s, engine.unwrap(), broker.unwrap(), external),
                 Err(error) => error,
@@ -1236,10 +1291,16 @@ impl NativeHost {
             // their generic startup diagnostic; no inference from engine text.
             let explicit_auth =
                 automatic && !deciding && phase == "session_new" && matches!(error, Error::Rpc(-32000));
+            let invalid_launch = matches!(phase, "broker" | "launch")
+                && never_spawned
+                && broker_settled
+                && matches!(error, Error::Invalid | Error::InvalidField { .. });
             let blocker = if automatic && observation != ProcessObservation::ConfirmedExited {
                 "native_session_outcome_unknown"
             } else if explicit_auth {
                 "engine_authentication_required"
+            } else if invalid_launch && observation == ProcessObservation::ConfirmedExited {
+                cortex_core::lifecycle::automatic::INVALID_SESSION_LAUNCH
             } else if worktree.is_some() && phase == "launch" && matches!(error, Error::Forbidden) {
                 "worktree_confinement_unavailable"
             } else {
@@ -1264,6 +1325,9 @@ impl NativeHost {
                 detail: match &error {
                     Error::InvalidField { field, reason } => {
                         Some(json!({"field":field,"reason":reason}))
+                    }
+                    Error::Invalid if invalid_launch => {
+                        Some(json!({"reason":"invalid_launch_configuration"}))
                     }
                     _ => None,
                 },
@@ -1333,6 +1397,7 @@ impl NativeHost {
             external,
             session,
             instructions,
+            competency_modules,
             project_context,
             engine_kind,
             policy,
@@ -1557,7 +1622,7 @@ const REVOCATION_POLL: Duration = Duration::from_secs(1);
 const SILENCE_POLL: Duration = Duration::from_secs(15);
 /// How long a revoked worker turn may keep running to end by itself (its closing
 /// reply after its own accepted replan or escalation) before it is cancelled.
-const REVOKED_FINISH_GRACE: Duration = Duration::from_secs(10);
+const REVOKED_FINISH_GRACE: Duration = cortex_engine::engine::TERMINAL_PROMPT_GRACE;
 /// How long a revoked worker's engine has to answer `session/cancel` with its prompt
 /// reply before the turn ends as outcome-unknown and the session is terminated. ACP
 /// agents reply once they have aborted in-flight tool calls, normally within seconds;
@@ -1579,6 +1644,7 @@ pub struct SessionDriver {
     external: Vec<crate::native_mcp::Attachment>,
     session: Session,
     instructions: String,
+    competency_modules: Vec<Value>,
     project_context: String,
     engine_kind: cortex_engine::environment::EngineKind,
     policy: Arc<CorePolicy>,
@@ -1671,13 +1737,8 @@ fn usage_write_diagnostic(error: &CoreError) {
 }
 
 impl SessionDriver {
-    fn root_for_input(&self) -> PathBuf {
-        let channel = workspace_protocol::channel::current();
-        self.policy.logical.join(if channel.is_dev() {
-            ".cortex-dev"
-        } else {
-            ".cortex"
-        })
+    pub(super) fn memory_checkout(&self) -> &std::path::Path {
+        &self.policy.root
     }
     pub fn session_id(&self) -> &str {
         self.session.id()
@@ -1712,13 +1773,15 @@ impl SessionDriver {
             .map_err(|_| CoreError::Refused("channel_authority_refused"))?;
         // Normal and active-steering channels both authenticate as coordinator.
         // OpenCode already gets the language in its per-prompt instruction prefix.
+        let prepared_from = std::time::Instant::now();
         let identity_task = identity.task.clone();
         let language_task = (identity.role == "coordinator"
             && matches!(self.engine_kind, EngineKind::Claude | EngineKind::Codex))
         .then_some(identity.task);
         let c = self.credential.clone();
-        let (delivery, capsule, owner_evidence, live_steering, handoff, language) = receive(self.executor.write(move |db| {
+        let (delivery, capsule, owner_evidence, live_steering, handoff, language, timing_category) = receive(self.executor.write(move |db| {
             let (delivery, capsule) = cortex_core::recovery_context::delivery_tx(db, &c)?;
+            let timing_category = crate::native_timing::turn_category(db, &identity_task, &identity.role, identity.stage.as_deref())?;
             let language = language_task
                 .map(|task| cortex_core::assignment_brief::record_language_tx(db, &task))
                 .transpose()?;
@@ -1733,12 +1796,14 @@ impl SessionDriver {
                     db, &i.task, &c.channel_id, input.after, input.through,
                 )?;
                 handoff = Some(event);
-                let plan: String = db.query_row(
-                    "SELECT plan_json FROM runtime_tasks WHERE task_id=?", [&i.task], |r| r.get(0)
+                let (plan, revision): (String, i64) = db.query_row(
+                    "SELECT plan_json,revision FROM runtime_tasks WHERE task_id=?", [&i.task],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
                 let digest = crate::native_project::digest(plan.as_bytes());
                 let stored: Value = serde_json::from_str(&plan)?;
                 let proposal = lifecycle::plan::steerable_plan(&stored)?;
+                let locked = lifecycle::plan::locked_execution_nodes(db, &i.task, revision)?;
                 let workers = db.prepare("SELECT p.attempt_id,n.node_id,n.assignment_ref FROM runtime_nodes n
                     JOIN runtime_tasks t USING(task_id) JOIN delegation_provisioning p
                       ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
@@ -1752,9 +1817,9 @@ impl SessionDriver {
                     })))?.collect::<Result<Vec<_>,_>>()?;
                 section = format!("\n\nLive steering snapshot (runtime facts; targets may settle before tool use):\n{}",
                     json!({"plan":proposal,"plan_digest":digest,
-                           "live_attempts":workers,"owner_messages":messages}));
+                           "locked_nodes":locked,"live_attempts":workers,"owner_messages":messages}));
             }
-            Ok((delivery, capsule, owner_evidence, section, handoff, language))
+            Ok((delivery, capsule, owner_evidence, section, handoff, language, timing_category))
         })?).await?;
         let evidence_text = match &owner_evidence {
             Some(entries) => format!("Complete prior owner answers (runtime data):\n{}\n\n", serde_json::to_string(entries)?),
@@ -1777,7 +1842,11 @@ impl SessionDriver {
             .await
             .map_err(engine_error_to_core)?;
         let worker = identity.role == "worker";
-        let writer = worker && !crate::native_engine_policy::read_only(&identity);
+        // This worktree's engine is restricted to read-only mode and all
+        // native permission requests and external MCP effects are refused.
+        // Changes through its Cortex tools have their own receipts.
+        let writer = worker && self.policy.worktree.is_none()
+            && !crate::native_engine_policy::read_only(&identity);
         let mut usage = PromptUsage {
             executor: &self.executor,
             runtime: tokio::runtime::Handle::current(),
@@ -1792,9 +1861,14 @@ impl SessionDriver {
         let worker_attempt = usage.attempt.clone();
         let guidance_ids: Vec<Value> = guidance.iter().map(|g| g["guidance_id"].clone()).collect();
         let task = identity.task;
-        let root = self.root_for_input();
-        let stored = session_state_read(&self.executor, guided, move|db|{
+        let credential = self.credential.clone();
+        let stored = session_store_read(&self.executor, guided, move |store| store.read(|db| {
             use std::io::Read;
+            let bound = channels::authenticate(db, &credential.channel_id, credential.secret(), true)?;
+            if bound.task != task {
+                return Err(CoreError::Refused("channel_authority_refused"));
+            }
+            let root = store.key().directory();
             let mut q=db.prepare("SELECT b.kind,b.mime,b.uri,b.sha256,b.size_bytes,b.body_ref,b.name FROM source_blocks b
                 JOIN source_revisions r ON r.report_id=b.report_id WHERE b.task_id=? AND b.availability='stored'
                 ORDER BY r.revision,b.block_index")?;
@@ -1816,7 +1890,7 @@ impl SessionDriver {
                 content.push(crate::native_attachments::Stored{kind,mime,uri,name:label,sha256:hash,key:name,bytes});
             }
             Ok(content)
-        }).await?;
+        })).await?;
         let caps = self.engine.prompt_capabilities();
         let (attachments, fresh) = {
             let sent = self.delivered_attachments.lock().unwrap();
@@ -1827,6 +1901,7 @@ impl SessionDriver {
         let c = self.credential.clone();
         let transmitted = delivery.clone();
         let bundle = self.instructions.clone();
+        let competency_modules = self.competency_modules.clone();
         receive(self.executor.write(move|db|{
             let i=channels::authenticate(db,&c.channel_id,c.secret(),true)?;
             let session=format!("native:{}:{}",i.attempt,i.session.as_deref().unwrap());
@@ -1839,7 +1914,7 @@ impl SessionDriver {
             // What this prompt gave the engine stays verifiable afterwards (digests only).
             let tools=cortex_engine::schema::catalogue(&i.role,i.profile.as_deref(),i.stage.as_deref()).unwrap_or_default();
             let catalogue=crate::native_project::digest(&serde_json::to_vec(&tools)?);
-            cortex_core::recovery_context::record_delivery_tx(db,&c,&transmitted,&bundle,&capsule,&brief,&catalogue)?;
+            cortex_core::recovery_context::record_delivery_tx(db,&c,&transmitted,&bundle,&capsule,&brief,&catalogue,&competency_modules)?;
             Ok(())
         })?).await?;
         // A writing worker's engine may change files without a receipt: its turn is
@@ -1858,12 +1933,14 @@ impl SessionDriver {
         self.policy.turn_guard.begin_turn();
         let mut silence_tick = tokio::time::interval(SILENCE_POLL);
         silence_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let dispatched_at = std::sync::OnceLock::new();
         let result = {
             let call = &usage.call;
             let session_ref = &usage.session;
             let pending = self
                 .engine
                 .prompt_content_observed(&self.session, blocks, || {
+                    let _ = dispatched_at.set(std::time::Instant::now());
                     let sequence = self
                         .dispatched_prompts
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -1970,6 +2047,23 @@ impl SessionDriver {
                 }
             }
         };
+        if let (Some(category), Some(started)) = (timing_category, dispatched_at.get()) {
+            let elapsed = started.elapsed();
+            if worker && usage.call.get().is_some_and(|(_, sequence)| *sequence == 1) {
+                crate::native_timing::record(
+                    &self.executor, &usage.task, Scope::Channel(self.credential.channel_id.clone()),
+                    Category::HandoffPreparation, Outcome::Returned, started.duration_since(prepared_from),
+                ).await;
+            }
+            crate::native_timing::record(
+                &self.executor,
+                &usage.task,
+                Scope::Channel(self.credential.channel_id.clone()),
+                category,
+                crate::native_timing::outcome(&result),
+                elapsed,
+            ).await;
+        }
         if let Ok(reply) = &result {
             usage.reason = reply["stopReason"].as_str().map(str::to_owned);
             usage.tokens = crate::notifier::progress::prompt_reported_tokens(&reply["usage"]);
@@ -1995,9 +2089,9 @@ impl SessionDriver {
         // A degenerate turn is never settled as an ordinary reply, whether the engine
         // answered the cancel or the grace ran out; the caller retries it once in a
         // fresh session (see `native_runtime`).
-        // A turn that did not end normally may still act after this point: its
-        // change record is incomplete.
-        self.settle_writer_turn(window.as_ref(), !tripped && result.is_ok())
+        // An ACP prompt reply ends the observation window even if the turn's
+        // content was degenerate. Without a reply its effects remain unsettled.
+        self.settle_writer_turn(window.as_ref(), result.is_ok())
             .await?;
         if tripped {
             return Err(CoreError::Refused("native_turn_degenerate"));
@@ -2114,21 +2208,27 @@ impl SessionDriver {
             before,
         })
     }
-    /// Close a writing turn's observation window. OpenCode retains native
-    /// sandbox writes. Codex native tools cannot write; attached servers still
-    /// need conservative attribution until their own routes prove containment.
-    /// Claude retains its existing callback-based attribution.
+    /// Observe deliverable changes around a writing turn. OpenCode and Codex
+    /// can write through native tools. Claude uses callback-based attribution.
+    /// A partial observation can diagnose changes without proving completeness.
     async fn settle_writer_turn(&self, window: Option<&WriterTurn>, ended: bool) -> CoreResult<()> {
         let Some(window) = window else {
             return Ok(());
         };
         let valid_checkout = window.checkout.is_none()
-            || self.policy.identity(true).await.is_ok();
-        let record = if ended && valid_checkout {
+            || self.policy.identity(true).await.is_ok()
+            || (ended && matches!(self.policy.completed_prompt(self.session.id()).await, Ok(true)));
+        let record = if valid_checkout {
             let after = crate::native_change_set::snapshot(self.policy.root.clone()).await;
-            crate::native_change_set::record(&window.before, &after)
+            let mut observed = crate::native_change_set::record(&window.before, &after);
+            if !ended && observed["changed_paths_complete"] == true {
+                observed["changed_paths_complete"] = json!(false);
+                observed["changed_paths_source"] = json!("partial_listing");
+                observed["changed_paths_reason"] = json!("turn_outcome_unknown");
+            }
+            observed
         } else {
-            crate::native_change_set::incomplete(if valid_checkout { "turn_outcome_unknown" } else { "worktree_binding_invalid" })
+            crate::native_change_set::incomplete("worktree_binding_invalid")
         };
         let checkout = window.checkout.clone();
         let c = self.credential.clone();
@@ -2775,8 +2875,16 @@ async fn session_state_read<T: Send + 'static>(
     wait: bool,
     body: impl FnOnce(&rusqlite::Connection) -> CoreResult<T> + Clone + Send + 'static,
 ) -> CoreResult<T> {
+    session_store_read(executor, wait, move |store| store.read(body)).await
+}
+
+async fn session_store_read<T: Send + 'static>(
+    executor: &StoreExecutor,
+    wait: bool,
+    body: impl FnOnce(&cortex_core::Store) -> CoreResult<T> + Clone + Send + 'static,
+) -> CoreResult<T> {
     loop {
-        match executor.read(body.clone()) {
+        match executor.read_store(body.clone()) {
             Ok(receipt) => return receive(receipt).await,
             Err(error) if wait && error.code() == "busy" => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2938,11 +3046,7 @@ fn auto_channel_allow(
     mcp_servers: &[String],
 ) -> Option<String> {
     use cortex_engine::permission::{self, Action};
-    let read_only = i.role != "worker"
-        || cortex_core::scheduler::policy::read_only(
-            i.profile.as_deref().unwrap_or(""),
-            i.stage.as_deref().unwrap_or(""),
-        );
+    let read_only = crate::native_engine_policy::read_only(i);
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|h| h.is_absolute());
@@ -2990,6 +3094,59 @@ impl PermissionPolicy for CorePolicy {
                 };
             }
             self.check(false).await.map(|_| ())
+        })
+    }
+
+    fn completed_prompt(&self, session: &str) -> FutureResult<'_, bool> {
+        let session = session.to_owned();
+        let channel = self.credential.channel_id.clone();
+        let owner = self.owner.clone();
+        let worktree = self.worktree.clone();
+        let root = self.root.clone();
+        Box::pin(async move {
+            // A live external server may still admit its own calls while the
+            // Cortex channel is revoked. Its process retains immediate shutdown.
+            if !self.mcp_servers.lock().unwrap().is_empty() {
+                return Ok(false);
+            }
+            // Only the monitor and the final read-only write observation use this.
+            // Broker calls and permission decisions still require live authority.
+            receive(self.executor.read_store(move |store| store.read(|db| {
+                let accepted: Option<(String, String)> = db.query_row(
+                    "SELECT c.task_id,c.assignment_id FROM trusted_channels c
+                     JOIN task_owners o ON o.task_id=c.task_id AND o.epoch=c.owner_epoch
+                     JOIN runtime_tasks t ON t.task_id=c.task_id
+                     JOIN delegation_provisioning p ON p.task_id=c.task_id AND p.attempt_id=c.attempt_id
+                        AND p.channel_id=c.channel_id AND p.owner_epoch=c.owner_epoch
+                     JOIN runtime_nodes n ON n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
+                        AND n.revision=t.revision AND n.role=p.role_id AND n.assignment_ref=p.idempotency_key
+                     WHERE c.channel_id=?1 AND p.engine_session_ref=?2 AND c.owner_epoch=?3 AND o.owner_ref=?4
+                       AND c.role='worker' AND c.revoked_at IS NOT NULL AND p.status='ready'
+                       AND (c.expires_at IS NULL OR c.expires_at>?5)
+                       AND n.status='completed' AND n.result_json IS NOT NULL
+                       AND t.state IN ('EXECUTING','REVIEWING')
+                       AND NOT EXISTS(SELECT 1 FROM task_stopped WHERE task_id=c.task_id)
+                       AND EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=c.task_id AND e.type='WORKER_COMPLETED'
+                         AND json_extract(e.payload_json,'$.assignment_ref')=c.assignment_id
+                         AND json_extract(e.payload_json,'$.attempt_id')=c.attempt_id)
+                       AND EXISTS(SELECT 1 FROM runtime_requests r WHERE r.task_id=c.task_id AND r.actor=c.channel_id
+                         AND r.operation='result_submit' AND json_extract(r.result_json,'$.assignment_ref')=c.assignment_id
+                         AND json_extract(r.result_json,'$.report_ref')=json_extract(n.result_json,'$.report_ref')
+                         AND json_extract(r.result_json,'$.outcome')='recorded')",
+                    (channel, session, owner.epoch, &owner.owner, cortex_core::now()), |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                let Some((task, assignment)) = accepted else {
+                    return Ok(false);
+                };
+                if let Some(expected) = worktree {
+                    let checkout = cortex_core::workspace::worktrees::resolve_for_assignment_on(
+                        db, store.key(), &task, &owner, Some(&assignment),
+                    )?;
+                    return Ok(checkout.path() == root
+                        && checkout.worktree.as_ref().map(|tree| &tree.id) == Some(&expected));
+                }
+                Ok(true)
+            })).map_err(engine_error)?).await.map_err(engine_error)
         })
     }
     fn decide<'a>(
@@ -3333,7 +3490,7 @@ impl CorePolicy {
             let root = self.root.clone();
             return receive(self.executor.publication(move |store| {
                 let i = store.read(|db| channels::authenticate(db, &c.channel_id, c.secret(), ready))?;
-                let current = cortex_core::workspace::worktrees::resolve(store, &i.task, &owner)?;
+                let current = cortex_core::workspace::worktrees::resolve_for_assignment(store, &i.task, &owner, i.assignment.as_deref())?;
                 if current.path() != root || current.worktree.as_ref().map(|w| &w.id) != Some(&expected) {
                     return Err(CoreError::Refused("worktree_binding_invalid"));
                 }
@@ -3348,15 +3505,32 @@ impl CorePolicy {
         .await
         .map_err(tool_error)
     }
-    /// `read_batch`: up to eight batchable read-only reads, preflighted together,
-    /// then executed one at a time through the same handler a direct call uses,
-    /// with channel authority rechecked between items.
+    async fn record_skill_delivery(
+        &self,
+        channel: &Channel,
+        actions: Vec<crate::native_skill_receipts::Delivery>,
+    ) -> cortex_engine::Result<()> {
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let i = self.identity(true).await?;
+        if !same(&i, channel) {
+            return Err(Error::Refused("channel_identity_changed"));
+        }
+        let c = self.credential.clone();
+        receive(self.executor.write(move |db| {
+            crate::native_skill_receipts::record(db, &c, &i, actions)
+        }).map_err(tool_error)?).await.map_err(tool_error)
+    }
+
+    /// Preflight the whole batch, then dispatch each item with current authority.
     async fn batch(
         &self,
         credentials: &Credentials,
         channel: &Channel,
         arguments: Value,
     ) -> cortex_engine::Result<Value> {
+        use crate::native_skill_receipts::{body_metadata, output_page, Delivery};
         use crate::native_tool_errors::{item_error, reply_at};
         let offered = cortex_engine::schema::catalogue(
             &channel.role,
@@ -3375,6 +3549,7 @@ impl CorePolicy {
         let calls = arguments["calls"].as_array().cloned().unwrap_or_default();
         let started = std::time::Instant::now();
         let (mut results, mut executed) = (Vec::new(), 0usize);
+        let mut skill_deliveries = Vec::new();
         for call in calls {
             let (id, tool) = (
                 call["id"].clone(),
@@ -3417,10 +3592,16 @@ impl CorePolicy {
                     .clone();
             } else {
                 let mut data = reply["structuredContent"].clone();
+                let skill = (tool == "read_skill").then(|| body_metadata(&data)).flatten();
                 let mut bytes = serde_json::to_vec(&data)
                     .map_err(CoreError::from)
                     .map_err(tool_error)?;
                 if bytes.len() <= crate::native_batch::ITEM_BYTES {
+                    if let Some(skill) = skill {
+                        skill_deliveries.push(Delivery::Inline(skill));
+                    } else if tool == "read_large_output" {
+                        skill_deliveries.extend(output_page(&data));
+                    }
                     item["status"] = json!("ok");
                     item["result"] = data;
                 } else if tool == "read_large_output" {
@@ -3445,6 +3626,7 @@ impl CorePolicy {
                         .then(|| crate::native_context_tools::plan_outcomes(&data));
                     let c = self.credential.clone();
                     let expected = channel.clone();
+                    let retain_skill = skill.is_some();
                     let deferred = receive(
                         self.executor
                             .publication(move |store| {
@@ -3455,7 +3637,11 @@ impl CorePolicy {
                                     return Err(CoreError::Refused("channel_identity_changed"));
                                 }
                                 // Already classified as deferred.
-                                crate::native_commands::defer_json_over(store, &i, data, 0)
+                                if retain_skill {
+                                    crate::native_commands::defer_skill(store, &i, &c.channel_id, data)
+                                } else {
+                                    crate::native_commands::defer_json_over(store, &i, data, 0)
+                                }
                             })
                             .map_err(tool_error)?,
                     )
@@ -3465,6 +3651,9 @@ impl CorePolicy {
                     item["large_output_id"] = deferred["large_output_id"].clone();
                     item["byte_count"] = deferred["byte_count"].clone();
                     item["result_sha256"] = json!(result_sha256);
+                    if let Some(skill) = skill {
+                        skill_deliveries.push(Delivery::Deferred { skill, output: item.clone() });
+                    }
                     if let Some(outcomes) = outcomes {
                         crate::native_context_tools::merge(&mut item, outcomes);
                     }
@@ -3488,6 +3677,7 @@ impl CorePolicy {
         {
             return Ok(crate::native_tool_errors::reply("result_too_large"));
         }
+        self.record_skill_delivery(channel, skill_deliveries).await?;
         Ok(
             json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":!complete}),
         )
@@ -3556,7 +3746,7 @@ impl CorePolicy {
             }
             if crate::native_context_tools::supports(&name) {
                 let state = self.workspace_state.clone();
-                let recipient = self.logical.clone();
+                let recipient = self.root.clone();
                 let result = receive(
                     self.executor
                         .publication(move |store| {
@@ -3639,6 +3829,7 @@ impl CorePolicy {
                     }
                 }
                 let admitted = protection.map(|(path, _)| path);
+                let audit_output = !batched && name == "read_large_output";
                 let result = receive(
                     self.executor
                         .publication(move |store| {
@@ -3662,6 +3853,13 @@ impl CorePolicy {
                         .map_err(tool_error)?,
                 )
                 .await;
+                if audit_output {
+                    if let Ok(result) = &result {
+                        if let Some(page) = crate::native_skill_receipts::output_page(&result["structuredContent"]) {
+                            self.record_skill_delivery(channel, vec![page]).await?;
+                        }
+                    }
+                }
                 // Project and source failures were already tool errors; they now
                 // carry the structured code, field and corrective hint.
                 return Ok(match result {
@@ -3684,6 +3882,8 @@ impl CorePolicy {
                     self.executor.clone(),
                     self.credential.clone(),
                     arguments,
+                    self.root.clone(),
+                    self.worktree_receipt(),
                 )
                 .await
                 .map_err(tool_error);
@@ -3731,10 +3931,17 @@ impl CorePolicy {
                     Err(e) => return Err(tool_error(e)),
                     Ok((i, value, receipt)) => {
                         if let Some(receipt) = receipt {
-                            let _ = self
+                            let required = receipt.required();
+                            if required && batched {
+                                return Err(tool_error(CoreError::Refused("required_report_direct_read")));
+                            }
+                            let committed = self
                                 .executor
                                 .write(move |db| receipt.record(db))
                                 .map_err(tool_error)?;
+                            if required {
+                                receive(committed).await.map_err(tool_error)?;
+                            }
                         }
                         // The inline budget of `native_commands::defer_json`: only an
                         // oversized reply needs the writer, to store its deferred body.
@@ -3766,7 +3973,11 @@ impl CorePolicy {
                             if !same(&i, &expected) {
                                 return Err(CoreError::Refused("channel_identity_changed"));
                             }
-                            crate::native_documents::execute(store, &c, &i, &name, &arguments)
+                            if crate::native_documents::read_only(&name) {
+                                crate::native_documents::execute_read(store, &c, &i, &name, &arguments, batched)
+                            } else {
+                                crate::native_documents::execute(store, &c, &i, &name, &arguments)
+                            }
                         })
                         .map_err(tool_error)?,
                 )
@@ -3843,11 +4054,17 @@ impl CorePolicy {
                 // precise, correctable tool error, never a bare authority refusal.
                 let (valid, profile, project, arguments) = value;
                 let skill = arguments["skill"].as_str().unwrap_or("");
-                return Ok(if valid {
+                let result = if valid {
                     crate::native_skills::read(&self.root, &profile, skill, project)
                 } else {
                     crate::native_skills::invalid(skill, &profile, project)
-                });
+                };
+                if !batched && result["isError"] == false {
+                    if let Some(skill) = crate::native_skill_receipts::body_metadata(&result["structuredContent"]) {
+                        self.record_skill_delivery(channel, vec![crate::native_skill_receipts::Delivery::Inline(skill)]).await?;
+                    }
+                }
+                return Ok(result);
             }
             if name == "verification_submit" {
                 let i = self.identity(true).await?;
@@ -3902,9 +4119,15 @@ impl CorePolicy {
                         .as_array()
                         .is_some_and(|checks| checks.iter().any(|c| c["outcome"] == "passed"))
                 {
+                    // A failed checkout-wide observation cannot certify an exact
+                    // project revision. A check may still prove its independently
+                    // retained work-set binding, and a scoped review binds its files.
                     crate::native_effects::observe(self.root.clone())
                         .await
-                        .map_err(tool_error)?
+                        .unwrap_or_else(|_| EvidenceSnapshot {
+                            incomplete: true,
+                            ..Default::default()
+                        })
                 } else {
                     EvidenceSnapshot::default()
                 };
@@ -4001,6 +4224,7 @@ impl CorePolicy {
             let outcome_key = arguments["request_key"].as_str().unwrap_or_default().to_owned();
             let outcome_relief = name == "plan_submit";
             let execution_root = self.root.clone();
+            let execution_checkout = self.worktree_receipt();
             let mut answer_evidence = if name == "answer_submit" && channel.role == "coordinator" {
                 let i = self.identity(true).await?;
                 if !same(&i, &expected) {
@@ -4053,6 +4277,23 @@ impl CorePolicy {
                             .iter()
                             .find(|t| t["name"] == name)
                             .ok_or(CoreError::Refused("tool_refused"))?;
+                        // Older escalation schemas permitted an omitted question.
+                        // An authenticated channel may replay its own exact
+                        // receipt, without dispatching another mutation.
+                        if name == "escalation_request" && arguments.get("question").is_none() {
+                            if let Some(key) = arguments["request_key"].as_str() {
+                                let recorded: bool = db.query_row(
+                                    "SELECT EXISTS(SELECT 1 FROM runtime_requests
+                                     WHERE task_id=? AND actor=? AND request_key=?
+                                     AND operation='escalation_request')",
+                                    (&i.task, &c.channel_id, key), |row| row.get(0),
+                                )?;
+                                if recorded {
+                                    return lifecycle::request_tx(db, &i.task, &c.channel_id, key,
+                                        &name, &arguments, || Err(CoreError::Refused("invalid_escalation_replay")));
+                                }
+                            }
+                        }
                         cortex_engine::schema::validate(&tool["inputSchema"], &arguments)
                             .map_err(engine_error_to_core)?;
                         if name == "synthesis_submit" && i.role == "coordinator" {
@@ -4067,8 +4308,16 @@ impl CorePolicy {
                                 let replay:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?)",
                                     (&i.task,&c.channel_id,key),|r|r.get(0))?;
                                 let hints=if !replay {
+                                    let changed = crate::native_project::changed_plan_inputs(
+                                        db, &execution_root, &i.task, &c.channel_id, execution_checkout.as_ref(),
+                                    )?;
+                                    if !changed.is_empty() {
+                                        return Ok(crate::native_project::changed_plan_inputs_reply(changed));
+                                    }
                                     let evidence=cortex_core::routing::evidence(db,&i.task,&root)?;
-                                    if let Some(routes)=routing {routes.previews(&root,&arguments["plan"],&evidence)?}else{json!([])}
+                                    if let Some(routes)=routing {
+                                        routes.previews(&root,&arguments["plan"],&evidence)?
+                                    } else {json!([])}
                                 }else{json!([])};
                                 lifecycle::plan::accept_routed_tx(db,&i.task,&c.channel_id,key,&arguments["plan"],&hints)
                             },
@@ -4148,7 +4397,7 @@ impl CorePolicy {
                 }
                 other => other.map_err(tool_error)?,
             };
-            if synthesis {
+            if synthesis || value["isError"] == true {
                 return Ok(value);
             }
             Ok(

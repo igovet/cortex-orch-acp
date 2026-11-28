@@ -15,6 +15,7 @@ pub(crate) struct Member {
     pub id: String,
     pub runtime: Option<String>,
     pub record: Value,
+    binding: Option<(String, String, i64)>,
     dependencies: Vec<String>,
     dependents: Vec<String>,
 }
@@ -29,12 +30,20 @@ pub(crate) struct Scope {
 const INVALID: CoreError = CoreError::Refused("sprint_membership_invalid");
 
 impl Scope {
-    pub fn load(db: &Connection, state: &Path, runtime: &str) -> CoreResult<Option<Self>> {
+    pub fn load(
+        db: &Connection,
+        state: &Path,
+        root: &Path,
+        runtime: &str,
+    ) -> CoreResult<Option<Self>> {
+        let root = root.to_str().ok_or(INVALID)?;
         let binding: Option<(String, String)> = db
             .query_row(
                 "SELECT w.task_id,w.project_id FROM workspace_tasks w JOIN workspace_executions e
-             ON w.execution_id=e.execution_id AND w.task_id=e.task_id WHERE e.runtime_task_id=?",
-                [runtime],
+             ON w.execution_id=e.execution_id AND w.task_id=e.task_id
+             JOIN workspace_projects p ON p.project_id=w.project_id
+             WHERE e.runtime_task_id=? AND p.project_root=?",
+                (runtime, root),
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
@@ -42,8 +51,9 @@ impl Scope {
             return Ok(None);
         };
         let path = native::product_path(state, &project).map_err(|_| INVALID)?;
-        let product = settings::read_json(&path, json!({"tasks":{},"sprints":[]}))
+        let mut product = settings::read_json(&path, json!({"tasks":{},"sprints":[]}))
             .map_err(|_| CoreError::Refused("state_unreadable"))?;
+        super::sprint_materialize::resolve_publication_on(db, &project, &mut product)?;
         let record = &product["tasks"][&task_id];
         let Some(sprint_id) = record["sprintId"].as_str() else {
             return Ok(None);
@@ -71,30 +81,63 @@ impl Scope {
             return Err(INVALID);
         }
         let mut members = HashMap::new();
-        let mut stmt = db.prepare("SELECT substr(w.description,1,160), w.execution_id, e.runtime_task_id, r.state,
-            r.synthesis IS NOT NULL
-            FROM workspace_tasks w LEFT JOIN workspace_executions e ON w.execution_id=e.execution_id AND w.task_id=e.task_id
-            LEFT JOIN runtime_tasks r ON r.task_id=e.runtime_task_id WHERE w.project_id=? AND w.task_id=?")?;
+        let mut stmt = db.prepare("SELECT substr(w.description,1,160), w.execution_id,
+            e.runtime_task_id, r.state, r.synthesis IS NOT NULL, s.session_id, o.epoch,
+            (a.project_root=p.project_root AND s.project_root=p.project_root
+             AND s.task_id=e.runtime_task_id AND o.epoch=e.owner_epoch AND o.epoch>0
+             AND r.revision>=0 AND (r.state!='COMPLETED' OR coalesce(r.blocker,'')='')
+             AND NOT EXISTS(SELECT 1 FROM workspace_starts x WHERE x.task_id=w.task_id
+                            AND (x.state='unknown' OR x.execution_id!=w.execution_id))),
+            EXISTS(SELECT 1 FROM workspace_starts x WHERE x.task_id=w.task_id)
+            FROM workspace_tasks w JOIN workspace_projects p ON p.project_id=w.project_id
+            LEFT JOIN workspace_executions e ON w.execution_id=e.execution_id AND w.task_id=e.task_id
+            LEFT JOIN runtime_tasks r ON r.task_id=e.runtime_task_id
+            LEFT JOIN tasks a ON a.id=r.task_id
+            LEFT JOIN acp_host_sessions s ON s.session_id=e.acp_session_id
+            LEFT JOIN task_owners o ON o.task_id=r.task_id WHERE w.project_id=? AND w.task_id=?")?;
         for id in &order {
             let overlay = &product["tasks"][id];
             if members.contains_key(id) || overlay["sprintId"] != sprint_id || id.len() > 128 {
                 return Err(INVALID);
             }
-            let (description, execution, runtime, status, has_synthesis): (
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                bool,
+            let (
+                description,
+                execution,
+                runtime,
+                status,
+                has_synthesis,
+                session,
+                epoch,
+                valid,
+                started,
             ) = stmt
                 .query_row((&project, id), |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, bool>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, Option<i64>>(6)?,
+                        r.get::<_, Option<bool>>(7)?,
+                        r.get::<_, bool>(8)?,
+                    ))
                 })
                 .optional()?
                 .ok_or(INVALID)?;
-            if execution.is_some() && status.is_none() {
+            if execution.is_none() && started {
                 return Err(INVALID);
             }
+            let binding = execution
+                .map(|execution| {
+                    if valid == Some(true) {
+                        Ok((execution, session.ok_or(INVALID)?, epoch.ok_or(INVALID)?))
+                    } else {
+                        Err(INVALID)
+                    }
+                })
+                .transpose()?;
             let dependencies: Vec<String> = match overlay.get("dependencies") {
                 None => Vec::new(),
                 Some(deps) => serde_json::from_value(deps.clone()).map_err(|_| INVALID)?,
@@ -120,6 +163,7 @@ impl Scope {
                     id: id.clone(),
                     runtime,
                     record,
+                    binding,
                     dependencies,
                     dependents: vec![],
                 },
@@ -161,10 +205,9 @@ impl Scope {
         self.sprint_id == other.sprint_id
             && self.members.len() == other.members.len()
             && self.members.iter().all(|(id, member)| {
-                other
-                    .members
-                    .get(id)
-                    .is_some_and(|current| current.runtime == member.runtime)
+                other.members.get(id).is_some_and(|current| {
+                    current.runtime == member.runtime && current.binding == member.binding
+                })
             })
     }
 
@@ -275,6 +318,7 @@ mod tests {
                 Member {
                     id: id.clone(),
                     runtime: None,
+                    binding: None,
                     record: json!({"title":"Д".repeat(200),"status":"not_started"}),
                     dependencies: if i == 0 {
                         vec![]

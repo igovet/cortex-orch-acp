@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use sha2::Digest;
 use support::Project;
 fn proposal() -> Value {
-    json!({"tasks":[{"id":"n","role":"backend-dev","objective":"Work","dependencies":[],"scope":["./src//","src"],"model":"auto","delivers":["work"]}],
+    json!({"tasks":[{"id":"n","role":"backend-dev","objective":"Work","dependencies":[],"scope":["./src//","src"],"model":"auto","delivers":["work"],"competencies":["backend"]}],
         "verification":[["cargo","test"]],"outcomes":[{"id":"work","statement":"The work is done"}]})
 }
 fn planning(s: &cortex_core::Store) {
@@ -13,6 +13,84 @@ fn planning(s: &cortex_core::Store) {
         Ok(())
     })
     .unwrap();
+}
+
+#[test]
+fn new_and_replanned_nodes_keep_explicit_choices_visible_to_review() {
+    let p = Project::new();
+    let s = p.open();
+    TaskMachine::new(&s).create("t", "Check the manifest", "owner").unwrap();
+    planning(&s);
+    let reason = "Compare the two checked-in fields to the fixed manifest using project reads.";
+    let mut proposed = proposal();
+    proposed["tasks"][0]["role"] = json!("explorer");
+    proposed["tasks"][0].as_object_mut().unwrap().remove("competencies");
+    let err = |plan: &Value| s.write(|db| plan::accept_tx(db, "t", "c", "attempt", plan))
+        .unwrap_err().code();
+    assert_eq!(err(&proposed), "plan_competencies_required");
+    proposed["tasks"][0]["competencies"] = json!([]);
+    assert_eq!(err(&proposed), "plan_base_sufficiency_reason_required");
+    proposed["tasks"][0]["base_sufficiency_reason"] = json!("  ");
+    assert_eq!(err(&proposed), "invalid_plan_base_sufficiency_reason");
+    proposed["tasks"][0]["base_sufficiency_reason"] = json!(reason);
+    s.write(|db| plan::accept_tx(db, "t", "c", "base", &proposed)).unwrap();
+    s.read(|db| {
+        let brief = cortex_core::assignment_brief::extras(db, "t", "n", "worker-explorer", "execution", "en")?;
+        assert_eq!(brief["competency_decision"], json!({"competencies":[],"base_sufficiency_reason":reason}));
+        let packet = cortex_core::lifecycle::reconciliation::review_packet_tx(
+            db, "t", "_review_1", None, None, &Default::default(),
+        )?;
+        assert_eq!(packet["competency_decisions"], json!([{"node":"n","role":"worker-explorer",
+            "competencies":[],"base_sufficiency_reason":reason,"objective_excerpt":"Work"}]));
+        Ok(())
+    }).unwrap();
+    planning(&s);
+    let stored_legacy = proposal();
+    s.write(|db| {
+        let mut legacy = stored_legacy.clone();
+        legacy["tasks"][0].as_object_mut().unwrap().remove("competencies");
+        db.execute("UPDATE runtime_tasks SET plan_json=? WHERE task_id='t'", [legacy.to_string()])?;
+        db.execute("UPDATE runtime_nodes SET role='worker-backend-dev',assignment_ref='retained' WHERE task_id='t' AND node_id='n'", [])?;
+        assert_eq!(plan::assignment_competencies(db, "t", "retained")?, ["backend"]);
+        Ok(())
+    }).unwrap();
+    proposed["tasks"][0].as_object_mut().unwrap().remove("base_sufficiency_reason");
+    proposed["tasks"][0]["competencies"] = json!(["database"]);
+    s.write(|db| plan::accept_tx(db, "t", "c", "replan", &proposed)).unwrap();
+    s.read(|db| {
+        let brief = cortex_core::assignment_brief::extras(db, "t", "n", "worker-explorer", "execution", "en")?;
+        assert_eq!(brief["competency_decision"], json!({"competencies":["database"]}));
+        Ok(())
+    }).unwrap();
+}
+#[test]
+fn competencies_are_bounded_and_bound_to_the_exact_execution_assignment() {
+    let mut plan = proposal();
+    for invalid in [json!(null), json!(["unknown"]), json!(["backend", "backend"]),
+        json!(["accessibility", "database", "debugging", "frontend", "performance"])] {
+        plan["tasks"][0]["competencies"] = invalid;
+        assert_eq!(plan::validate(&plan).unwrap_err().code(), "invalid_plan_competencies");
+    }
+    plan["tasks"][0]["competencies"] = json!([]);
+    assert_eq!(plan::validate(&plan).unwrap()["tasks"][0]["competencies"], json!([]));
+    plan["tasks"][0]["role"] = json!("explorer");
+    plan["tasks"][0]["competencies"] = json!(["security", "backend"]);
+    let normalized = plan::validate(&plan).unwrap();
+    assert_eq!(normalized["tasks"][0]["competencies"], json!(["backend", "security"]));
+    assert_eq!(normalized["tasks"][0]["role"], "worker-explorer");
+
+    let project = Project::new();
+    let store = project.open();
+    TaskMachine::new(&store).create("t", "goal", "owner").unwrap();
+    planning(&store);
+    store.write(|db| {
+        plan::accept_tx(db, "t", "c", "k", &plan)?;
+        db.execute("UPDATE runtime_nodes SET assignment_ref='exact' WHERE task_id='t' AND node_id='n'", [])?;
+        assert_eq!(plan::assignment_competencies(db, "t", "exact")?, ["backend", "security"]);
+        assert!(plan::assignment_competencies(db, "t", "other")?.is_empty());
+        assert!(plan::assignment_competencies(db, "other", "exact")?.is_empty());
+        Ok(())
+    }).unwrap();
 }
 #[test]
 fn every_goal_outcome_is_delivered_or_deferred_with_a_reason() {

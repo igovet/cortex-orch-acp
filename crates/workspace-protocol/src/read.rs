@@ -14,6 +14,8 @@ pub struct TaskProjection {
     pub title_availability: String,
     pub version: Version,
     pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_binding: Option<DraftBinding>,
     pub phase: String,
     pub runtime_state: Option<String>,
     pub execution_state: String,
@@ -27,6 +29,14 @@ pub struct TaskProjection {
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description_availability: Option<String>,
+}
+/// Identity for a local draft field. It carries no mutation authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DraftBinding {
+    pub runtime_task_id: String,
+    pub owner_epoch: Version,
+    pub session_id: String,
 }
 /// Display context for a file wait with a holder in the same Workspace project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,6 +66,54 @@ pub struct HistoryRow {
     pub availability: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+/// Body-free history metadata for one confirmed task in a native delta.
+/// Its position is the source high watermark of a history page, not the
+/// project outbox watermark in the enclosing delta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryHead {
+    pub task_id: String,
+    pub execution_id: String,
+    pub position: Version,
+    /// False leaves the decision revision unknown.
+    pub questions_empty: bool,
+}
+
+pub const HISTORY_HEAD_LIMIT: usize = 64;
+
+/// One local socket follows one open conversation. Only a confirmed forward
+/// cursor may resume an existing generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryFollowRequest {
+    pub project_id: String,
+    pub task_id: String,
+    pub execution_id: String,
+    pub generation: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+impl HistoryFollowRequest {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        for id in [&self.project_id, &self.task_id, &self.execution_id] {
+            crate::core::identity(id)?;
+        }
+        if let Some(generation) = &self.generation {
+            crate::core::identity(generation)?;
+        }
+        if self.limit == 0 || self.limit > 100 {
+            return Err("invalid_page_limit");
+        }
+        if self.cursor.as_ref().is_some_and(|cursor| {
+            self.generation.is_none() || cursor.len() > 256 || !cursor.starts_with("nt1.")
+                || cursor.chars().any(char::is_whitespace)
+        }) {
+            return Err("invalid_cursor");
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -186,6 +244,17 @@ pub fn read_request(method: &str, params: &serde_json::Value) -> bool {
             .is_some_and(|op| owner_read_op(op, &params["params"])),
         _ => false,
     }
+}
+
+/// Manual acceptance is a mutation with bounded inspections and no shared
+/// request deadline. Keep its classification separate from owner reads.
+pub fn owner_accept_op(op: &str, params: &serde_json::Value) -> bool {
+    op == "product.task" && params["action"] == "accept"
+}
+
+pub fn owner_accept_request(method: &str, params: &serde_json::Value) -> bool {
+    method == "machine.call"
+        && params["op"].as_str().is_some_and(|op| owner_accept_op(op, &params["params"]))
 }
 
 #[cfg(test)]

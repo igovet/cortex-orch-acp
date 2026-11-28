@@ -627,7 +627,7 @@ impl J {
         ];
         self.check("attachments_delivered_to_engine", texts_ok, detail);
         // The store retains each file by name and digest; no event carries the bytes.
-        let db = self.channel.store_db(&project);
+        let db = self.channel.store_db(&self.home, &project)?;
         let rows = crate::installed::native::query(&db, "SELECT name||'|'||sha256||'|'||size_bytes FROM source_blocks WHERE availability='stored' ORDER BY block_index")?;
         let retained: Vec<&str> = rows.lines().collect();
         let all_retained = expected.iter().all(|(name, bytes)| {

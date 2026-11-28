@@ -266,6 +266,30 @@ fn an_existing_store_gains_the_tool_call_indexes_on_a_writable_open_only() {
     .unwrap();
 }
 #[test]
+fn settled_turn_index_is_optional_until_initialization() {
+    let p = Project::new();
+    drop(p.open());
+    let db = Connection::open(p.key().database()).unwrap();
+    db.execute_batch("DROP INDEX runtime_events_settled_channel_time")
+        .unwrap();
+    drop(db);
+    let index_installed = |store: &Store| {
+        store.read(|db| Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='runtime_events_settled_channel_time')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?)).unwrap()
+    };
+    for mode in [OpenMode::InspectImmutable, OpenMode::LiveReadOnly] {
+        assert!(!index_installed(&Store::open(p.key(), mode).unwrap()));
+    }
+    assert!(index_installed(&p.open()));
+    for mode in [OpenMode::InspectImmutable, OpenMode::LiveReadOnly] {
+        assert!(index_installed(&Store::open(p.key(), mode).unwrap()));
+    }
+}
+
+#[test]
 fn channels_never_read_or_import_the_other_store() {
     let p = Project::new();
     let dev = p.open();

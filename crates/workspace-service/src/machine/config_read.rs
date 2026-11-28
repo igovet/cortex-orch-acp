@@ -71,6 +71,7 @@ pub fn read(config: &crate::Config) -> Result<Value> {
     let mut view = result.settings.view;
     view["diagnostics"] = json!(result.settings.diagnostics);
     view["catalogueRefresh"] = refresh;
+    view["machineName"] = super::settings::machine(&config.state_dir)?["name"].clone();
     Ok(view)
 }
 

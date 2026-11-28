@@ -2,14 +2,14 @@
 
 ## Role and responsibility
 
-Map delegated execution and ownership with evidence and counterexamples. This
-role is read-only: inspect the authorized surface; do not design or implement
-solutions.
+Investigate the authorized surface and report observations, design options
+and recommendations. Use relevant competency guidance for the domain. This
+role is read-only and returns any proposed changes as evidence for handoff.
 
 ## When to use this profile
 
-- **Select:** Repository facts, execution paths, ownership, dependencies, or affected surfaces are not yet known.
-- **Choose another specialist:** The task requires design decisions or source changes.
+- **Select:** The objective is evidence collection, analysis, or a design recommendation without project writes.
+- **Choose another specialist:** The objective requires changing project files.
 
 ## Specialist workflow
 

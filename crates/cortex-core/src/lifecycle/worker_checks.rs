@@ -1,6 +1,9 @@
 //! Worker check history is evidence, not a model-provided certification.
 //! Parity reference: delegation/evidence.py current_outcomes/accept_checks.
-use super::{completion::trivial_command, probe_correction};
+use super::{
+    completion::{diagnostic_exit, trivial_command},
+    probe_correction,
+};
 use crate::{CoreError, CoreResult};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -71,7 +74,16 @@ impl Run {
             && self.receipt.get("checkout") == other.receipt.get("checkout")
     }
     pub fn verified_failure(&self) -> bool {
-        self.complete() && self.receipt["exit_code"].as_i64().is_some_and(|c| c != 0)
+        self.complete()
+            && self.receipt["exit_code"].as_i64().is_some_and(|c| c != 0)
+            && !self.diagnostic_result()
+    }
+    pub fn diagnostic_result(&self) -> bool {
+        self.complete()
+            && self.receipt["exit_code"].as_i64().is_some_and(|code| {
+                serde_json::from_value::<Vec<String>>(self.receipt["argv"].clone())
+                    .is_ok_and(|argv| diagnostic_exit(&argv, code))
+            })
     }
     pub fn presented_failure(&self) -> bool {
         self.verified_failure()
@@ -130,7 +142,11 @@ pub fn load_runs(db: &Connection, task: &str, channel: &str) -> CoreResult<Vec<R
         .collect::<CoreResult<Vec<_>>>()?;
     let mut matched = Vec::new();
     for run in runs {
-        if crate::workspace::worktrees::receipt_matches(db, task, &run.receipt, false)? {
+        let matching = match crate::workspace::worktrees::assignments::worker_receipt_matches(db, task, channel, &run.receipt)? {
+            Some(matching) => matching,
+            None => crate::workspace::worktrees::receipt_matches(db, task, &run.receipt, false)?,
+        };
+        if matching {
             matched.push(run);
         } else if run.receipt["complete"] != true && run.receipt["checkout"].is_null() {
             // A not-yet-observed intent is not proof of any checkout.
@@ -735,7 +751,12 @@ pub fn open_items(evaluated: &[Value], runs: &[Run]) -> Vec<String> {
             .filter(|r| r.same(failed) && r.order > failed.order)
             .max_by_key(|r| r.order);
         let Some(latest) = later else {
-            items.push(format!("{label}: no_passing_rerun: no later run of the same {} argv, cwd and profile; fix the cause, rerun exactly that command and cite the passing run as passed under the same name", program(failed)));
+            let original = if failed.operation == "outside_command" {
+                "the original outside_command receipt"
+            } else {
+                "command_status for the original receipt"
+            };
+            items.push(format!("{label}: no_passing_rerun: no later run of the same {} argv, cwd and profile; use {original} to recover the argv and cwd, repeat them unchanged after your last edit and cite the passing run under the same name", program(failed)));
             continue;
         };
         let rerun = latest.reference();
@@ -1383,6 +1404,36 @@ mod tests {
         // A closed failure names nothing.
         let ok = run("ok", 2, 0, json!(["npm", "test"]), "passed");
         assert!(items(&[failed, check("passed", "ok")], &[bad, ok]).is_empty());
+    }
+    #[test]
+    fn worker_rerun_and_diagnostic_exit_keep_distinct_evidence() {
+        let argv = json!(["bash", "-c", "umask 022; export PATH=\"$HOME/bin:$PATH\"; exec npm --prefix packages/workspace-ui run test"]);
+        let failed = run("failed", 1, 1, argv.clone(), "failed");
+        let passed = run("passed", 2, 0, argv, "");
+        let result = evaluate_pair(
+            &[check("failed", "failed"), check("passed", "passed")],
+            &[failed, passed],
+        ).unwrap();
+        assert_eq!(result[0]["closed_by"], "passed");
+        assert_eq!(result[1]["evidence_strength"], "verified");
+
+        for argv in [
+            json!(["git", "diff", "--no-index", "--check", "/dev/null", "file"]),
+            json!(["git", "grep", "needle"]),
+            json!(["diff", "one", "two"]),
+        ] {
+            let diagnostic = run("diagnostic", 1, 1, argv, "");
+            assert!(diagnostic.diagnostic_result());
+            assert!(!diagnostic.verified_failure());
+            assert!(!diagnostic.presented_failure());
+        }
+        for (argv, code) in [
+            (json!(["git", "grep", "-q", "needle"]), 1),
+            (json!(["git", "diff", "--no-index", "--check", "/dev/null", "file"]), 3),
+            (json!(["diff", "one", "two"]), 2),
+        ] {
+            assert!(run("failure", 1, code, argv, "").presented_failure());
+        }
     }
     /// Owner stores (60 `open_failed_check`, 44 `failed_check_repair_required`): an
     /// identical rerun the runtime observed passing on the exact checkout makes the

@@ -29,13 +29,10 @@ fn invalid() -> CoreError {
 /// root (a linked checkout shares its main project's registry), so it never
 /// sits in the project tree and its contents cannot be changed by the project.
 pub fn project_registry_path(cortex_dir: &Path, root: &Path) -> CoreResult<PathBuf> {
-    use sha2::{Digest, Sha256};
     let logical = crate::native_runtime::key(root)?;
-    let digest = Sha256::digest(logical.root().as_os_str().as_encoded_bytes());
-    let name: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
     Ok(cortex_dir
         .join("projects")
-        .join(name)
+        .join(logical.identity())
         .join("mcp-servers.json"))
 }
 fn strings(v: Option<&Value>) -> CoreResult<Vec<String>> {
@@ -885,6 +882,13 @@ fn grant(p: &Path, root: &Path) -> Result<PathBuf, Error> {
 /// Bounded protected-path decision for one contained-server grant.
 fn guard_grant(p: &Path, home: &Path) -> Result<(), Error> {
     safe(p)?;
+    let stores = crate::native_store_policy::roots(&std::env::vars_os().collect())
+        .map_err(|_| Error::Forbidden)?;
+    if stores.iter().any(|store| {
+        crate::native_store_policy::contains(store, p) || store.starts_with(p)
+    }) {
+        return Err(Error::Forbidden);
+    }
     let config = home.join(".config/cortex");
     let data = home.join(".local/share/cortex");
     let state = home.join(".local/state/cortex");

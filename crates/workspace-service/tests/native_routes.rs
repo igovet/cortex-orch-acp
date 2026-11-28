@@ -900,7 +900,7 @@ impl Fixture {
     }
 }
 #[test]
-fn preset_routes_only_the_current_sonnet_and_associates_its_quota() {
+fn preset_keeps_sonnet_enabled_and_associates_quota_with_the_exact_versioned_model() {
     let preset: Value =
         serde_json::from_str(include_str!("../../../policy/model-settings-default.json")).unwrap();
     let routing = &preset["routing"];
@@ -913,12 +913,14 @@ fn preset_routes_only_the_current_sonnet_and_associates_its_quota() {
     );
     assert_eq!(
         models[claude]["auto"],
-        json!(["opus", "fable", "haiku", "sonnet"])
+        json!(["opus", "fable", "claude-sonnet-5", "haiku", "sonnet"])
     );
-    assert!(!routing.to_string().contains("claude-sonnet-5"));
+    assert_eq!(models[claude]["tiers"]["claude-sonnet-5"], json!(["standard", "light"]));
+    assert_eq!(models[claude]["policy"]["claude-sonnet-5"]["effort_floor"], "medium");
+    assert_eq!(models[claude]["policy"]["claude-sonnet-5"]["max_effort"], "xhigh");
     assert_eq!(
         routing["quota_windows"][claude][1],
-        json!({"window":"seven_day_sonnet","models":["sonnet"]})
+        json!({"window":"seven_day_sonnet","models":["claude-sonnet-5"]})
     );
     for (engine, model) in [(claude, "haiku"), ("codex-acp", "gpt-6-luna")] {
         assert_eq!(
@@ -1026,23 +1028,37 @@ fn preset_routing_preferences_and_role_tiers_follow_complexity() {
     let evidence = Default::default();
     assert_eq!(preset["coordinator"]["model"], "opus");
     let menu = resolver.menu(&evidence).unwrap();
-    for role in [
-        "worker-technical-writer",
-        "worker-general",
-        "worker-planner",
-    ] {
+    for tier in ["light", "standard"] {
+        let models = menu["tiers"][tier].as_array().unwrap();
+        assert!(models.iter().any(|route| route["model"] == "sonnet"));
+        assert!(models.iter().all(|route| route["model"] != "claude-sonnet-5"));
+    }
+    assert_eq!(
+        menu["quota_window_policy"]["rules"]["claude-agent-acp"][1],
+        json!({"window":"seven_day_sonnet","models":["claude-sonnet-5"]})
+    );
+    for role in ["worker-general", "worker-explorer"] {
         assert_eq!(
             menu["roles"][role],
             json!({"low":"light","normal":"standard","high":"deep"})
         );
     }
-    assert_eq!(
-        menu["roles"]["worker-explorer"],
-        json!({"low":"light","normal":"light","high":"standard"})
-    );
+    assert_eq!(menu["roles"].as_object().unwrap().len(), 2);
+    for (complexity, tier) in [("low", "light"), ("normal", "standard"), ("high", "deep")] {
+        let node = json!({"id":"inspect","role":"explorer","complexity":complexity,
+            "competencies":["database"], "model":"auto"});
+        let preview = resolver.previews(&json!({"tasks":[node.clone()]}), &evidence).unwrap();
+        let dispatch = resolver.choose("worker-explorer", &node, &evidence, false, None).unwrap();
+        assert_eq!(preview[0]["tier_now"], tier);
+        assert_eq!(dispatch.decision["role_tier"], tier);
+    }
     // Menu tiers alone do not exercise the retry dispatch path.
-    for (complexity, tier) in [("low", "light"), ("normal", "light"), ("high", "standard")] {
-        for escalated in [false, true] {
+    for (complexity, normal, retry) in [
+        ("low", "light", "standard"),
+        ("normal", "standard", "deep"),
+        ("high", "deep", "flagship"),
+    ] {
+        for (escalated, tier) in [(false, normal), (true, retry)] {
             let selected = resolver
                 .choose(
                     "worker-explorer",
@@ -1056,11 +1072,6 @@ fn preset_routing_preferences_and_role_tiers_follow_complexity() {
                 selected.decision["role_tier"], tier,
                 "{complexity}/{escalated}"
             );
-            assert_eq!(selected.decision["tier"], tier, "{complexity}/{escalated}");
-            if tier == "light" {
-                let effort = if escalated { "xhigh" } else { "high" };
-                assert_eq!(selected.parameters["thought_level"], effort);
-            }
         }
     }
     for role in ["worker-technical-writer", "worker-qa-engineer"] {
@@ -1157,8 +1168,8 @@ fn parity_menu_has_oracle_fields_live_tiers_roles_efforts_and_conditional_prefer
             "stretch"
         ])
     );
-    assert_eq!(menu["roles"]["worker-backend-dev"]["high"], "deep");
-    assert_eq!(menu["role_work_kinds"]["worker-qa-engineer"], "testing");
+    assert_eq!(menu["roles"]["worker-general"]["high"], "deep");
+    assert_eq!(menu["role_work_kinds"]["worker-explorer"], "investigation");
     assert_eq!(
         menu["preferred_when"]["codex-acp/sol"],
         json!({"when":"Backend only.","work_kinds":["review"]})

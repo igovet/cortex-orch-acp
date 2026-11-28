@@ -453,9 +453,36 @@ fn start_worktree_with(
         Some(r) => start_rework_digest(r.request)?,
         None => start_digest(command, None, None, policy)?,
     };
+    let replay = store.read(|db| {
+        let authorized: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_projects WHERE project_id=? AND project_root=? AND activated_by=?)",
+            (project, store.key().root().to_string_lossy().as_ref(), actor),
+            |row| row.get(0),
+        )?;
+        if !authorized {
+            return refuse("unauthorized");
+        }
+        let prior: Option<(String, String)> = db.query_row(
+            "SELECT digest,receipt_json FROM workspace_requests WHERE project_id=? AND actor_id=? AND request_id=?",
+            (project, actor, request),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        if let Some((old, encoded)) = prior {
+            if old != digest {
+                return refuse("payload_conflict");
+            }
+            return Ok(Some(serde_json::from_str::<Value>(&encoded)?));
+        }
+        crate::deliverables::ready(store, db, project, draft)?
+            .map_err(|issue| CoreError::Refused(issue.code))?;
+        Ok(None)
+    })?;
+    if let Some(receipt) = replay {
+        return Ok(json!({"receipt":receipt,"fresh":false}));
+    }
     let reserve = worktrees::reserve(store, project, actor, request, draft, &digest, command)?;
     use worktrees::Reservation::*;
-    let (plan, witness) = match reserve {
+    let (plan, witness, provision_ms) = match reserve {
         Replay(receipt) => return Ok(json!({"receipt":receipt,"fresh":false})),
         Refused(error) => return refuse(error),
         Observed(plan, witness) => {
@@ -463,7 +490,7 @@ fn start_worktree_with(
                 worktrees::mark(store, project, actor, request, "uncertain", "worktree_uncertain")?;
                 return refuse("worktree_uncertain");
             }
-            (plan, witness)
+            (plan, witness, None)
         }
         New(title) => {
             // Members of a sprint that shares one worktree reuse the first member's
@@ -482,7 +509,7 @@ fn start_worktree_with(
                     }
                     worktrees::save_plan(store, project, actor, request, &plan)?;
                     worktrees::save_witness(store, project, actor, request, &witness)?;
-                    return admit_native_start(store, project, actor, command, None, None, policy, Some((&plan, &witness)), rework);
+                    return admit_native_start(store, project, actor, command, None, None, policy, Some((&plan, &witness, None)), rework);
                 }
             }
             let (plan_key, plan_title) = match &shared {
@@ -497,6 +524,7 @@ fn start_worktree_with(
                 }
             };
             worktrees::save_plan(store, project, actor, request, &plan)?;
+            let started = std::time::Instant::now();
             let witness = match plan.provision(store.key().root()) {
                 Ok(witness) => witness,
                 Err(_) => {
@@ -504,11 +532,12 @@ fn start_worktree_with(
                     return refuse("worktree_uncertain");
                 }
             };
+            let provision_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX).max(1);
             worktrees::save_witness(store, project, actor, request, &witness)?;
-            (plan, witness)
+            (plan, witness, Some(provision_ms))
         }
     };
-    admit_native_start(store, project, actor, command, None, None, policy, Some((&plan, &witness)), rework)
+    admit_native_start(store, project, actor, command, None, None, policy, Some((&plan, &witness, provision_ms)), rework)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -520,7 +549,7 @@ fn admit_native_start(
     client: Option<(&str, &Value)>,
     capture: Option<&crate::input::Capture>,
     policy: Option<NativeExecutionPolicy>,
-    worktree: Option<(&worktrees::Worktree, &worktrees::Witness)>,
+    worktree: Option<(&worktrees::Worktree, &worktrees::Witness, Option<u64>)>,
     rework: Option<StartRework<'_>>,
 ) -> CoreResult<Value> {
     workspace_protocol::validate("Command", command)
@@ -569,8 +598,10 @@ fn admit_native_start(
         if !command["ownerEpoch"].is_null() { return refuse("stale_owner_epoch"); }
         let mut options: Value = serde_json::from_str(&options)?;
         if options.get("deletingSprint").is_some() {return refuse("sprint_deleting");}
+        let inputs = crate::deliverables::ready(store, db, project, draft)?
+            .map_err(|issue| CoreError::Refused(issue.code))?;
         match (options["checkout"]["kind"].as_str(), worktree) {
-            (Some("worktree"), Some((plan, _))) => {
+            (Some("worktree"), Some((plan, _, _))) => {
                 options["checkout"] = plan.projection();
                 if options.get("sprintWorktree").is_some() {
                     options["checkout"]["shared"] = json!(true);
@@ -616,10 +647,17 @@ fn admit_native_start(
         crate::routing::snapshot_tx(db, &task, store.key().root())?;
         crate::lifecycle::event_tx(db,&task,"TASK_STATE_CHANGED",json!({"previous":"CREATED","state":"PLANNING"}))?;
         crate::lifecycle::event_tx(db,&task,"NATIVE_START_ADMITTED",json!({"draft":draft,"request":request,"goal":goal,"options":event_options}))?;
-        if let Some((plan, witness)) = worktree {
+        if !inputs.is_empty() {
+            crate::lifecycle::event_tx(db, &task, "SPRINT_INPUTS_BOUND", json!({"revision":0,"inputs":inputs}))?;
+        }
+        if let Some((plan, witness, provision_ms)) = worktree {
             worktrees::bind_tx(db, project, actor, request, draft, version, &task, plan, witness)?;
             db.execute("UPDATE workspace_task_options SET options_json=? WHERE task_id=?",
                 (options.to_string(), draft))?;
+            if let Some(ms) = provision_ms {
+                crate::lifecycle::event_tx(db, &task, "NATIVE_WORKTREE_PROVISION_TIME",
+                    json!({"checkout_id":plan.id,"elapsed_ms":ms}))?;
+            }
         }
         let execution = bind_native_execution_tx(db,store,project,actor,draft,&task,&owner)?;
         if let Some(settings) = &saved {
@@ -841,6 +879,7 @@ pub fn create_drafts_tx(
         // The sprint worktree marker is a host-side option, not part of the wire payload.
         if let Some(fields) = payload.as_object_mut() {
             fields.remove("sprintWorktree");
+            fields.remove("sprintDeliverables");
         }
         workspace_protocol::validate("CreatePayload", &payload)
             .map_err(|_| CoreError::Refused("invalid_workspace_request"))?;

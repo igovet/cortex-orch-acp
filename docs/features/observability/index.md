@@ -1,147 +1,16 @@
-# Observability and resource attribution
+# Observability
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
+Runtime events are retained in the project's [channel-specific state store](../../project/storage.md#where-the-database-lives-and-how-it-moves). and resource attribution
 
+The Rust runtime retains lifecycle events, route choices, activity and usage in the project store. Workspace and Paseo expose bounded views of those records.
 
-This page describes how route use, recovery, resource limits, and uncertainty
-observable without exposing secrets or inventing telemetry. It never
-replaces an existing durable evidence path (the `task_events` log,
-`attempt_route_audit`, `context_generations`/
-`capsule_deliveries`, ...); it reads and joins those, plus two new tables,
-to build the metrics and attribution
-require.
+> The usage, command and reader descriptions below are linked to the Rust source. Client-specific claims in the activity projection section are only verified where a source or a versioned observation is identified.
 
-## 1. Structured events
+## Structured events
 
-`observability_events` (additive table in the current format-12 store; the metadata signals in this section add no schema change) is an
-append-only, immutable table: every row
-carries whichever runtime identities the occurrence actually has —
-`assignment_ref`, `attempt_id`, `engine_session_ref`,
-`context_generation_id`, `config_revision_id`, `connection_id`,
-`route_engine`, `source_event_ref` — every one nullable, never fabricated
-when absent, plus a mandatory `category`/`outcome` and a `basis`
-classification chosen out of the same closed set
-`compaction_guard`/`token_budget` already use:
-`observed` | `engine_reported` | `derived` | `estimated` | `unknown`.
-There is no default basis — every append site chooses explicitly.
+The runtime records task state transitions and related events through [Core lifecycle](../../../crates/cortex-core/src/lifecycle.rs). Workspace uses [Core projections](../../../crates/cortex-core/src/projections.rs) and the [machine worker reader](../../../crates/workspace-service/src/machine/workers.rs). Paseo uses its [read-only worker-history command](../../../crates/cortex-paseo-tools/src/worker_history.rs).
 
-The additive [tool discovery/read API](../tool-discovery-and-read-batch/index.md)
-records `tool_read_api` events: catalogue revision, hashed channel/outer/item
-correlation, operation/index, execution/delivery status, elapsed milliseconds and
-compact UTF-8 input/output byte counts. Arguments, bodies, cursor values and
-caller item-id text are not recorded in these events. Executed members remain
-observable even when later authority loss withholds the reply. Successful inline
-report pages retain composite outer/item report-read observations; deferred
-references do not establish report handoff reads. Counts are executions and bytes,
-not native MCP round trips, model tokens, command receipts or proof of consumption.
-New discovery/batch bodies are omitted from display history through the existing
-read projection.
-
-The current append sites are:
-
-- The store layer records a `publication`/`duplicate_attempt` row, in
-  the very same transaction, whenever a `(scope, operation, delivery_key)`
-  already has a confirmed `deliveries` row — an idempotent replay of an
-  already-confirmed write, never a new mutation, but a genuine *duplicate
-  publication attempt* for the metric below.
-- the runtime records a `validation`/`<error code>` row
-  whenever a channel's own tool-call arguments fail
-  the runtime — the "schema/validation errors" metric.
-- Rejected worker submissions also produce `submission_rejection` rows. The
-  event records the safe error code and bounded field-path diagnostics, not
-  rejected values or report content. This includes result-schema corrections
-  and observable situational-skill gate refusals; exact field paths are capped
-  by the runtime's violation bound.
-- After sent session metadata is recorded, a best-effort `base_prompt` event
-  records only the mode (`unified`, `native` or `unknown`) and session
-  identifiers. It does not store the prompt or environment values. Because
-  recording is best-effort, a missing event does not establish which prompt was
-  used.
-
-`observability.events.list_events(store, task_id, category=..., after=...)`
-is the cursor-paginated read.
-
-The diagnostics summary's `schema_validation_errors` is an observed count across
-both `validation` and `submission_rejection` events. Its `base_prompt` field
-counts observed session modes in recorded `base_prompt` events; it reports
-`unavailable_reason` when none were recorded. This diagnostic is event-backed,
-not an INFO log or a record of prompt text.
-
-Worker-panel history uses the existing durable `task_events` stream rather
-than a second transcript store. Each redacted `progress` row carrying
-`kind=worker_activity` is bound to the task and worker attempt, and the panel
-reads it in event-id order with an `after` cursor and bounded page size. An activity envelope over 64 KiB is offloaded: the row keeps a bounded preview, the `large_output_id`, and the byte count and SHA-256 of the full redacted body. The panel shows a preview notice and does not load the body eagerly (see [storage](../../project/storage.md#runtime-indexes-and-offloaded-worker-activity)).
-While a worker is active, the host panel refreshes that cursor incrementally
-about every 750 ms. Exact lifecycle updates for one logical tool coalesce in
-the panel, while worker deltas are held until a tool boundary or turn end and
-persisted as complete message blocks. Each block carries a durable segment
-identity across all runtime tools, so live and replay views preserve ordering.
-
-### Metadata signals for loop and write measurement
-
-These records make gateway, engine-turn and write activity measurable. Each is
-metadata only: none stores file content, tool arguments, reply bodies, prompt
-text or credentials. A signal the runtime cannot observe is reported as
-unavailable or partial, never as zero.
-
-- **`project_read`** (`category='project_read'`, `basis='observed'`). One row per
-  gateway `project_read` call, written in the call's own transaction. `outcome` is the kind:
-  `text`, `dir`, `image`, `binary`, `missing` or `failed`. `detail` carries only
-  `path`, `kind` and, where meaningful, `sha256`, `start_line`, `end_line`,
-  `complete`, `size_bytes` or an error code. Row volume follows call count, not
-  file size. Native engine reads never pass through the gateway and produce no row.
-- **`gateway_refusal`** (`category='gateway_refusal'`, `basis='observed'`). A
-  refusal before a mutation: schema validation, a mutation wait, a scope denial
-  (`gateway_scope_denied`) or a request-key conflict (`request_key_conflict`).
-  `outcome` and `detail.error` carry the error code; `detail` holds the operation
-  name and error code only. Recording is best-effort and never changes the refusal
-  the caller receives.
-- **`external_refusal` and `external_error`**. A
-  denied external MCP tool (`external_refusal`), or a denied method, timeout,
-  closed pipe, oversized frame or response mismatch (`external_error`). `detail`
-  holds `server`, `tool` and `error` only. An engine's startup discovery
-  (`resources/list`, `resources/templates/list`, `prompts/list`) is answered with an
-  empty list by the proxy itself, since the gateway grants no resources or prompts;
-  it used to be logged as about 30 denials per reviewer session.
-- **Write size.** The `TOOL_COMPLETED` result of `project_write` and
-  `project_edit` also carries `changed_bytes` and `changed_lines`, computed from
-  the common prefix and suffix of the old and new content. Creation gives
-  `changed_bytes` equal to the byte count. Only sizes are stored; no diff is added.
-- **`EXTERNAL_TOOL_AUTHORIZED.arguments_sha256`.** SHA-256 of the canonical
-  `{name, arguments}` object, without `_meta`, so repeats with different client
-  metadata get the same value. The `runtime_requests` receipt digest is unchanged
-  and still covers all of `params`. The digest is unkeyed: a guessed low-entropy
-  argument set can be confirmed against it. Use it to detect repeats, not as
-  redaction.
-- **`COORDINATOR_TURN_ENDED`** (runtime event). Each coordinator `prompt()` call
-  that recorded `COORDINATOR_TURN_STARTED` gets one paired end event carrying
-  `stop_reason` when the call returned, or `failure_kind` (the exception class
-  name) when it raised.
-- **`FIRST_MODEL_OUTPUT` gating.** Recorded only for the first
-  `agent_message_chunk`, `agent_thought_chunk` or `tool_call` update of an attempt. Its payload
-  carries `update_kind` only. The earlier rule, the first update of any kind, could
-  record a non-model update; rows already written are not reclassified.
-- **Usage across inner turns.** Still one `usage_records` row per `prompt()` call.
-  When a stall-nudge or refusal continuation runs several inner engine turns inside
-  that call, the row's tokens are the sum of the turns' reported usage; previously only the last inner
-  turn counted. The basis stays `unknown` with empty tokens when no inner turn
-  reported usage. When some inner turns reported usage and another inner turn
-  reported none, the basis is also `unknown` with empty tokens: the sum would omit
-  that turn's contribution, so it is never recorded as `engine_reported`. Only a call
-  whose inner turns all reported usage keeps `engine_reported` and the summed tokens.
-
-**Engine limits.** Claude's native Bash, Read, Edit, Write, Grep, Glob and
-NotebookEdit tools are disabled by configuration;
-this page does not re-verify live compliance. The Codex CLI version examined in the
-observability audit cannot disable the `unified_exec` flag; with the launcher's
-flags its local tool inventory omits `exec_command` and `write_stdin` (see
-[Codex shell tool inventory](../codex-engine/index.md#codex-shell-tool-inventory-and-unified_exec)).
-Any Codex native `exec` row that does appear is an ACP-reported display event, not a
-runtime receipt, and Codex
-`apply_patch` edits have no runtime receipt. Codex read and edit figures are
-therefore partial and must be labelled so. ACP v1 has no per-inference boundary:
-model steps between tool calls are estimated from gaps between tool calls and are
-never counted.
+The runtime records elapsed times in `observability_events`. The [timing reader](#timing-diagnostics) combines these records with exact intervals derived from retained lifecycle events.
 
 ### Bounded ACP event projections
 
@@ -293,25 +162,8 @@ shown Result summary (whitespace aside) is not repeated below it; differing
 result text, the final response and other prose stay, and stored history is
 unchanged (`withoutShownResult` in `client/worker-panel-events.ts`).
 
-Above the Result, an **Assignment prompt** section shows the task text the
-runtime sent to the selected attempt, collapsed to its state and a one-line
-preview with a Show/Hide control. Its content is that attempt's own
-`delegation_requested` request (the optional title block, the brief and its
-acceptance line, scrubbed by the history reader), rendered as objective
-Markdown, scope, dependency report references, original goal and review
-evidence; runtime system, role and catalogue text is never included. Just
-before the engine prompt that carries this text, the runtime records a
-non-meaningful `progress` row of kind `worker_brief_sent` per execution
-attempt (a route fallback is a new one) with only the attempt identities and
-the SHA-256 and length of exactly that text. The reader shows "Sent to this
-attempt" with that time only when a record matches the request; otherwise it
-says queued (active, not yet recorded as sent), unrecorded (older history, or
-ended before its first prompt; the dispatched text is shown), or withholds
-the text on mismatch, and says when no request text is retained. It never
-uses current, possibly re-planned, node text. Only worker-tab reads that
-select a worker carry it; compact card and catalogue reads do not. The prompt
-section, the single Result and the borderless focus state are covered by
-no-paid runtime, history, model and client-bundle render-walk tests only.
+The Paseo worker-history reader can show a retained assignment brief when the saved record belongs to the selected attempt. If there is no retained match, the reader cannot establish that a brief was sent. See the [Paseo history reader](../../../crates/cortex-paseo-tools/src/worker_history.rs) and [native worker admission](../../../crates/workspace-service/src/native_runtime.rs).
+
 Coverage of the earlier card and tab behavior is
 no-paid provider, history, model and client-bundle render-walk tests plus a
 react-native-web fixture rendering; it is not Paseo Desktop evidence.
@@ -441,7 +293,7 @@ does not infer a diff from the current file or from a status-only event.
 ## 2. Usage/cost attribution
 
 The Rust session driver records one immutable `usage_records` row per sent
-task-bound ACP `session/prompt`, on a best-effort basis. The row names the
+task-bound ACP `session/prompt`, on a best-effort basis in the [native driver](../../../crates/workspace-service/src/native_driver.rs). The row names the
 task, exact attempt and engine session, and its one-based sequence among
 dispatched prompts on that session. Continuations and retries are separate
 calls; neither launch nor undispatched requests are calls. Workspace resolves
@@ -449,7 +301,8 @@ engine and model from `NATIVE_SESSION_CONFIGURED` and correlates usage with
 `NATIVE_TURN_SETTLED` without double-counting a settled refusal.
 
 Only validated, recognized counters in the exact final `PromptResponse.usage`
-are stored as `engine_reported`. Cost is not collected, and context occupancy
+are stored as `engine_reported`. If the adapter omits its total, the stored
+total sums the recognized counters it provided. Cost is not collected, and context occupancy
 does not stand in for consumption. Missing or invalid reports remain
 `unknown`, with empty `tokens_json`. Losing the response after an accepted
 worker result can leave token usage unknown without undoing that result.
@@ -481,263 +334,61 @@ Engine and model are not duplicated on each row. Workspace uses the exact
 configured session reference for new rows; the older readers retain their
 historical attribution rules. Route audit values are not token measurements.
 
-## 3. Metrics and the read API
+## Redaction
 
-The historical `observability.metrics.diagnostics_summary(store, task_id)` returned, for
-every metric, its own `unit` and either `availability="available"` or
-`availability="unavailable_reason"` with a plain-text reason — an
-unimplemented/uninstrumented metric is reported as unavailable, never
-silently omitted or defaulted to zero:
-
-| Metric | Source | Unit |
-| --- | --- | --- |
-| `resource_caps` | `configuration_revisions.ceiling_snapshot` (`PolicyCeiling`) | call/token/concurrency counts; monetary cap only when `spend_limit_enforceable` |
-| `recovery_latency` | `attempt_route_audit` fallback rows (`recorded_at` deltas) | seconds |
-| `route_acceptance_latency` | `delegation_requested` to `WORKER_COMPLETED`, joined to `attempt_route_audit` and accepted-plan complexity | seconds, grouped by engine/model/role/complexity |
-| `route_fix_cycles` | `REVIEW_CHANGES_REQUESTED` plus dispatched fix nodes and `attempt_route_audit` | review cycles, grouped by engine/model/role/complexity |
-| `repeat_calls` | `usage_records` (`call_sequence` > 1 per engine session) | count of ACP `prompt()` re-deliveries per engine session, never repeated tool calls (see `loop_profile`); `truncated` is set when the 2000-row read cap is reached |
-| `schema_validation_errors` | `observability_events` category=`validation` | count |
-| `manual_interventions` | `pending_questions`; permission dialogs declared `unavailable_reason` (JSONL-only, not indexed by task) | count |
-| `duplicate_publications` | `observability_events` category=`publication` | count |
-| `tokens` | `usage_records` (`usage_summary`) | tokens, per reported field name |
-| `concurrency` | `capacity_reservations` (`state='reserved'`) | count |
-| `loop_profile` | `TOOL_AUTHORIZED`, `EXTERNAL_TOOL_AUTHORIZED`, `project_read` rows, `tool_result_observations`, completion timestamps | per attempt: call counts by class, inference-gap estimate (count, sum, p50, p90 seconds), observed tool time |
-| `reinvestigation` | `project_read` rows (path and `sha256` per call) | repeat-read ratios within an attempt and across attempts of one task; `partial` for non-Claude engines |
-| `write_redundancy` | `TOOL_COMPLETED` of `project_write`/`project_edit` (bytes and changed bytes) | gateway byte ratios, separate project-write population; native share unavailable without classification |
-| `critical_path` | `runtime_events` (per-class interval union, user waits excluded) | seconds and share of task wall time per class |
-
-Route metrics are task-local, descriptive observations; they do not feed routing decisions and are not sufficient for automatic model selection.
-`route_acceptance_latency` measures from the `delegation_requested` event to the runtime's `WORKER_COMPLETED` event for execution assignments. The latter is the accepted worker-result boundary in `TaskMachine.record_result`; it does not mean the whole task was independently reviewed, approved or completed. It is therefore not end-to-end task acceptance latency.
-
-`route_fix_cycles` attributes a review cycle to the route(s) that executed dispatched fix assignments. It groups routes that ran fixes, not routes that caused the defect or originated the preceding work; a cycle may appear in multiple groups when fixes use multiple routes. Treat both route metrics as diagnostic context, not a model quality ranking or an automatic routing signal. Reviewer nodes, failed results, and samples missing dispatch time, route audit, or a valid non-negative duration are excluded and counted. Routes are taken from the exact provisioned attempt's `attempt_route_audit`; complexity comes from that revision's `PLAN_ACCEPTED` plan, using `normal` when the optional hint was omitted.
-
-`route_fix_cycles` counts durable `REVIEW_CHANGES_REQUESTED` events. Its route groups count distinct cycles with at least one fix assignment dispatched on that engine/model/role/complexity. One review cycle can appear in multiple groups when its fixes use different routes, so group counts are not additive. Pending fixes and dispatched fixes without route audits remain explicit in the attribution counters. Both grouped outputs cap the displayed group list at 100 and set `groups_truncated` when more groups exist.
-
-`resource_caps` never presents an exact monetary cap unless
-`spend_limit_enforceable` is `True` —
-that dataclass already refuses to construct a `spend_limit` without it
-(`unenforceable_spend_limit`), so a non-`None` `monetary_cap` here is
-always backed by that construction-time enforcement gate. Absent that,
-only the conservative `attempts`/`calls`/`tokens`/`concurrency` limits are
-surfaced.
-
-**MCP read.** No model-facing tool returns this summary. The former runtime's
-coordinator-only `read_diagnostics` tool has no native implementation and is no
-longer in any role's catalogue; the summary is not available to models.
-
-### Loop, re-investigation and write aggregates
-
-`diagnostics_summary` adds four sections. Each has `unit`, `availability` and `basis`; an unobservable measure
-is `unavailable_reason` with a reason, never 0.
-
-- **`loop_profile`** (per attempt). Gateway, project-read and external counts come
-  from their authoritative tables. `acp_reported_calls` includes their ACP echoes,
-  so it is never added to gateway counts; `tool_calls_for_decision` uses the
-  distinct ACP count. Generic ACP kinds do not identify delegation or native tools.
-  Estimated inference gaps include streamed text and adapter latency; incomplete
-  or concurrent spans withhold the proxy. Each execution attempt uses its own
-  duration, excluding user waits; review attempts are not execution samples.
-  Gateway durations bind actor and receipt; external durations bind actor, server
-  and request ID, requiring unique ordered boundaries. The ACP, gateway-duration
-  and external-duration queries have separate 5,000-row truncation flags.
-- **`reinvestigation`**. Per-call gateway read rows support within-attempt repeats
-  and repeats by another exact channel of the same task. Decision inputs use text
-  reads in dependent execution attempts. Read time is estimated only when the read
-  event lies in one complete ACP read span, containing no other read event; an
-  absent or ambiguous binding withholds the time condition. The aggregate ratio
-  is call-weighted; repeated-read seconds are divided by the summed execution
-  attempt durations, with user waits excluded. Unknown engine identity and
-  non-Claude engines are partial; native reads are not invented. The single-task
-  cross-task field remains unavailable; multi-task mode uses retained per-call
-  text-read history, not the overwritten last-read state.
-- **`write_redundancy`** (derived). The overall ratio covers gateway
-  `project_write` and `project_edit`; `project_write_redundancy_ratio` and the
-  edit-tool gate use only `project_write` bytes and changed bytes. Gateway shares
-  are separate from all-write shares. ACP `kind=edit` cannot identify Codex
-  `apply_patch` or exclude gateway echoes, so native share is unavailable.
-  All-write share is available only for a known Claude-only population, relying
-  on configured native-file-tool disablement, not live proof of compliance.
-- **`critical_path`**. First-to-last recorded task wall time excludes recorded
-  user waits from every numerator and the denominator. Each class and the combined
-  orchestration/review-verification classes use interval unions, not summed
-  overlapping shares. Failed-attempt cost is separate. Worker boundaries bind
-  exact attempt/session identity; a terminal lacking a session can use the single
-  ready session of its explicit attempt. Ambiguous, absent, open or truncated
-  phases are unavailable, not zero; a closed interval wholly inside a user wait
-  can legitimately be zero. Phase-chain eligibility requires a completed task,
-  completed execution attempt, same-revision completed review and passed
-  verification after execution. Explicit closed scheduler observations can
-  establish zero scheduler-wait time. Capped at 10,000 events.
-
-`repeat_calls` now states what it counts: ACP `prompt()` re-deliveries per engine
-session, not repeated tool calls. Its `truncated` flag is set when the 2,000-row
-usage read cap is reached.
-
-## 4. Redaction
-
-A single scrubbing path, reused by every free-text sink in this runtime:
-
-- the runtime (the JSONL observation log) and the
-  new `EngineLogs.stderr_line()` (replacing the old direct
-  `stderr.append_line` call in `_drain_stderr`
-  — a launched engine's own stderr is untrusted text).
-- `scrub_text()`/`scrub_mapping()` — the former
-  `gateway.diagnostics.safe_value()` it replaced only
-  stripped *characters* (`_SAFE`), which does not redact a credential-shaped
-  value using only allowed characters; this scrubs *patterns* first.
-
-`scrub_text`: URL userinfo (`scheme://user:pass@host` →
-`scheme://[REDACTED]@host`), `Bearer`/`token`-prefixed credentials,
-credential-shaped `key=value`/`key: value` pairs (reusing
-`DENYLIST_PATTERN`'s vocabulary), and any
-remaining long (24+ char) opaque run **containing at least one digit** —
-collapsed to a stable short digest. Requiring a digit is deliberate: a
-plain English/snake_case identifier (an error code, an event name) never
-matches, so "keep ids, status, error category and counts" holds; this
-runtime's own generated ids (`t_`/`eirt_`/`obs_`/`use_` + 12 hex chars)
-are well under the 24-character floor regardless.
-
-`scrub_command`: a full `argv` is never logged verbatim — only `argv[0]`
-(the fixed, connection-pinned launch binary path) plus a digest and count
-of the complete argv.
-
-Coordinator and worker message deltas use `StreamingRedactor` before they are
-placed in the ACP feed. It retains only the current lexical suffix needed to
-decide whether a credential expression continues across the next update; the
-holdback is bounded. The emitted result is partition-invariant for a given
-source, so a provider sending one large update and a provider sending the same
-text in many chunks produce the same scrubbed replay. Overlong lexical fields
-are replaced by a deterministic bounded marker. Labelled SHA-256 text is kept
-pending until the turn outcome is known and is preserved only for an accepted
-final response whose digest also passes the pipeline guard.
-
-`scrub_mapping`: applied to every `observe()` field mapping — a
-`command`/`argv`/`launch_command`-shaped list value goes through
-`scrub_command`; a string value goes through `scrub_text` (or is replaced
-outright with `[REDACTED]` when its *key* itself matches
-`DENYLIST_PATTERN`); nested mappings/lists recurse (bounded depth).
-`scrub_mapping`'s own scope is `observe()`'s field mapping, and it never logs a
-prompt/report/source body there. That narrow guarantee does not extend to every
-durable evidence path in this runtime: the external MCP broker persists the
-complete tool-call reply twice, once in `runtime_requests.result_json` and once
-in the `EXTERNAL_TOOL_RESULT` event payload, and
-`orchestrating_runtime`'s worker-activity panel event persists the scrubbed but
-still content-bearing `raw_input`/`raw_output`/`content` fields (rows written
-before 2026-10-13 also carry `input`/`output` copies of the first two; readers
-use `raw_*` first) rather than a
-ref + digest + size. Treat
-ref + digest + size as this page's policy for the new measurements it adds,
-not as an existing guarantee across every stored record.
-
-Fixture-based tests plant a
-secret in an engine's environment, a launch argv, report/source text, and
-simulated engine stderr, and assert nothing leaks through `EngineLogs`,
-the redaction helper, or the task-creation redaction path, while ids/status/error-category fields survive unredacted.
-
-## 5. Missing telemetry never gates execution
-
-No state transition depends on accounting. The driver queues the insert
-separately from authoritative settlement and reports a sanitized diagnostic
-if it cannot save the row. It does not change the response, roll settlement
-back, or retry the prompt. Workspace distinguishes unknown counts from a
-reported zero. The no-paid fake-engine and SQLite tests cover the write
-failure, interrupted calls, reported zero and the task-spend read path.
-
-## What's deferred
-
-- Exact per-provider $-denominated cost (no adapter reports one; this page
-  never fabricates a conversion rate).
-- A Cortex-delegation call count per attempt (`loop_profile.cortex_delegation_calls`):
-  needs a per-call event that separates Cortex MCP operations from engine-native calls.
-- The cross-task repeat ratio: needs a durable cross-task (path, sha) read history.
-- Per-read history for Codex native `exec` reads, and per-attempt context-fill
-  samples (the optional context-fill recording was not implemented).
-- Live completeness of ACP tool events per adapter version: needs a live run the
-  owner has requested.
-- Permission-dialog counts as a queryable-by-task SQLite metric (currently
-  JSONL-only per engine instance — see `manual_interventions` above).
-- Paid live probes; this page requires no paid
-  model invocation.
-
-Worker history resolves the exact `delegation_requested` mapping from the
-public delegation reference to its plan assignment and graph attempt, then
-to its provisioned engine attempt. Explicit plan IDs are not interchangeable
-with delegation references. Switching workers uses that attempt’s own event
-cursor; structured native tool errors remain visible as text details.
-
-Paseo's worker history and pipeline read the store the runtime used for the
-session. The runtime keys that store by the logical project root of the session
-cwd (`logical_project_root`), so a session opened in a linked `git worktree`
-writes to the main repository's `.cortex/cortex.sqlite3`, not to one under the
-worktree. The plugin resolves the workspace directory the same way, read-only,
-before it opens the store. A forged, ambiguous or unsafe worktree layout gets
-"unavailable". The plugin never guesses a different store and never creates
-one. The Paseo store-reader tests check that the plugin resolves the
-same root as the runtime.
-
-Only the store is shared. The session records the worktree it was opened in
-(`acp_session_workspaces`), and the task it creates is bound to that worktree in
-the same transaction (`task_workspaces`).
-The binding is permanent. Every file-side consumer uses the task's tree: the
-coordinator and worker engines' cwd, the gateway's `project_read`/`project_write`/
-`project_delete`/`project_mkdir`/`project_skill_link`/`command_run`/`project_git`, verification,
-review/completion revision captures, project docs catalogues and `resource_link`
-containment. `tasks.project_root` and every store key stay the main repository.
-A task without a binding (created before this existed, or opened directly in the
-main checkout) works in the project root. `session/load` from a different
-worktree of the same repository is refused as an unknown session. When the
-engine jail's root is a worktree, the main repository's `.cortex` (otherwise
-visible through the host-wide read-only mount) is masked with a read-only tmpfs.
-
-Worker recovery does not replay terminal requests or provision an old request
-under a new coordinator channel. Worker history filters displayable events
-before bounding each page, and selected completed transcripts continue loading
-while a further page exists. Catalogue polling never advances all workers with
-one shared event cursor.
-
-After a successful observed Cortex delegate call, trailing coordinator prose
-is withheld until another tool starts; the worker card represents the handoff.
-The engine turn is not cancelled, so further delegations still execute. This
-presentation rule does not affect acceptance, worker evidence, or final replies.
-
+Engine message streaming and launch error handling live in the [native session driver](../../../crates/workspace-service/src/native_sessions.rs). Paseo applies its own [display scrubber](../../../crates/cortex-paseo-tools/src/scrub.rs) when reading worker history. Treat retained evidence as private. The [external MCP broker](../../../crates/cortex-core/src/external.rs) records content-bearing results in the runtime event and request ledger.
 
 ## Paseo invoke latency and request coalescing
 
 The plugin's GUI RPC handlers that previously used synchronous child-process calls now use asynchronous `execFile` with bounded concurrency. Worker-history identities are cached, and overlapping worker-history and pipeline poll requests are coalesced. `cortex-acp.invoke` timeout diagnostics identify the RPC method so a slow history read can be distinguished from other handlers. These measures remove the observed event-loop serialization cause and reduce duplicate work; they do not by themselves establish a timeout-free workload or a rendered GUI result. Use the plugin typecheck and unit-test commands in [verification guidance](../../project/verification.md), and inspect the actual Electron timeline for GUI claims.
 
+## Timing diagnostics
+
+Run `cortex-paseo-tools task-timings /absolute/project EXECUTION_ID` for the
+retained execution's state, elapsed milliseconds by category and the source
+intervals. Append `--dev` to select the separate Dev store. The command opens
+one store read-only and returns a missing-execution error if the requested
+execution is absent. Each interval carries its time basis and, where recorded,
+the exact attempt, assignment, node and plan revision. The
+review-cycle counts use the first review binding per node and revision, with
+the assignment as the identity for older bindings. A binding without a
+retained risk is counted as `unobserved`.
+
+The runtime writes observed durations to the append-only
+`observability_events` table. The payload contains a millisecond count.
+Categories cover engine-session startup (each try), time parked in the local
+capacity queue, preparation of an attempt's first worker prompt, sent
+planning, worker, review and reconciliation prompts, and verification work
+after any retry delay expires. Each elapsed measurement uses a monotonic
+clock. The timestamp on an observed row is its recording time. An outcome
+of `returned` describes a runtime operation returning. The lifecycle
+events carry the verdict of a check, review or execution. A dropped future,
+process exit or failed metrics write may leave an observation absent.
+
+Derived intervals use retained wall-clock endpoints. They cover time spent in
+each task phase, the local slot wait, the exact worker attempt from first
+delivery to result, the final review binding to the review result, the audited
+route selection to first delivery, and time from a completed graph
+prerequisite to the dependent attempt's first delivery. A graph handoff
+interval measures the recorded dependency boundary and elapsed dispatch
+time. The receiving agent's report-reading evidence remains in its own history.
+Unmatched, malformed or backwards time boundaries provide no interval.
+Overlapping categories, concurrent nodes and multiple prerequisite edges can
+cover the same elapsed time. Read each total on its own.
+
+The scheduler's bounded history reader samples successful worker deliveries and
+results by exact attempt and route audit, using the recorded role, work kind
+and complexity. Older rows without those facts remain usable for any task
+intervals their endpoints establish and do not enter the estimate. When
+retention deletes an execution, its observed timings, runtime events and route
+audit are deleted together. Duration estimates therefore use retained
+executions only. See the [timing writer and reader](../../../crates/cortex-core/src/observability.rs)
+and [retention policy](../../project/storage.md#automatic-workspace-retention).
+
 ## Removed Python-era readers
 
-Three Python tools read the project store for diagnostics: the bound task inspector (`cortex_inspect_task`), the phase and aggregate timeline reader (`cortex_timeline`) and the developer wire trace with its viewer (`paseo-dev --wire-trace`, `cortex_trace_view`). They were removed on 2026-11-16 without replacement, together with the dev binding exporter, so the sections that described their commands, bindings, pagination, phase intervals, aggregates and trace files no longer apply and the corresponding events are not read by any shipped tool. The runtime still writes the events (`task_events`, `attempt_route_audit`, `context_generations`, capsule deliveries and the metadata signals above) to the store. The shipped read-only readers are `cortex-paseo-tools` `project-root`, `task-id`, `worker-history`, `worker-results`, `running-commands` and `pipeline`, which open the store through the non-initializing live read-only mode. A missing derived measurement is reported as unavailable, never inferred, and a trace or diagnostic is never acceptance evidence or a substitute for independent review and verified receipts.
-
-## Runtime-composed-synthesis share and fallback reasons
-
-The retained events below were read, per engine/connection/model/
-parameters-fingerprint cohort, by the former aggregate timeline reader (removed; see above). The already-retained
-`SYNTHESIS_RUNTIME_COMPOSED`/`SYNTHESIS_RUNTIME_DECLINED` events (see
-[runtime-composed synthesis](../task-lifecycle/index.md#runtime-composed-synthesis))
-for every task that reached RECONCILING: each cohort's `runtime_synthesis`
-reports `reconciled_tasks`, `composed_tasks`, `pending_tasks`, their `share`, and a
-`fallback_reasons` tally keyed by the decline's first reason code
-(`worker_live`, `replan_history`, `repair_path`, `pending_input`,
-`node_incomplete`, `review_not_approved`, `verification_not_passed`,
-`open_check`), plus the explicit `unrecorded` key for a completed task with
-neither event retained. This includes current-build missing-baseline or
-oversized-text returns and post-composition rollback, not just older builds.
-Decline reasons are not exhaustive: the early live-worker short-circuit records
-only `worker_live`, and an event retained once per revision is not updated by
-later attempts. A temporary condition recorded on an earlier attempt need not
-explain the final fallback; `unrecorded` is absence of retained diagnostics, not
-an inferred cause. An unfinished reconciliation carries
-`reconciled=True`/`composed=None`/`fallback_reason=None`, even if a decline
-was already recorded. It counts only in `reconciled_tasks` and `pending_tasks`,
-never as fallback or `unrecorded`. The share uses all reconciled tasks as its
-denominator but stays `null` while any are pending (or none are reconciled),
-rather than treating missing outcomes as failures or excluding them to inflate
-success. Completed-only cohorts retain their existing share. A task not yet reconciled carries
-`reconciled=False`/`composed=None`/`fallback_reason=None` and is excluded from
-the cohort's counts. Several cohorts withhold a pooled verdict the same way the
-existing branch decisions do; read each cohort's own `runtime_synthesis`. This
-is metadata only (event types and reason codes): never a report body, path
-content or raw log.
-Runtime event production and the reader's guarded read-only snapshot boundary
-are unchanged.
+The bound inspector, phase timeline and developer wire trace were removed with
+the former runtime on 2026-11-16. The read-only CLI provides
+`project-root`, `task-id`, `worker-history`, `worker-results`,
+`running-commands`, `pipeline` and `task-timings`.
+See the [reader command registry](../../../crates/cortex-paseo-tools/src/lib.rs).

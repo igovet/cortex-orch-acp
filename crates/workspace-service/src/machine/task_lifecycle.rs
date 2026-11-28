@@ -17,6 +17,113 @@ pub(super) fn unsettled() -> Refused {
         "Stop the task and wait for every worker to stop first.",
     )
 }
+
+pub(super) fn close_paused_external(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    task: &str,
+    request: &Value,
+) -> Result<Value> {
+    if request.as_object().is_none_or(|params| {
+        params.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "action" | "taskId" | "executionId" | "expectedVersion" | "requestId" | "confirmed"
+            )
+        })
+    }) {
+        return Err(refuse(
+            "invalid_request",
+            "Refresh the task before closing.",
+        ));
+    }
+    if request["confirmed"] != true {
+        return Err(refuse(
+            "confirmation_required",
+            "Confirm completion outside Cortex.",
+        ));
+    }
+    let mut product = super::native::product(state, project)?;
+    let record = &product["tasks"][task];
+    let current = record["sprintId"].as_str().map(str::to_owned);
+    if truth(&record["archive"])
+        || truth(&record["purged"])
+        || truth(&record["merge"])
+        || record
+            .get("conflict")
+            .is_some_and(|conflict| conflict != "none")
+    {
+        return Err(refuse(
+            "external_close_unavailable",
+            "Restore the task or abort its active merge before closing.",
+        ));
+    }
+    let store = context::open(root, OpenMode::RuntimeValidate)?
+        .ok_or_else(|| refuse("invalid_task", "Unknown task."))?;
+    let path = product_path(state, project)?;
+    cortex_core::workspace::control::close_paused_external(
+        &store,
+        project,
+        &crate::actor(),
+        task,
+        request,
+        || {
+            let mut memberships = product["sprints"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+                .filter(|sprint| {
+                    sprint["taskIds"]
+                        .as_array()
+                        .is_some_and(|ids| ids.iter().any(|id| id == task))
+                });
+            let sprint = memberships.next();
+            if memberships.next().is_some()
+                || current.as_deref() != sprint.as_ref().and_then(|sprint| sprint["id"].as_str())
+            {
+                return Err(CoreError::Refused("sprint_membership_changed"));
+            }
+            if let Some(sprint) = sprint.filter(|sprint| {
+                matches!(sprint["queueState"].as_str(), Some("running" | "paused"))
+            }) {
+                let saved = sprint
+                    .as_object_mut()
+                    .ok_or(CoreError::Refused("state_unreadable"))?;
+                saved.insert("queueState".into(), json!("paused"));
+                saved.insert("pauseReason".into(), json!("Paused by you"));
+                for key in ["pauseKind", "questionExecutions", "automaticQueue"] {
+                    saved.remove(key);
+                }
+                super::settings::write_json(&path, &product)
+                    .map_err(|error| CoreError::Refused(error.code))?;
+            }
+            Ok(())
+        },
+    )
+    .map_err(|error| match error {
+        CoreError::ExternalStopPending { role, reference } => {
+            let who = reference.map_or(role.clone(), |reference| format!("{role} ({reference})"));
+            refuse(
+                "external_stop_pending",
+                format!("Waiting for confirmed exit of {who}. Check again after it stops."),
+            )
+        }
+        CoreError::Refused("stale_version") => refuse(
+            "stale_version",
+            "The task changed. Refresh it before closing.",
+        ),
+        CoreError::Refused("task_not_paused") => {
+            refuse("task_not_paused", "Pause the task before closing it.")
+        }
+        CoreError::Refused("sprint_membership_changed") => refuse(
+            "sprint_membership_changed",
+            "Refresh the task to confirm its sprint.",
+        ),
+        _ => settle_error(error),
+    })
+}
+
 /// Match the retained _facts/require_settled boundary, including stopped launches.
 /// The caller can hold its immediate transaction through the overlay replacement.
 pub(crate) fn settled(db: &Connection, root: &Path, project: &str, task: &str) -> CoreResult<()> {
@@ -111,9 +218,33 @@ pub(super) fn settle_error(e: CoreError) -> Refused {
     match e.code() {
         "stop_required" | "lost_worker_termination_unconfirmed" => unsettled(),
         "native_outside_outcome_unknown" => refuse(e.code(), "A dispatched action still has an unknown outcome. Inspect the task activity before handing its folder to the next task."),
+        "bound_external_close_required" => refuse(e.code(), "Refresh the paused task and confirm external completion for its current execution."),
         _ => context::core(e),
     }
 }
+pub(super) fn external_settled(
+    db: &Connection,
+    root: &Path,
+    project: &str,
+    task: &str,
+) -> CoreResult<()> {
+    let paused_native: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workspace_tasks t
+           JOIN workspace_executions e ON e.task_id=t.task_id AND e.execution_id=t.execution_id
+           JOIN runtime_tasks r ON r.task_id=e.runtime_task_id
+           WHERE t.project_id=? AND t.task_id=? AND r.state='PAUSED'
+             AND EXISTS(SELECT 1 FROM runtime_events v WHERE v.task_id=r.task_id
+                 AND v.type IN ('TASK_CREATED','NATIVE_TASK_ADOPTED')
+                 AND json_extract(v.payload_json,'$.execution_host')='rust'))",
+        (project, task),
+        |row| row.get(0),
+    )?;
+    if paused_native {
+        return Err(CoreError::Refused("bound_external_close_required"));
+    }
+    settled(db, root, project, task)
+}
+
 pub(super) fn external(p: &Value) -> bool {
     p["action"] == "close" && matches!(p["choice"].as_str(), Some("external" | "already_in_target"))
 }
@@ -127,6 +258,9 @@ pub(super) fn close_precondition(record: &Value, p: &Value) -> Result<()> {
             "confirmation_required",
             "Choose how to close the task and confirm.",
         ));
+    }
+    if record["status"] == "done" && record["closedAs"] == "external" {
+        return Err(refuse("already_closed", "This task was already closed outside Cortex."));
     }
     if external(p) {
         if record["status"] == "done" {
@@ -223,7 +357,7 @@ pub async fn apply(
             if external(p) {
                 if let Some(store) = context::open(root, OpenMode::LiveReadOnly)? {
                     store
-                        .read(|db| settled(db, root, project, task))
+                        .read(|db| external_settled(db, root, project, task))
                         .map_err(settle_error)?;
                 }
                 if choice == "already_in_target" {

@@ -1,7 +1,7 @@
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type AutomaticQueue, type Decision, type Sprint, type Task, type TaskSession, type WorkspaceState } from "@cortex/workspace-domain";
-import { Workspace } from "../src";
+import { Workspace, type PhoneFrame } from "../src";
 import { SEEN_CHANGES_KEY, SEEN_CHANGES_LIMIT, stateCode } from "../src/unseen";
 import { draftTask, flush, projection, scriptedPort, withTask } from "./support";
 
@@ -26,13 +26,14 @@ const withSecond = (state: WorkspaceState): WorkspaceState => ({ ...state, proje
 const question = (id: string, text: string, answered = false): Decision => ({ id, kind: "question", from: "coordinator", workerId: null, at: null, text, options: [], answer: answered ? { text: "Red", at: null } : null, withdrawn: false });
 const session = (taskId: string, ...decisions: Decision[]): TaskSession => ({ ...emptySession(taskId), decisions });
 
-async function mount(state: WorkspaceState, path = HOME) {
+const phone: PhoneFrame = { kind: "phone", machine: () => ({ name: "Desk", state: "connected", path: "direct", lastConnectedAt: 1 }), openMachines() {}, openSettings() {}, retry() {}, attach() {} };
+async function mount(state: WorkspaceState, path = HOME, shell?: PhoneFrame) {
   const s = scriptedPort({ capabilities: { everything: true, operations: [] } });
   history.replaceState(null, "", path);
   const root = document.createElement("div"); document.body.append(root);
-  dispose = render(() => <Workspace port={s.port} />, root);
+  dispose = render(() => <Workspace port={s.port} shell={shell} />, root);
   await settle(); s.emit(projection(String(version++), state)); await settle();
-  return { push: async (next: WorkspaceState) => { s.emit(projection(String(version++), next)); await settle(); } };
+  return { emit: s.emit, push: async (next: WorkspaceState) => { s.emit(projection(String(version++), next)); await settle(); } };
 }
 /** Every visible sidebar row whose title is `title`. */
 const pickView = async (name: string) => {
@@ -47,6 +48,19 @@ const saved = () => JSON.parse(localStorage.getItem(SEEN_CHANGES_KEY) ?? "{}") a
 const ids = () => (saved().seen ?? []).map(m => m[0]);
 
 describe("sidebar unseen changes", () => {
+  it("keeps an opened completion when a detached project returns before its board read", async () => {
+    const done = world([task("t", "Alpha", { status: "done" })]);
+    const app = await mount(world([task("t", "Alpha")]));
+    await app.push(done);
+    await open("Alpha"); await goHome();
+    expect(rows("Alpha")).toHaveLength(0);
+    app.emit({ kind: "registry", projectIds: [] }); await settle();
+    app.emit({ kind: "registry", projectIds: ["p"] });
+    app.emit({ kind: "project_state", project: done.projects[0], issue: null }); await settle();
+    await app.push(done);
+    expect(rows("Alpha")).toHaveLength(0);
+  });
+
   it("a task that comes to need the owner reads as new, with a mark and words, until it is opened", async () => {
     const app = await mount(world([task("t", "Alpha"), task("u", "Beta")]));
     expect(fresh("Alpha")).toBe(false);
@@ -114,7 +128,8 @@ describe("sidebar unseen changes", () => {
     expect(fresh("Alpha")).toBe(true);
     expect(rows("Alpha")[0].querySelector(".sig")?.textContent).toBe("Done");
     await pickView("Active work");
-    expect(document.querySelector(".sb-work")?.textContent).toContain("Finished");
+    expect(rows("Alpha")).toHaveLength(0);
+    await pickView("Projects");
     await open("Alpha");
     expect(rows("Alpha").length).toBeGreaterThan(0);
     expect(fresh("Alpha")).toBe(false);
@@ -127,7 +142,8 @@ describe("sidebar unseen changes", () => {
     await app.push(world([task("t", "Alpha", { status: "done", closedAs: "as_is", doneAt: 1_700_000_000_000 })]));
     expect(fresh("Alpha")).toBe(true);
     await pickView("Active work");
-    expect(rows("Alpha", ".sb-work")).toHaveLength(1);
+    expect(rows("Alpha", ".sb-work")).toHaveLength(0);
+    await pickView("Projects");
     await open("Alpha"); await goHome();
     expect(rows("Alpha")).toHaveLength(0);
   });
@@ -166,6 +182,69 @@ describe("sidebar unseen changes", () => {
     expect(fresh("Sprint: Launch")).toBe(false);
   });
 
+  it("opening a sprint reads its member summary independently across views and reloads", async () => {
+    const other = sprint({ id: "two", title: "Other", taskIds: ["x"] });
+    const board = (status: Task["status"], run = "first") => world([
+      task("w", "Wren", { status, executionId: run }), task("x", "Lark", { status }),
+    ], [sprint(), other]);
+    const app = await mount(board("working"));
+    await app.push(board("done"));
+    expect(fresh("Sprint: Launch")).toBe(true);
+    await open("Sprint: Launch");
+    expect(fresh("Sprint: Launch")).toBe(false);
+    expect(fresh("Sprint: Other")).toBe(true);
+    await goHome();
+    await pickView("Active work");
+    expect(fresh("Sprint: Launch")).toBe(false);
+    expect(saved().seen?.find(([id]) => id === "t:w")?.[1]).toBe("");
+    unmount();
+    const again = await mount(board("done"));
+    expect(fresh("Sprint: Launch")).toBe(false);
+    await pickView("Projects");
+    await again.push(board("done", "second"));
+    expect(fresh("Sprint: Launch")).toBe(true);
+  });
+
+  it("reads member updates through the phone drawer only after the sprint board opens", async () => {
+    const app = await mount(world([task("w", "Wren")], [sprint()]), HOME, phone);
+    await app.push(world([task("w", "Wren", { status: "done" })], [sprint()]));
+    const menu = () => document.querySelector<HTMLButtonElement>('.ws-phonebar [aria-label="Menu"]')!;
+    menu().click(); await settle();
+    const row = rows("Sprint: Launch", ".ws-drawer")[0];
+    expect(row.classList.contains("unseen")).toBe(true);
+    row.click(); await settle();
+    expect(document.querySelector(".ws-drawer")).toBeNull();
+    expect(location.pathname).toMatch(/sp\/board$/);
+    expect(saved().seen?.find(([id]) => id === "t:w")?.[1]).toBe("");
+    unmount();
+    await mount(world([task("w", "Wren", { status: "done" })], [sprint()]), HOME, phone);
+    menu().click(); await settle();
+    expect(rows("Sprint: Launch", ".ws-drawer")[0].classList.contains("unseen")).toBe(false);
+  });
+
+  it("waits for a readable board before acknowledging a sprint member summary", async () => {
+    await mount(world([task("w", "Wren")], [sprint()]));
+    unmount();
+    const done = world([task("w", "Wren", { status: "done" })], [sprint()]);
+    const app = await mount({ ...done, projects: done.projects.map(p => ({ ...p, issue: "unavailable" })) }, `${HOME}/p/p/s/sp/board`);
+    const summary = () => JSON.parse(localStorage.getItem(SEEN_CHANGES_KEY)!).summaries ?? [];
+    expect(summary()).toHaveLength(0);
+    await app.push(done);
+    expect(summary()).toHaveLength(1);
+    expect(saved().seen?.find(([id]) => id === "t:w")?.[1]).toBe("");
+  });
+
+  it("reading the last member clears a completed sprint without opening the sprint", async () => {
+    const app = await mount(world([task("w", "Wren")], [sprint()]));
+    const done = world([task("w", "Wren", { status: "done" })], [sprint({ queueState: "complete" })]);
+    await app.push(done);
+    expect(fresh("Sprint: Launch")).toBe(true);
+    await open("Wren"); await goHome();
+    expect(fresh("Sprint: Launch")).toBe(false);
+    unmount(); await mount(done);
+    expect(fresh("Sprint: Launch")).toBe(false);
+  });
+
   it("a finished Hybrid sprint with a task still ready to merge lists that task once in Active work", async () => {
     const hybrid = (patch: Partial<Sprint> = {}) => sprint({ runMode: "hybrid", taskIds: ["w", "x"], ...patch });
     const app = await mount(world([task("w", "Wren"), task("x", "Lark")], [hybrid()]));
@@ -174,10 +253,10 @@ describe("sidebar unseen changes", () => {
     await pickView("Active work");
     expect(rows("Sprint: Launch", ".sb-work")).toHaveLength(1);
     expect(rows("Wren", ".sb-work")).toHaveLength(1);
-    expect(rows("Lark", ".sb-work")).toHaveLength(1);
-    // Once the sprint is seen it leaves, and its task waiting to merge is listed on its own again, still once.
+    expect(rows("Lark", ".sb-work")).toHaveLength(0);
+    // Its merge work keeps the sprint visible even after its own completion is read.
     await open("Sprint: Launch"); await goHome();
-    expect(rows("Sprint: Launch", ".sb-work")).toHaveLength(0);
+    expect(rows("Sprint: Launch", ".sb-work")).toHaveLength(1);
     expect(rows("Wren", ".sb-work")).toHaveLength(1);
   });
 
@@ -232,7 +311,7 @@ describe("sidebar unseen changes", () => {
     expect(fresh("Beta")).toBe(true);
     expect(fresh("Gamma")).toBe(true);
     await pickView("Active work");
-    expect(rows("Gamma", ".sb-work")).toHaveLength(1);
+    expect(rows("Gamma", ".sb-work")).toHaveLength(0);
     await pickView("Projects");
     expect(fresh("Delta")).toBe(true);
     expect(fresh("Quiet")).toBe(false);

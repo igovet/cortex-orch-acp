@@ -18,9 +18,19 @@
   <strong>Recommended client: <a href="https://github.com/getpaseo/paseo">Paseo</a></strong>
 </p>
 
-In Workspace, open [Board](docs/cortex-workspace/SCREENS.md#conversation-adoption) just below Home to see the selected machine’s tasks by status and project. Select a card to open its task.
+Workspace shows the saved machine name on startup. Release and Dev each keep their own name.
+
+In Workspace, open [Board](docs/cortex-workspace/SCREENS.md#conversation-adoption) just below Home to see work across the selected machine. Switch between Board and List, narrow the scope to one project, or filter by task title. On a phone, swipe across status columns and scroll within each column to see more cards. Select a card or row to open its task.
 
 In Workspace, use **⋯** on a task to open its [task actions](docs/cortex-workspace/SCREENS.md#task-actions). On desktop, right-click a sidebar row, list row, board card or dashboard task row to open the same menu.
+
+Use **⋯** beside a sprint in either sidebar view to close or delete it. The confirmation names the project and sprint.
+
+The Workspace sidebar shows completed sprint members out of the saved total.
+The row's tooltip and accessible name give the breakdown by status.
+
+Workspace applies confirmed streaming conversation updates to the matching
+execution as their history arrives. See [Workspace performance](docs/cortex-workspace/performance.md#board-update-latency-fake-transport-baseline).
 
 In a Workspace task, **Side chat** (or Ctrl+Shift+J) opens a floating window for your own questions about the task. It knows the task (description, state, reports, recent messages, its diff and its files through read-only tools) but never enters the task's conversation, never reaches its coordinator and never changes the task. Drag it by its header, resize it from its corner, collapse it with Esc to a pill or close it; on a phone it is a bottom sheet. It starts on the task's model and effort, and you can pick another for the chat only. Its history is kept per task in the machine's private state. See [task side chat](docs/features/side-chat/index.md).
 
@@ -56,13 +66,20 @@ Workspace result checks list recorded skips with their reasons, including checks
 
 For MCP result submissions, unknown fields such as `artifacts` are rejected with the offending field path. Copy `tool_call_ref` exactly from the completed command response. See [Markdown reports](docs/features/markdown-reports/index.md#result-submission-arguments).
 
+A plan can require a particular worker to read a predecessor's immutable report
+or a selected character range. The assignment brief names the exact report and
+the runtime checks the worker's own page receipts before accepting its result.
+Other reports are available for selective reading. [Required report inputs](docs/features/markdown-reports/index.md#required-inputs-for-an-assignment)
+
 For materialized sprints, a coordinator receives the current task's direct
 dependency context and can page through the authenticated sprint graph with
 `sprint_graph`. It can read a predecessor's durable outcome and immutable
 published reports with `sprint_task_result`. The runtime limits both reads to
-that sprint and keeps report content bounded. File availability is reported
-from recorded write receipts and exact bytes, with unknown evidence retained as
-unknown. This read surface does not change queue ordering or Hybrid acceptance.
+that sprint and keeps report content bounded. Result bindings distinguish
+current, historical and unbound publications. A producer must deliver each
+declared output in the current revision before the runtime certifies it. File availability covers
+recorded paths whose bytes can be compared with write evidence. Queue readiness
+continues to follow the recorded task disposition.
 
 In the Workspace desktop the owner can edit a created sprint after approval. The
 sprint page opens on **Live sprint**, which shows every task including drafts
@@ -72,15 +89,15 @@ The approved plan stays read-only. Board and List show Working before Not
 started in the order the queue will use. See [live sprint graph and execution
 order](docs/cortex-workspace/local-task-execution.md#live-sprint-graph-and-execution-order).
 
-When the owner changes a running sprint task (a message to its coordinator, a
-rework request or an answer) while other sprint tasks have not started, that
-task cannot finish until its coordinator re-checks them: it reads them with
-`sprint_graph` `include: "pending_descriptions"` and records `unchanged` or a
-revision with `sprint_revision_submit`. A revision changes only unstarted drafts,
-is independently reviewed, and is applied by the runtime in an Automatic sprint
-or by the owner's **Apply** / **Reject** in a Hybrid or Manual sprint; proposed
-cancellations are only shown. See [re-checking the sprint after an owner
-change](docs/cortex-workspace/local-task-execution.md#re-checking-the-sprint-after-an-owner-change).
+When the owner changes a running sprint task while other sprint members are
+still unstarted, its coordinator checks the impact. Work can also reveal a need
+for a revision. The coordinator reads the live drafts and proposes changes with
+`sprint_revision_submit`. Corrections to started work use linked follow-up cards.
+The independent reviewer sees the proposed artifact contracts, including changed
+input providers, and the runtime checks that those contracts still match when
+applying. Hybrid and Manual sprints, and revisions that affect existing
+downstream executions, go to the owner for a decision. See [re-checking the
+sprint after an owner change](docs/cortex-workspace/local-task-execution.md#re-checking-the-sprint-after-an-owner-change).
 
 Workspace engine limits retain connected engines with an explicit Unavailable state when no provider usage is observed. Coordinator choices exclude switched-off engines. See [desktop engine controls](docs/cortex-workspace/maintenance-and-controls.md).
 
@@ -239,7 +256,10 @@ not access decisions. New files use the absent-content precondition.
 File replacements now retain before/after hashes and reconcile matching on-disk
 bytes after restart without replaying an edit. Unmatched or legacy intents remain
 unknown. Brokered commands now run under independent Rust supervisors with
-boot/PID/start identities and private output/status files. After a service restart,
+boot/PID/start identities and private output/status files. Service shutdown
+joins driver jobs and releases background merge refreshes and exit rechecks
+waiting for the owner-control lock.
+After a service restart,
 the same command can be observed or owner-stopped without relaunch; lost or
 mismatched supervisors stay unknown until their process is provably gone, when the
 receipt is settled with an unknown outcome (a launch whose payload was never released
@@ -254,14 +274,20 @@ Worker results derive evidence strength and check retained output, project-diges
 or work-set bindings (a `command_run` pass whose own scope and written files were
 unchanged across the run and at submission verifies even when another task changed
 other files of the shared checkout), duplicate references and trivial commands,
-including confirmed outside-command receipts. Failed check history now derives exact
+including confirmed outside-command receipts. If the checkout observation
+is incomplete, every claimed pass needs independent work-set evidence. A plan can declare an observation or
+test-only node read-only. Its scope names the inputs of its checks, and the node can
+run alongside checkout writers without a write reservation. Plan acceptance reports
+current write-lease contention and overlapping scopes of independent writers.
+Failed check history now derives exact
 latest-rerun closures, explicit probe retractions and supported invocation
 corrections; unknown or trivial passed claims stay unverified, and an open failed
 check is refused naming the check, its receipt and the gap that keeps it open.
 Inline shell scripts verify only as `umask`/`export`/`cd`/`set` setup followed by
 one simple check command; other inline-shell status-flow analysis remains
 unfinished.
-For supported sessions, known limits and qualification, see [native incoming ACP](docs/project/native-incoming-acp.md#known-limits). The Rust [Core store](docs/project/storage.md) owns format-12 storage, file-backed reports, newest-first pipeline editions and bounded readers.
+For supported sessions, known limits and qualification, see [native incoming ACP](docs/project/native-incoming-acp.md#known-limits). The Rust [Core store](docs/project/storage.md) owns format-12 storage, file-backed reports, newest-first pipeline editions and bounded readers. The runtime publishes each generated pipeline edition directly through a crash-recoverable file intent.
+The [recovery capsule](docs/features/recovery-capsules/index.md#native-retained-state-capsule-current-rust-runtime) reads unresolved command starts from a derived list and marks its omitted command count as a lower bound after 1,024 events.
 
 An additive [configuration observation library](docs/project/native-config-read.md)
 now normalizes profiles/connections and reads credential-redacted connection
@@ -349,7 +375,9 @@ that the required sections are present (see
 [Markdown reports](docs/features/markdown-reports/index.md#report-structure)). The native gateway accepts
 validated plans. A host-owned driver claims execution nodes, schedules independent
 review after observed changes, consumes fix/replan verdicts, executes bounded
-read-only verification argv and checks completion invariants. Disposable fake-engine
+read-only verification argv and checks completion invariants. An accepted worker
+result revokes its channel while the host waits briefly for the pending turn's
+final reply. Missing replies leave write attribution incomplete. Disposable fake-engine
 tests cover that journey, a pending-review reopen, failed checks and truncated output.
 Native broker sockets use a pinned parent-directory descriptor so long project or
 temporary paths do not prevent session startup. Unavailable verifier containment
@@ -364,11 +392,16 @@ session, control or verification effects are reported without replay; paused
 tasks and question/wait records are preserved. Lost-session questions cannot
 continue on a replacement session. Full permissions, instruction-delivery
 qualification and live ACP session reattachment remain incomplete.
-Native sessions embed the canonical coordinator and five worker instruction
-bases, with compatible mappings for the 23 worker roles. Accepted plans can add
-competencies to a worker and use complexity to choose the starting automatic
-route tier. Sessions inline required skills and serve role-scoped skill and
-reference reads. See [adaptive worker profiles](docs/project/adaptive-profiles.md). Codex receives a supplement derived only from that channel's served tool
+Native sessions embed five worker profiles. Fresh plans choose investigation or
+implementation and explicitly select relevant competencies or explain why the
+base profile suffices. The runtime adds independent
+review and owns verification and consultation. Retained assignments keep their
+original role identity, and new automatic worker routes start from the work
+complexity. Sessions inline required skills and serve role-scoped skill and
+reference reads. See [adaptive worker profiles](docs/project/adaptive-profiles.md).
+Native skill responses retain content-digest receipts for the exact attempt,
+including completed reads of deferred skill output.
+Codex receives a supplement derived only from that channel's served tool
 schemas. A trusted native binding connects a saved draft to its existing runtime
 task/epoch and a separate display session. Native public messages and minimal tool
 activity then feed the existing history/outbox/delta path; thoughts and raw tool
@@ -432,7 +465,10 @@ category's range and provider usage. A profile without the list keeps the
 older rule (any model with a worker tier, at its tier ranges). See [coordinator models](docs/features/routing-and-fallback/index.md#coordinator-models-and-per-tier-effort-ranges)
 and [sprint task routes](docs/features/routing-and-fallback/index.md#sprint-task-routes).
 
-The runtime normally continues work on its own. Work failures use a strategy
+The runtime normally continues work on its own. A separate senior consultation
+addresses a concrete decision that available evidence cannot resolve. Planning
+depth alone leaves scheduling unchanged, and replanning carries forward
+relevant advice. Work failures use a strategy
 ladder (repair, escalated routes, the senior consultant, another role and
 coordinator model); infrastructure interruptions keep the current approach.
 If a coordinator's reply is lost after it saved the final synthesis, the runtime
@@ -486,6 +522,11 @@ workers — on different engines and models — to carry the plan out, sends
 every change through a reviewer who did not write it, verifies the result
 against your project's own checks, and keeps a durable, recoverable record
 next to your project.
+
+Cortex answers bounded informational requests directly and adapts the depth of
+planned work and independent review to the scope, complexity and observed change
+risk. Every changed result goes through independent review and runtime
+verification. See [adaptive orchestration](docs/features/orchestration/index.md#adaptive-orchestration).
 
 When a worker releases its slot, Cortex can start a newly ready step while
 other workers continue. A writing worker that reports a verified failing test
@@ -542,7 +583,9 @@ that is read when a screen that shows it opens (see [startup](docs/cortex-worksp
 
 Workspace distinguishes a recorded interrupted turn from unconfirmed recovery: it shows **Interrupted**, keeps messaging available for an explicit continuation, and never restarts work during Re-check state. Unknown or contradictory recovery stays blocked. A worker exit the running service could not confirm is re-checked by the service itself, with restart recovery's process evidence and backoff; once no engine process works in the project it is settled without a restart, and an Automatic task that only that exit held continues by itself. See [task state confirmation](docs/cortex-workspace/local-task-execution.md#recorded-data-and-pending-questions).
 
-Workspace supports editing a never-started task's saved request and adding drafts to an active sprint. Close sprint puts the sprint and its tasks in the Archive together, including drafts, and stops its queue. Started tasks that are not Done, disputed records and ongoing merge or pull-request operations block closure. Closing discards nothing. Restoring a task returns it to the project without a sprint. The separate Delete sprint… action permanently removes the sprint and all its tasks after confirmation, stopping running work first. Clean app-created worktrees can be removed; other worktrees are kept with their paths shown. The project folder and Git branches are never deleted. Unconfirmed stops leave a visible, retryable deletion instead of claiming success. See [editing and sprint closure](docs/cortex-workspace/local-task-execution.md#editing-saved-tasks-and-closing-sprints).
+The desktop New task composer shows **Where the task will work**. It shows the selected project folder, the branch and local changes last read for that checkout, and other tasks' states when confirmed. Choose how the task uses the project folder or a separate worktree before saving the draft. See [local task execution](docs/cortex-workspace/local-task-execution.md#separate-worktrees).
+
+Workspace supports editing a never-started task's saved request and adding drafts to an active sprint. Close sprint puts the sprint and its tasks in the Archive together, including drafts, and stops its queue. Started tasks need current completion evidence or an explicit owner closure. Disputed records, unsettled executions and ongoing merge or pull-request operations block closure. Closing discards nothing. Restoring a task returns it to the project without a sprint. The separate Delete sprint… action permanently removes the sprint and all its tasks after confirmation, stopping running work first. Clean app-created worktrees can be removed; other worktrees are kept with their paths shown. The project folder and Git branches are never deleted. Unconfirmed stops leave a visible, retryable deletion instead of claiming success. See [editing and sprint closure](docs/cortex-workspace/local-task-execution.md#editing-saved-tasks-and-closing-sprints).
 
 Workspace animates a loader only while its work is pending (a sweeping bar on the pressed control, a stepped turning icon for loading and working states), using transform and opacity only, paused in hidden windows and tabs out of view, and never on an idle screen. Conversation history is reused by task/execution version, and slow Git completion publishes facts rather than starting another full refresh. See [CPU measurements and limits](docs/cortex-workspace/performance.md#recorded-on-the-reference-machine).
 
@@ -587,7 +630,9 @@ dirty or unproven worktrees remain kept. Owner acceptance and archive-discard an
 natively within the existing evidence/materialized-checkout boundary: 110 offline Python comparisons cover
 replies and persisted state, including result-version, source, review, acknowledgement and
 unobservable-work refusals. Acceptance revalidates under Start arbitration through its private save;
-neither action completes the runtime, invents check evidence or deletes work. File-conflict choices
+neither action completes the runtime, invents check evidence or deletes work. Manual Accept waits
+on its own service lane while the connection stays open, subject to checkout, Git and storage
+observation limits. File-conflict choices
 (`resolve_block`) now also run in Rust for materialized checkouts, using literal Git paths,
 descriptor-relative saves and durable unknown-effect fences. Thirty-six offline real-Git captures compare
 replies, JSON/SQLite state and file/index outcomes; native Git failures retain sanitized messages instead
@@ -631,13 +676,15 @@ guidance delivery and confirmed route chains in Rust, including bounded two-posi
 Coordinator detail history also reads retained messages, plans and
 selected tool activity natively, with session-bound high-watermark cursors, original byte budgets and confirmed route labels. Current source-bound verification now also reads natively in plain folders and Git checkouts using the exact legacy manifest/digest format, including drift and unavailable-source refusals. Git file selection uses a fixed sandboxed read-only command, with the legacy whole-tree fallback when unavailable; listed-walk fixtures are separate from positive sandbox qualification. Receipt-derived failed/passed rerun targets, potentially authorized pass receipts, claimed failed-check withdrawals, alternate timestamp forms, unsupported coordinator display shapes, large or malformed evidence and unmaterialized legacy worktree options still use the retained Python provider. This remains a partial migration; native reads do not accept unverified work.
 
-Workspace checks native updates separately for each open project. Commits made in the service process wake that project's reader; bursts share a trailing read. Updates from other processes, including a separate ACP agent, still rely on the project's 250 ms fallback. See [native desktop reads](docs/cortex-workspace/consistency-and-recovery.md#native-desktop-reads).
+Workspace checks native updates separately for each open project. Local commits wake that project's reader, and Linux home stores can also wake it on WAL activity from another process, including a separate ACP agent. Bursts share a trailing read, and each reader keeps its 250 ms fallback. See [native desktop reads](docs/cortex-workspace/consistency-and-recovery.md#native-desktop-reads).
 
 Workspace Git keeps the last known checkout visible while refreshing repository details; a pending read never means the folder has no repository. Opening or returning to a Git tab and focusing the window request fresh facts automatically, with visible-window polling for external changes. Untracked dependency/cache files are shown when Git does not ignore them; only private helper state is excluded. Above 2,000 untracked files, wholly untracked directories collapse to one entry each, so an un-ignored dependency tree cannot make the Git tab unreadable. Commit sends one request, including when nothing is staged. Push resolves the confirmed display URL to a configured Git remote name before sending, and refuses stale or ambiguous destinations. Workspace Git status, diff and log inspect raw content without requiring installed clean/smudge filters. Write commands retain normal filter and hook requirements; repository configuration is not changed.
 
 In Hybrid and Automatic sprints every queue hold has one next actor. Anything the assigned agents can fix (a stale result, an unfinished check, a run that failed with every effect known) goes back to the coordinator by itself, bounded and deduplicated, and continues with fresh review and verification. Only a real owner decision pins a card above the task's message box: what you are asked to allow, a primary action after which the queue finishes by itself, and a separate **Close as is…** with confirmation. A held task whose command outcome is not yet confirmed waits for the runtime to settle it; an effect the runtime can never confirm is offered only the actions the service accepts, and its **Close as is…** records that effect as unknown, never as done. A refused card action stays on the card in plain words and is not offered again for the same hold.
 
 Ready desktop results that are not yet accepted retain an explicit Accept control in Conversation and the diff review, separate from committing or merging; an Automatic-sprint result that the queue accepted shows its automatic acceptance instead. While the runtime is still finishing a result, early check observations show a waiting state and leave Accept off. Same-branch tasks use Finish and Commit wording in review, the sidebar and inspector as well as their action controls; completed inspector outcomes appear once. Finished worker summaries unescape prose consistently, and worker notes use the full activity column rather than the icon column.
+
+When Cortex can link a reused Cargo test executable to a build from an older checkout digest, it rebuilds the selected test in a private target before relying on the result. [Supported Cargo checks and evidence](docs/project/verification.md)
 
 If the workspace scan races a concurrent edit during acceptance, Cortex can retry it once. If a complete observation is still unavailable, the queue retains the completed result and explains what to check before retrying acceptance. [Result acceptance and workspace observation](docs/cortex-workspace/testing-and-acceptance.md#result-acceptance-when-workspace-observation-fails)
 
@@ -673,7 +720,7 @@ A relative link can wait for the task’s checkout in the popup and offers **Ret
 See [Result links](docs/cortex-workspace/local-task-execution.md#result-links).
 Plain project folders support tasks and result acceptance without Git: a folder in no repository is observed by walking it (same hashing, exclusions and bounds as a repository; nothing is ignored), so baseline, review change lists, verification and completion work there, while a repository Git cannot read still stops the task with a stop question naming that cause. Opening plain folders and reading files or snapshots does not require an installed Git executable. Git initialization is explicit and requires Git;
 local Commit, squash merge and task closure need no remote. Local-only repositories omit network controls and push/PR wording; generated commit messages are English independently of conversation language. Task actions open the actual checkout in the detected editor, with a visible reason when unavailable. Worktree settings allow writable external `.cortex/worktrees` folders, retain refused drafts with a persistent reason, and never move existing checkouts. Diagnostics list each failing check and its recovery steps, including in Copy report. Accept binds the reviewed runtime-evidence version while displaying its result number; late progress/transcript updates do not invalidate unchanged work. Refused or unconfirmed acceptance stays beside the result with a Refresh action, even after its toast closes;
-withdrawn probes do not count as failed worker checks. Check programs are probed in the real verification
+withdrawn probes do not count as failed worker checks. The first result refusal for unmet checks names their receipts, open reasons and available next steps. If a rerun is unsafe, a worker can submit a recorded failure with a concrete blocker and identify unfinished work; the original check evidence stays visible. Check programs are probed in the real verification
 environment before accepting a plan, a bare name on the same search path worker commands use (project tool
 folders, then the owner's tool search path: the `PATH` read once from the owner's login shell plus folders
 added under Diagnostics, Tool search path, then the existing usual per-user tool folders it lacks such as
@@ -708,9 +755,10 @@ Already-contained work offers owner-confirmed closure, not another merge. Shared
 target branch use recorded task-file evidence: committed content offers closure even after later sibling
 edits; known pending files offer Commit to that branch without sweeping other files into the commit.
 Unknown attribution offers Close as is or Done outside the app, never a same-branch merge. Board cards cannot
-be dragged; “Done outside the app…” is chosen from the task actions menu or command palette and confirmed
-after the task stops. This
-durable owner decision is not acceptance, merging or passing checks; sprint dependencies can continue.
+be dragged. Choose “Done outside the app…” from the task actions menu or command palette. On a
+paused run the confirmation names the process that still needs to stop. Once the runtime confirms
+its exit, the owner can close the card without a Git commit. The sprint queue stays paused, and
+files and recorded review and verification evidence are preserved.
 Ordinary run closures without acceptance have a closing step: a failed or cancelled run offers
 Close task… in its title band, a runtime result that can never be accepted offers Close as is…, and
 Finish on a runtime stop question an earlier version stored counts as the owner's close as is (not verified), so it archives
@@ -727,10 +775,16 @@ project (read-only specialists only, no file changes), submits a plan of any siz
 through a runtime-validated tool (in parts when large), and every plan gets an independent review before the
 sprint shows it for approval. Ask for changes in the sprint conversation; Create
 tasks then materializes the approved plan and the planning task closes as done.
-The service creates all of the plan's tasks and the sprint's created state in one
-all-or-nothing operation; a repeated Create tasks returns the same tasks, never a
-second set ([creating a plan's tasks](docs/cortex-workspace/local-task-execution.md#creating-a-plans-tasks)).
+The service publishes the sprint and its drafts against a durable project-store
+receipt. After an interruption, an uncommitted publication is shown as the
+previous plan and can be retried. A committed Create tasks returns its original
+task identities on retry. [Creating a plan's tasks](docs/cortex-workspace/local-task-execution.md#creating-a-plans-tasks)
 See [sprint planning limits](docs/cortex-workspace/local-task-execution.md#sprint-planning-limits).
+
+Typed sprint dependencies let a plan name the exact version of a Markdown or
+JSON output a later task needs. The runtime checks the current immutable
+publication, independent review and verification before starting the consumer.
+[Typed sprint dependencies](docs/features/orchestration/index.md#typed-sprint-dependencies)
 
 Workspace saves a task from its description, then names it asynchronously through
 its configured model route. Owner renames always win; unavailable naming
@@ -784,6 +838,12 @@ See [service-owned work](docs/cortex-workspace/local-task-execution.md#archive-a
 Routing marks stored references to disabled models as inactive without deleting them; its enabled-model picker excludes denied models. Routing settings use each exact model's observed effort levels, including ordered effort ladders. Unknown levels are marked; saved unsupported values remain visible and unchanged. See [configuration](docs/configuration.md#manage-settings-in-paseo).
 
 Workspace reserves a stable checkout for independent review of project changes and for host verification. Reviews of sprint plans and sprint revisions, and reviews with no project changes to certify, neither wait for writers nor take a new checkout reservation. A sprint revision review preserves the task's existing reservation after the current revision passes host verification. A review of project changes requires and binds only the task's own changes: files its tools wrote and paths that changed while its commands or writing-engine turns ran. Other uncommitted files in the checkout are listed as context and never refused, re-bound or invalidated; an edit of one of the task's files, by anyone, still makes Cortex schedule fresh review within its review-cycle limit. When a command's or turn's changes cannot be recorded completely, the review still requires only the task's recorded changes; the packet tells the reviewer that unattributed files are context. A worker that ends its turn with a pending command can receive the final receipt in the same session. Reopened reviews include the task’s recorded writes from earlier plans and identify paths whose contents have since changed. Changes to git-ignored files (build outputs, dependencies, caches) do not make a review's change list incomplete; when the list still cannot be enumerated, the reviewer approves what it read and the result carries a "Check manually" limitation instead of a refusal. Local desktop builds reuse Cargo artifacts and npm downloads across invocations. See [desktop packaging](docs/project/packaging.md).
+
+Workspace can use a dedicated worktree for an independent writer while another
+task's review holds the project checkout. It requires a clean checkout,
+disjoint file scopes and enough measured time savings to cover the extra
+work. Final review and verification use the integrated project checkout.
+See [checkout scheduling and integration](docs/features/workspaces-and-integration/index.md).
 
 ## Table of contents
 
@@ -839,7 +899,7 @@ flowchart LR
     W2 --> RV
     W3 --> RV
     RV --> VF["Final verification\n(documented project checks)"]
-    VF --> ST[".cortex store\nreports + pipeline, newest first"]
+    VF --> ST["Private home store\nreports + pipeline, newest first"]
 ```
 
 1. **You talk to the coordinator.** It is read-only: it can answer a simple
@@ -871,12 +931,11 @@ flowchart LR
    tests, type checks, lints, whatever the plan declared — against the real
    checkout before the task can complete. A failing or unrun check blocks
    completion; it is never silently waived.
-6. **Everything is recorded next to your project.** Immutable Markdown
-   worker/reviewer reports and one newest-first pipeline document per task
-   live under the project's own `.cortex/` folder, indexed by a local SQLite
-   file, so nothing lives only in chat scrollback. The folder carries its own
-   `*` ignore file, so it stays out of `git status` without any change to your
-   `.gitignore`. These records themselves
+6. **Everything is recorded locally.** Immutable Markdown reports and one
+   newest-first pipeline document per task live beside the SQLite index in
+   your private state directory. The checkout carries a small Git-ignored
+   location marker. Include `~/.local/state/cortex/projects/` (or your configured
+   state location) in backups to preserve release task history. These records
    stay on your machine, but getting there still means running the engines
    you chose, and some of those engines send your prompts and project
    content to an external AI provider under that provider's own policy. See
@@ -897,8 +956,8 @@ flowchart LR
 - **Verification before completion.** A task cannot be marked done until the
   project's own documented checks actually pass against the current code.
 - **Durable, recoverable history.** Reports and the task pipeline are
-  immutable Markdown files plus a local SQLite index inside your project's
-  `.cortex/` folder, so you can inspect or recover task history without
+  immutable Markdown files plus a SQLite index in the project's private home
+  store, so you can inspect or recover task history without
   relying on client-side chat memory.
 - **Permission and scope control.** Writers get a declared scope that
   serializes conflicting writes; read-only roles (including the coordinator)
@@ -1017,8 +1076,13 @@ its own qualified adapters from the Workspace package bundle when present. Check
 `$XDG_DATA_HOME/cortex/engines`, or `~/.local/share/cortex/engines`. When an
 engine's native login marker exists, Cortex registers its missing connection
 and immediately loads its model list, without sending a model prompt. Existing
-connections are preserved. Cortex Settings → Connections shows progress and failures.
-Its background checks retain connection rows and unsaved edits; failed checks
+connections are preserved. The desktop banner shows active adapter preparation,
+native-account connection or model discovery and clears on the next status
+check after setup ends. Settings → Connections shows the last failure or
+interruption beside the current adapter and connection status. A recorded
+failure can include the stage and a safe diagnostic. Task launch warnings
+reflect startup retries or failures of the affected execution.
+Connections background checks retain connection rows and unsaved edits. Failed checks
 mark the last known status and offer a retry rather than hiding the form.
 
 Log in once outside Cortex with the engine's own command (`codex login` or
@@ -1122,17 +1186,16 @@ scripts/cortex-paseo-tools.sh uninstall --project /path/to/project \
     --remove-project-store --i-confirm-removal
 ```
 
-This removes only Cortex's own `$XDG_CONFIG_HOME/cortex`,
-`$XDG_STATE_HOME/cortex`, and (with `--project`) that one project's `.cortex`
-store. It never touches engine installs, real credentials outside those
-Cortex-owned roots, your project files, or Git history. See
+User-scope uninstall clears Cortex configuration and non-project state while
+preserving the channel's home project stores. The `--project` form removes a
+legacy project-local store. To remove a home store, list it with
+`cortex-acp project-stores list`, then use
+`cortex-acp project-stores delete STORE_ID --confirm` with the listed ID. See
 [uninstall](docs/project/packaging.md#uninstall).
 
 ## Cortex Workspace desktop (in development)
 
-Switch the sidebar between **Projects** and **Active work**. Active work puts
-**Needs you** first and marks tasks inside in-progress sprint trees instead of
-listing those tasks twice. See [Sidebar views](docs/cortex-workspace/SCREENS.md#sidebar-views).
+**Active work** filters the sidebar’s project and sprint tree to ongoing tasks and outstanding actions. Both views share the project sort order, expansion controls and action menus. See [Sidebar views](docs/cortex-workspace/SCREENS.md#sidebar-views).
 
 Local desktop [Code](docs/cortex-workspace/ide-and-git.md#code-editing-and-write-leases)
 opens read-only until you select **Edit**. Saves require a file lease and a
@@ -1152,10 +1215,10 @@ container with `scripts/cortex-xtask.sh build-deb` (wrapped by `./scripts/build-
 `./scripts/build-prod-deb.sh`); a local build is the dev channel. Releases start manually through GitHub
 Actions: choose `main` for production (`v<debian-version>`, Latest), or `dev` for a separate dev
 prerelease (`dev-v<debian-version>`, never Latest). Both appear in one release list. Dev and production
-can coexist, including in the same project folder: Dev uses `.cortex-dev` beside release `.cortex` without
-reading or migrating release data. There is one store per logical project per channel, shared by its
-linked worktrees. Project metadata stays inside the channel store; Dev reserves `.cortex-dev/owner.json`,
-not a root JSON file. Saved sprint plans can restore missing member drafts after an upgrade, without
+can coexist in the same project folder. Release and Dev use separate private home
+state roots and share each logical project's channel store among linked worktrees.
+The project-side `.cortex` and `.cortex-dev` directories contain location markers;
+Dev also reserves `.cortex-dev/owner.json`. Dev opens only its own channel. Saved sprint plans can restore missing member drafts after an upgrade, without
 reading release history; the queue pauses for review before any new start. Dev installs manually and has
 no in-app updates. See the [release steps](docs/project/packaging.md#manual-workspace-releases). See
 [Cortex Workspace](docs/cortex-workspace/index.md) for the design, the contract and the current status,
@@ -1168,7 +1231,7 @@ notifications. An overlong original request can be shortened in place without lo
 warning does not stop planning. See
 [read-only sprint planning](docs/cortex-workspace/SCREENS.md#read-only-sprint-planning).
 
-Workspace sidebar rows mark changes you have not opened yet: a task or sprint that came to wait on you, a run that ended, or a finished sprint. Opening the row clears the mark. A task created while the app was closed is marked too once it waits on you or ends; what was already there on the first run is not. What was seen stays in the app's local storage as task, sprint and project ids with fixed-size codes, never task text, bounded to 1000 rows and 200 projects. See [Unseen changes](docs/cortex-workspace/SCREENS.md#responsive-layout).
+Workspace sidebar rows mark changes you have not opened yet: a task or sprint that came to wait on you, a run that ended, or a finished sprint. Opening the row clears the mark. Opening a sprint board acknowledges its member updates in the sidebar while preserving the unread marks on the individual cards. Re-registering the same project preserves that acknowledgment. A task created while the app was closed is marked too once it waits on you or ends; what was already there on the first run is not. What was seen stays in the app's local storage as task, sprint and project ids with fixed-size codes, never task text, bounded to 1000 rows and 200 projects. See [Unseen changes](docs/cortex-workspace/SCREENS.md#responsive-layout).
 
 Workspace task spend shows reported tokens by configured engine and model.
 When an adapter supplies only individual token counters, Workspace stores their sum as the prompt total.
@@ -1197,8 +1260,10 @@ it does not install or start the ordinary user unit.
 
 The real task conversation reads durable Cortex messages, plans, tool activity, questions and results.
 The [Workspace conversation read contract](docs/project/native-incoming-acp.md#workspace-conversation-order)
-orders decision cards with the same sequence as messages and tool activity. A
-long conversation opens on its latest part: the window reads it from its end (`history.earlier`, at most
+orders decision cards with the same sequence as messages and tool activity.
+Visible conversations can start a tail read when the committed history position
+advances. An unchanged position with a confirmed empty question set avoids a
+repeat read. A long conversation opens on its latest part: the window reads it from its end (`history.earlier`, at most
 four 100-row pages), then automatically reads earlier parts when their boundary is near the visible
 area, even while following the latest messages. It skips past pages that add nothing to the display
 until there is more to show or the beginning is reached. **Show earlier** remains a fallback (see
@@ -1254,6 +1319,8 @@ First activation and background setup are followed by fresh configuration reads.
 Before recording a plan, Workspace checks the coordinator's retained project file reads against the current checkout. Sprint planning questions follow project study and the applicable rules. An owner can answer an ordinary question with `/cortex-defer` to pause the task and continue later. [Sprint planning](docs/cortex-workspace/local-task-execution.md#sprint-planning-limits) · [Questions and steering](docs/features/steering-and-questions/index.md)
 
 Workspace invalidations use connection-local SQLite hooks on supported Store writers; they do not install a callback dependency on independent or older SQLite writers. See [storage](docs/project/storage.md#workspace-adapter-tables) for upgrade and inspection behavior.
+Live conversation updates can use a committed history position in the native delta to avoid rereading an unchanged conversation. [Native desktop read API](docs/cortex-workspace/protocol.md#native-desktop-read-api)
+On supported desktop connections, an open conversation can receive its committed updates over a private stream. [Scoped delivery](docs/cortex-workspace/protocol.md#native-desktop-read-api)
 Streamed display fragments are due immediately after an idle gap. During a stream the writer batches fragments for up to 40 ms, with an earlier flush when the batch fills. [Commit durability](docs/project/storage.md#commit-durability)
 
 ## Other ACP clients
@@ -1281,7 +1348,8 @@ See [adapter following and rollback](docs/configuration.md#approved-adapter-foll
 for private backups and `CORTEX_ENGINE_FOLLOW=off`.
 
 The [fresh-install preset](docs/configuration.md#fresh-install-owner-default-snapshot)
-uses `sonnet` for light and standard work, with its own Claude quota window.
+uses `sonnet` for light and standard work. The dedicated `seven_day_sonnet`
+quota window applies to the separate `claude-sonnet-5` ID, which starts disabled.
 Haiku and Luna are preferred only for investigation. Opus and Astra list frontend
 design and review, and both can serve deep or flagship work. Claude remains the
 frontend-design affinity engine. These are routing preferences, not pins.
@@ -1309,12 +1377,13 @@ read project files see these project skills listed and read them with Cortex MCP
 - [Feature index](docs/features/index.md) — one page per product feature
 - [Packaging, onboarding and diagnostics](docs/project/packaging.md)
 - [Orchestration](docs/features/orchestration/index.md) — scheduling, review, verification in depth
-- [Roles and delegation](docs/features/roles-and-delegation/index.md) — the 23 specialist roles
+- [Roles and delegation](docs/features/roles-and-delegation/index.md) — five worker profiles and competency modules
 - [Unified system prompt](docs/features/unified-system-prompt/index.md) — how the single system prompt is assembled, delivered to each engine and role, and changed
 - [Routing and fallback](docs/features/routing-and-fallback/index.md)
 - [Permissions and execution containment](docs/features/permissions-and-containment/index.md)
 - [Storage and recovery](docs/project/storage.md)
 - [Source-backed fact memory](docs/features/knowledge-routing/index.md#source-backed-fact-memory)
+- [Execution timing diagnostics](docs/features/observability/index.md#timing-diagnostics)
 - [Verification](docs/project/verification.md)
 
 ## Development
@@ -1386,3 +1455,8 @@ card](docs/cortex-workspace/SCREENS.md#owner-action-card).
 [MIT](LICENSE)
 
 Codex and Claude discover Cortex tools through `tools_discover`. Long supervised commands return a reference for `command_status`, allowing independent reads while the command runs. See [tool discovery and command status](docs/features/tool-discovery-and-read-batch/index.md).
+
+Workspace restores unsent conversation text on the same device when the same
+conversation reopens. A confirmed send clears the submitted version. During a
+tab switch, files and uploads stay with their original editor. After relaunch,
+reattach files before sending. See [Workspace screens](docs/cortex-workspace/SCREENS.md#unsent-conversation-input).

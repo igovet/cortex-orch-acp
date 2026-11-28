@@ -372,11 +372,13 @@ fn read_with(root: &Path, config: &crate::Config, wait: bool) -> Result<Value> {
     // The legacy project editor is root-scoped, not an effective/logical-root
     // routing lookup. A linked checkout without its own store retains the same
     // missing-store refusal; never open another checkout just to fill an editor.
-    let directory = root.join(if workspace_protocol::channel::current().is_dev() {
-        ".cortex-dev"
+    let key = context::key(root)?;
+    let channel = key.channel().directory();
+    let directory = if key.root() == root {
+        crate::store_locations::directory(key.clone()).map_err(context::core)?
     } else {
-        ".cortex"
-    });
+        root.join(channel)
+    };
     let path = directory.join("routing.json");
     let (exists, token, rules) = match read_plain(&path, false) {
         Ok(Some(bytes)) => {
@@ -393,7 +395,6 @@ fn read_with(root: &Path, config: &crate::Config, wait: bool) -> Result<Value> {
     if let Some(bytes) = read_plain(&owner_folder(config)?.join("connections.json"), true)? {
         super::project_registry::validate(&bytes)?;
     }
-    let key = context::key(root)?;
     if key.root() != root && !directory.join("cortex.sqlite3").is_file() {
         return Err(refuse(
             "project_store_missing",

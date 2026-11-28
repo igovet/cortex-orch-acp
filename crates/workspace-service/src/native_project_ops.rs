@@ -549,6 +549,11 @@ pub(super) async fn execute(
             .as_str()
             .ok_or(CoreError::Refused("invalid_arguments"))?;
         safe(path)?;
+        if name == "project_delete"
+            && crate::native_engine_policy::live_store_file(&root.join(path))
+        {
+            return refused("cortex_live_store");
+        }
         path.to_owned()
     };
     let hash = digest(&serde_json::to_vec(&json!([&name, &args]))?);
@@ -572,10 +577,7 @@ pub(super) async fn execute(
             }
             Some(binding)
         } else { None };
-        let rule = format!(
-            "/{}/",
-            store.key().directory().file_name().unwrap_or_default().to_string_lossy()
-        );
+        let rule = format!("/{}/", store.key().channel().directory());
         store.write(|db| {
             let i = authorized(db, &c, None, &initial_root, &p, scoped)?;
             let old: Option<(String, String, String)> = db.query_row(
@@ -659,7 +661,7 @@ pub(super) async fn execute(
             if access::current(db, &i.task)? != m {
                 return refused("access_mode_changed");
             }
-            let mut receipt = json!({"complete":false,"path":p});
+            let mut receipt = json!({"complete":false,"path":p,"revision":lifecycle::domain::task_tx(db, &i.task)?.1});
             if let Some(binding) = started_binding { receipt["checkout"] = binding; }
             db.execute("INSERT INTO runtime_requests VALUES (?,?,?,?,?,?)",
                 (&i.task, &k, &c.channel_id, &n, &h, receipt.to_string()))?;
@@ -682,6 +684,12 @@ pub(super) async fn execute(
             let i = authorized(db, &c, Some(&expected), &effect_root, &p, scoped)?;
             if access::current(db, &i.task)? != m {
                 return refused("access_mode_changed");
+            }
+            let revision: i64 = db.query_row(
+                "SELECT json_extract(result_json,'$.revision') FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
+                (&i.task, &c.channel_id, &effect_key), |r| r.get(0))?;
+            if revision != lifecycle::domain::task_tx(db, &i.task)?.1 {
+                return refused("stale_project_write");
             }
             let missing = if matches!(planned, Plan::Mkdir | Plan::Link { .. }) {
                 missing_parents(&effect_root, &p, |parent| {
@@ -735,6 +743,11 @@ pub(super) async fn execute(
             recv(executor.write(move |db| {
                 let mut receipt = json!({"complete":true,"reply":r});
                 let mut event = json!({"channel_id":c.channel_id,"operation":n,"path":p,"request_key":k});
+                let revision: i64 = db.query_row(
+                    "SELECT json_extract(result_json,'$.revision') FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=? AND operation=?",
+                    (&task, &c.channel_id, &k, &n), |r| r.get(0))?;
+                receipt["revision"] = json!(revision);
+                event["revision"] = json!(revision);
                 if let Some(binding) = binding {
                     receipt["checkout"] = binding.clone();
                     event["checkout"] = binding;

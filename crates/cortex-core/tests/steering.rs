@@ -122,8 +122,10 @@ fn begin_plan(s: &Store, task: &str, proposed: &Value) {
 }
 
 fn node(id: &str, role: &str, deps: &[&str]) -> Value {
-    json!({"id":id,"role":role,"objective":format!("Work on {id}"),
-        "dependencies":deps,"scope":["src"],"model":"auto"})
+    let mut plan = json!({"tasks":[{"id":id,"role":role,"objective":format!("Work on {id}"),
+        "dependencies":deps,"scope":["src"],"model":"auto"}]});
+    support::fill_plan_choices(&mut plan);
+    plan["tasks"][0].take()
 }
 
 fn assert_amend_refused(s: &Store, task: &str, args: &Value, code: &str) {
@@ -170,7 +172,10 @@ fn active_plan_replaces_only_unclaimed_work_and_locks_verification_routing_and_s
     let tasks = next["plan"]["tasks"].as_array_mut().unwrap();
     tasks.remove(1);
     tasks[1]["objective"] = json!("Refined pending objective");
-    tasks.push(node("added", "backend-dev", &["pending"]));
+    tasks.push(node("added", "general", &["pending"]));
+    let mut legacy_new = next.clone();
+    legacy_new["plan"]["tasks"][3]["role"] = json!("backend-dev");
+    assert_amend_refused(&s, &task, &legacy_new, "plan_requires_base_role");
     for index in [0, 2] {
         let mut args = next.clone();
         args["plan"]["tasks"][index]["objective"] = json!("Attempt to change claimed work");
@@ -200,6 +205,104 @@ fn active_plan_replaces_only_unclaimed_work_and_locks_verification_routing_and_s
     assert_eq!(one(&s, "SELECT assignment_ref FROM runtime_nodes WHERE node_id='claimed'"), "a-claimed");
     assert_eq!(count(&s, "PLAN_AMENDED"), 1);
     assert_amend_refused(&s, &task, &next, "active_plan_changed");
+}
+
+#[test]
+fn active_amendment_updates_dependencies_with_live_and_completed_nodes_intact() {
+    use cortex_core::scheduler::{policy::NativePolicy, SchedulingPolicy};
+
+    let (_p, s) = setup();
+    let (task, _) = started(&s, 1);
+    let proposed = json!({
+        "tasks": [node("done", "backend-dev", &[]), node("live", "backend-dev", &["done"]),
+                  node("omit", "backend-dev", &[]), node("finish", "backend-dev", &["omit"])],
+        "verification": [["cargo", "test"]],
+    });
+    begin_plan(&s, &task, &proposed);
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_nodes SET status='completed',assignment_ref='a-done',result_json=?
+             WHERE task_id=? AND node_id='done'",
+            (r#"{"report_ref":"accepted-report","status":"passed"}"#, &task),
+        )?;
+        db.execute(
+            "UPDATE runtime_nodes SET status='running',assignment_ref='a-live'
+             WHERE task_id=? AND node_id='live'",
+            [&task],
+        )?;
+        Ok(())
+    }).unwrap();
+    let mut amendment = active_plan_args(&s);
+    let tasks = amendment["plan"]["tasks"].as_array_mut().unwrap();
+    tasks.remove(2);
+    tasks[2]["dependencies"] = json!(["added"]);
+    tasks.push(node("added", "general", &["done"]));
+    let mut cyclic = amendment.clone();
+    cyclic["plan"]["tasks"][3]["dependencies"] = json!(["finish"]);
+    assert_amend_refused(&s, &task, &cyclic, "dependency_cycle");
+    let mut too_large = amendment.clone();
+    let tasks = too_large["plan"]["tasks"].as_array_mut().unwrap();
+    for i in tasks.len()..=cortex_core::lifecycle::MAX_NODES {
+        tasks.push(node(&format!("extra{i}"), "backend-dev", &[]));
+    }
+    assert_amend_refused(&s, &task, &too_large, "invalid_plan_size");
+
+    let receipt = s.write(|db| plan::amend_active_tx(db, &task, &amendment)).unwrap();
+    assert_eq!(receipt["nodes"], json!({"added":["added"],"changed":["finish"],"cancelled":["omit"]}));
+    assert_eq!(receipt["revision"], 1);
+    assert_eq!(count(&s, "PLAN_ACCEPTED"), 1);
+    assert_eq!(count(&s, "PLAN_AMENDED"), 1);
+    assert_eq!(one(&s, "SELECT dependencies_json FROM runtime_nodes WHERE node_id='finish'"), r#"["added"]"#);
+    assert_eq!(one(&s, "SELECT assignment_ref FROM runtime_nodes WHERE node_id='live'"), "a-live");
+    assert_eq!(one(&s, "SELECT result_json FROM runtime_nodes WHERE node_id='done'"),
+        r#"{"report_ref":"accepted-report","status":"passed"}"#);
+    assert_eq!(active_plan_args(&s)["plan"]["outcomes"], amendment["plan"]["outcomes"]);
+
+    // The new node is dependency-ready but its write scope overlaps the live
+    // assignment. Normal scheduler policy grants it only after settlement.
+    s.write(|db| {
+        let policy = NativePolicy::default();
+        assert!(!policy.may_claim(db, &task, "added")?);
+        db.execute(
+            "UPDATE runtime_nodes SET status='completed' WHERE task_id=? AND node_id='live'", [&task],
+        )?;
+        assert!(policy.may_claim(db, &task, "added")?);
+        let snapshot = completion::EvidenceSnapshot::default();
+        assert_eq!(completion::add_review_tx(db, &task, &snapshot).unwrap_err().code(), "execution_incomplete");
+        db.execute(
+            "UPDATE runtime_nodes SET status='completed' WHERE task_id=? AND node_id IN ('added','finish')",
+            [&task],
+        )?;
+        completion::add_review_tx(db, &task, &snapshot)?;
+        Ok(())
+    }).unwrap();
+    let review_deps: Value = serde_json::from_str(&one(&s,
+        "SELECT dependencies_json FROM runtime_nodes WHERE stage='review'")).unwrap();
+    assert!(review_deps.as_array().unwrap().contains(&json!("added")));
+    assert_eq!(active_plan_args(&s)["plan"]["verification"], proposed["verification"]);
+}
+
+#[test]
+fn active_amendment_preserves_dependencies_of_runtime_owned_nodes() {
+    let (_p, s) = setup();
+    let (task, _) = started(&s, 1);
+    begin_plan(&s, &task, &json!({
+        "tasks":[node("required", "backend-dev", &[]), node("other", "backend-dev", &[])],
+        "verification":[["cargo","test"]],
+    }));
+    s.write(|db| {
+        db.execute(
+            r#"INSERT INTO runtime_nodes VALUES (?,1,'_review_1','worker-code-reviewer',
+             'Independent review','["required"]','["."]','review','pending',NULL,NULL)"#, [&task],
+        )?;
+        Ok(())
+    }).unwrap();
+
+    let mut amendment = active_plan_args(&s);
+    amendment["plan"]["tasks"].as_array_mut().unwrap().remove(0);
+    assert_amend_refused(&s, &task, &amendment, "unknown_dependency");
+    assert_eq!(one(&s, "SELECT dependencies_json FROM runtime_nodes WHERE stage='review'"),
+        r#"["required"]"#);
 }
 
 #[test]

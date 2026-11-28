@@ -69,6 +69,13 @@ fn status_body(phase: &str, reason: Option<&str>) -> String {
         None => format!("{{\"phase\": {}}}", quoted(phase)),
     }
 }
+fn failed_status_body(phase: &str, stage: &str, reason: &str) -> String {
+    let mut status = json!({"phase":phase,"stage":stage});
+    if safe_reason(reason) {
+        status["reason"] = json!(reason);
+    }
+    status.to_string()
+}
 fn random_hex() -> CoreResult<String> {
     let mut bytes = [0u8; 6];
     fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
@@ -165,18 +172,31 @@ impl FirstRun {
         // A malformed owner preset cannot prevent connection setup.
         let _ = crate::startup::seed_defaults(&self.environment);
         for (engine, package) in PACKAGES {
-            if self.setup_engine(engine, package).is_err() {
-                self.status(engine, "setup_failed", None)?;
+            // Kept for this engine's phases only. A reader cannot confuse an
+            // abandoned receipt for one adapter with another adapter's work.
+            let Ok(_engine_lock) = locks::AccessLock::acquire(
+                &root.join(format!("automatic-setup-{engine}.lock")),
+                true,
+                true,
+                Duration::ZERO,
+            ) else {
+                continue;
+            };
+            if let Err((stage, error)) = self.setup_engine(engine, package) {
+                self.write_status(engine, &failed_status_body("setup_failed", stage, error.code()))?;
             }
         }
         Ok(())
     }
     fn status(&self, engine: &str, phase: &str, reason: Option<&str>) -> CoreResult<()> {
+        self.write_status(engine, &status_body(phase, reason))
+    }
+    fn write_status(&self, engine: &str, body: &str) -> CoreResult<()> {
         let root = self.root();
         locks::private_directory(&root, false)?;
         adapters::atomic_private(
             &root.join(format!("first-run-{engine}.json")),
-            status_body(phase, reason).as_bytes(),
+            body.as_bytes(),
         )
     }
     /// Python `read_status_reason`: a recorded, allowlisted failure code only.
@@ -205,45 +225,62 @@ impl FirstRun {
         let state = Registry::parse(bytes.as_deref())?;
         Ok((bytes, state))
     }
-    fn setup_engine(&self, engine: &'static str, package: &str) -> CoreResult<()> {
-        self.status(engine, "downloading", None)?;
+    fn setup_engine(&self, engine: &'static str, package: &str) -> Result<(), (&'static str, CoreError)> {
+        let adapter = |error| ("installing_adapter", error);
+        let connections = |error| ("reading_connections", error);
+        let connect = |error| ("connecting", error);
+        let saved_catalog = |error| ("checking_saved_catalog", error);
+        let refresh = |error| ("refreshing_models", error);
+        self.status(engine, "downloading", None).map_err(adapter)?;
         // An offline or failed update must not hide a usable owned copy.
-        let _ = self.install_pin(engine, package);
+        let installation = self.install_pin(engine, package);
         let Some((_, launch)) = adapters::discover(engine, package, &self.host)
             .filter(|(version, _)| adapters::qualified(engine, version))
         else {
-            return self.status(engine, "download_failed", None);
+            let reason = installation.as_ref().err().map_or("qualified_adapter_unavailable", CoreError::code);
+            return self.write_status(engine, &failed_status_body("download_failed", "installing_adapter", reason))
+                .map_err(adapter);
         };
-        let (_, state) = self.registry()?;
+        let (_, state) = self.registry().map_err(connections)?;
         let existing = state.first_of(engine);
         if existing.is_none() && state.opted_out(engine) {
-            return self.status(engine, "opted_out", None);
+            return self.status(engine, "opted_out", None).map_err(connections);
         }
-        self.status(engine, "connecting", None)?;
-        let created = self.register(engine, &launch)?;
+        self.status(engine, "connecting", None).map_err(connect)?;
+        let created = self.register(engine, &launch).map_err(connect)?;
         let id = match (&created, existing) {
             (Some(id), _) => id.clone(),
             (None, Some(id)) => id,
             (None, None) => {
                 // Includes an owner removal racing this pass: the registry decides.
-                let (_, state) = self.registry()?;
+                let (_, state) = self.registry().map_err(connections)?;
                 let phase = if state.opted_out(engine) {
                     "opted_out"
                 } else {
                     "login_required"
                 };
-                return self.status(engine, phase, None);
+                return self.status(engine, phase, None).map_err(connect);
             }
         };
-        if created.is_none() && self.has_snapshot(&id)? {
-            return self.status(engine, "ready", None);
+        if created.is_none() {
+            if self.reuse_saved_catalog(&id).map_err(saved_catalog)? {
+                return self.status(engine, "ready", None).map_err(saved_catalog);
+            }
         }
-        self.status(engine, "refreshing_models", None)?;
+        self.status(engine, "refreshing_models", None).map_err(refresh)?;
         let (phase, reason) = self.observe(&id);
         // Best effort first, then a required rewrite keeping the recorded code.
         let _ = self.status(engine, phase, reason.as_deref());
-        let reason = self.status_reason(engine)?;
-        self.status(engine, phase, reason.as_deref())
+        let reason = self.status_reason(engine).map_err(refresh)?;
+        self.status(engine, phase, reason.as_deref()).map_err(refresh)
+    }
+    fn reuse_saved_catalog(&self, id: &str) -> CoreResult<bool> {
+        match self.has_snapshot(id) {
+            // A malformed newest snapshot supplies no retained catalogue
+            // evidence. Use the ordinary fresh first-run model observation.
+            Err(CoreError::Json(_) | CoreError::Refused("invalid_catalog_snapshot")) => Ok(false),
+            result => result,
+        }
     }
     /// Python `sync_discovered_connections` + `create_referenced_connection(
     /// automatic=True)`: never touches an existing connection; the opt-out,
@@ -536,5 +573,58 @@ mod tests {
         assert!(pinned("codex-acp", "2.3.0") && pinned("codex-acp", "2.6.0"));
         assert!(pinned("claude-agent-acp", "0.107.0") && !pinned("claude-agent-acp", "0.107.2"));
         assert!(!pinned("codex-acp", "2.4.0"));
+    }
+
+    #[test]
+    fn malformed_newest_catalog_uses_fresh_observation_and_unsafe_files_refuse() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = std::env::temp_dir().join(format!("first-run-catalog-{}", random_hex().unwrap()));
+        let id = "cn_000000000001";
+        let folder = root.join("cortex/catalog").join(id);
+        fs::create_dir_all(&folder).unwrap();
+        let environment = RouteEnvironment {
+            home: root.clone(), config: root.join("config"), state: root.clone(), routing_override: None,
+        };
+        let pass = FirstRun::from_process(&environment, &root);
+        let write = |name: &str, content: &[u8]| {
+            let path = folder.join(name);
+            fs::write(&path, content).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            path
+        };
+        // Current Codex reports the worker launch mode, which is not part of
+        // the stable route identity. First-run accepts the current producer.
+        let route = json!({"engine":"codex-acp","connection_id":id,"model":"fixture",
+            "id":"xr_ce5fce3688a1434fe7ff36a2",
+            "supported_parameters":[["mode","permission-profile:cortex-workspace"]]});
+        let catalogue = json!({"snapshot_id":"cs_000000000001","created_at":"fixture","entries":[{
+            "route":route,"connection_id":id,"catalog_snapshot_id":"cs_000000000001",
+            "label":"Fixture","disambiguated_label":"Fixture","evidence":{}
+        }]});
+        let original = write("cs_000000000001.json", catalogue.to_string().as_bytes());
+        fs::File::options().write(true).open(&original).unwrap()
+            .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH)).unwrap();
+        assert!(pass.reuse_saved_catalog(id).unwrap());
+        let newest = write("cs_000000000002.json", b"{");
+        assert!(!pass.reuse_saved_catalog(id).unwrap());
+        write("cs_000000000002.json", br#"{"snapshot_id":"cs_000000000002","created_at":"fixture","entries":[{}]}"#);
+        assert!(!pass.reuse_saved_catalog(id).unwrap());
+        fs::remove_file(&newest).unwrap();
+        let alias_target = write("not-a-catalog.json", b"{}");
+        symlink(&alias_target, &newest).unwrap();
+        assert!(pass.reuse_saved_catalog(id).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_setup_records_only_allowlisted_code_shapes() {
+        let safe: Value = serde_json::from_str(&failed_status_body(
+            "setup_failed", "checking_saved_catalog", "unsafe_storage",
+        )).unwrap();
+        assert_eq!(safe, json!({"phase":"setup_failed","stage":"checking_saved_catalog","reason":"unsafe_storage"}));
+        let unsafe_reason: Value = serde_json::from_str(&failed_status_body(
+            "setup_failed", "checking_saved_catalog", "/private/location",
+        )).unwrap();
+        assert!(unsafe_reason.get("reason").is_none());
     }
 }

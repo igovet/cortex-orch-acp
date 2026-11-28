@@ -67,12 +67,6 @@ pub struct Publication<'a> {
 pub struct Publisher<'a> {
     store: &'a Store,
 }
-fn publication_checkpoint(_point: &str) {
-    #[cfg(test)]
-    if std::env::var("CORTEX_CORE_PUBLICATION_CRASH_POINT").as_deref() == Ok(_point) {
-        std::process::exit(98);
-    }
-}
 fn safe(s: &str) -> CoreResult<()> {
     if s.is_empty()
         || s == "."
@@ -163,7 +157,17 @@ fn metadata(meta: &Publication<'_>) -> CoreResult<()> {
     if meta.source_revision < 0 || artifacts.len() > 100 {
         return refuse("invalid_publication");
     }
+    let mut typed = std::collections::HashSet::new();
     for artifact in artifacts {
+        if artifact.get("kind").is_some() || artifact.get("name").is_some() || artifact.get("data").is_some() {
+            let output = crate::deliverables::artifact(artifact)
+                .ok_or(CoreError::Refused("invalid_deliverable_artifact"))?;
+            if typed.len() >= crate::deliverables::MAX_ITEMS
+                || !typed.insert((output.name, output.version)) {
+                return refuse("invalid_deliverable_artifact");
+            }
+            continue;
+        }
         let Some(object) = artifact.as_object() else {
             return refuse("invalid_publication");
         };
@@ -227,6 +231,99 @@ fn receipt(
     )?;
     Ok(())
 }
+
+/// Stage the same crash intent for runtime and worker publication, and record
+/// its exact installed digest in the caller's transaction.
+fn record_edition(
+    db: &Connection,
+    task: &str,
+    dir: &Path,
+    kind: &str,
+    markdown: &str,
+    meta: &Publication<'_>,
+    journal: &mut Option<PathBuf>,
+) -> CoreResult<Published> {
+    let revision: i64 = db.query_row(
+        "SELECT coalesce(max(revision),0) FROM source_revisions WHERE task_id=?",
+        [task],
+        |row| row.get(0),
+    )?;
+    if meta.source_revision > revision {
+        return refuse("invalid_source_revision");
+    }
+    let existing: Option<(String, String)> = if kind == "pipeline" {
+        db.query_row(
+            "SELECT r.id,e.digest FROM reports r JOIN editions e ON e.report_id=r.id
+             WHERE r.task_id=? AND r.kind='pipeline' ORDER BY e.sequence DESC LIMIT 1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+    } else {
+        None
+    };
+    if kind == "pipeline" && existing.is_none() {
+        // A prior attempt may have created the task directory and stopped
+        // before persisting its parent entry. Fence each first edition.
+        locks::sync_directory(
+            dir.parent()
+                .ok_or(CoreError::Refused("unsafe_publication_path"))?,
+        )?;
+    }
+    let report_id = existing.as_ref().map_or_else(
+        || format!("r_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
+        |(id, _)| id.clone(),
+    );
+    let filename = if kind == "pipeline" {
+        "pipeline.md".to_string()
+    } else {
+        format!("{report_id}.md")
+    };
+    let (intent, path) = PublicationIntent::prepare(
+        dir,
+        &report_id,
+        &filename,
+        markdown,
+        existing.as_ref().map(|(_, digest)| digest.as_str()),
+    )?;
+    *journal = Some(path);
+    publication::checkpoint("after_prepare");
+    intent.install(dir)?;
+    publication::checkpoint("after_install");
+    let size = fs::metadata(dir.join(&filename))?.len();
+    if existing.is_none() {
+        db.execute(
+            "INSERT INTO reports VALUES (?,?,?,?,?)",
+            (&report_id, task, kind, &filename, crate::now()),
+        )?;
+    }
+    let size_bytes = i64::try_from(size).map_err(|_| CoreError::Refused("document_too_large"))?;
+    let sha256 = intent.digest();
+    db.execute(
+        "INSERT INTO editions(report_id,title,summary,author,updated_at,digest,size_bytes) VALUES (?,?,?,?,?,?,?)",
+        (&report_id, meta.title, meta.summary, meta.author, crate::now(), sha256, size_bytes),
+    )?;
+    db.execute(
+        "INSERT INTO report_provenance VALUES (?,?,?)",
+        (
+            db.last_insert_rowid(),
+            meta.source_revision,
+            serde_json::to_string(&meta.artifacts)?,
+        ),
+    )?;
+    db.execute(
+        "INSERT INTO task_changes(task_id,kind,reference,created_at) VALUES (?,'report',?,?)",
+        (task, &report_id, crate::now()),
+    )?;
+    Ok(Published {
+        report_id,
+        sha256: sha256.to_owned(),
+        size_bytes: size,
+        source_revision: meta.source_revision,
+        artifacts: meta.artifacts.clone(),
+    })
+}
+
 impl<'a> Publisher<'a> {
     pub fn new(store: &'a Store) -> Self {
         Self { store }
@@ -316,16 +413,29 @@ impl<'a> Publisher<'a> {
         if !dir.exists() {
             return Ok(());
         }
+        let mut staging = Vec::new();
         for entry in fs::read_dir(dir)? {
             let path = entry?.path();
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(".publication_") && n.ends_with(".json"))
-            {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if name.starts_with(".publication_") && name.ends_with(".json") {
                 self.store
                     .read(|db| PublicationIntent::reconcile(dir, &path, db))?;
+            } else if self.store.mode != OpenMode::LiveReadOnly && publication::scratch_name(name) {
+                staging.push(path);
             }
+        }
+        // Reconcile durable intents under the publication lock before taking
+        // away any private staging file or backup left by an interrupted cleanup.
+        let mut removed_staging = false;
+        for path in staging {
+            if path.try_exists()? {
+                locks::regular(&path)?;
+                fs::remove_file(path)?;
+                removed_staging = true;
+            }
+        }
+        if removed_staging {
+            locks::sync_directory(dir)?;
         }
         let pending: Vec<(String, String, String)> = self.store.read(|db| {
             Ok(db
@@ -381,6 +491,105 @@ impl<'a> Publisher<'a> {
         let _lock = self.lock(true)?;
         let dir = self.directory(task, false)?;
         self.reconcile_locked(task, &dir)
+    }
+    /// Publish a runtime-generated edition without making an intermediate editable
+    /// draft durable. Existing worker drafts and older runtime receipts retain
+    /// their ordinary validation and recovery path.
+    pub(crate) fn publish_runtime_pipeline(
+        &self,
+        task: &str,
+        key: &str,
+        markdown: &str,
+        meta: Publication<'_>,
+    ) -> CoreResult<Published> {
+        use crate::pipeline::OWNER;
+        const OPERATION: &str = "publish_runtime_pipeline";
+        if matches!(
+            self.store.mode,
+            OpenMode::InspectImmutable | OpenMode::LiveReadOnly
+        ) {
+            return refuse("inspection_read_only");
+        }
+        request_key(key)?;
+        metadata(&meta)?;
+        let scope = serde_json::to_string(&(task, OWNER))?;
+        let draft_hash =
+            crate::digest(serde_json::to_string(&(task, OWNER, "pipeline"))?.as_bytes());
+        let legacy = self
+            .store
+            .read(|db| replay::<Draft>(db, &scope, "create_draft", key, &draft_hash))?;
+        if let Some(draft) = legacy {
+            self.reconcile(task)?;
+            if draft.draft_path.symlink_metadata().is_ok() {
+                self.write_draft(
+                    task,
+                    OWNER,
+                    &draft.draft_id,
+                    &(marker(&draft.draft_id) + markdown),
+                )?;
+            }
+            return self.publish(
+                task,
+                OWNER,
+                &draft.draft_id,
+                &format!("{key}:publish"),
+                meta,
+            );
+        }
+        let content = crate::digest(markdown.as_bytes());
+        let hash = crate::digest(
+            serde_json::to_string(&(
+                &content,
+                meta.title,
+                meta.summary,
+                meta.author,
+                meta.source_revision,
+                &meta.artifacts,
+            ))?
+            .as_bytes(),
+        );
+        let _lock = self.lock(true)?;
+        let dir = self.directory(task, false)?;
+        if !dir.is_dir() {
+            locks::private_directory(&dir, true)?;
+        }
+        self.reconcile_locked(task, &dir)?;
+        if let Some(old) = self
+            .store
+            .read(|db| replay(db, &scope, OPERATION, key, &hash))?
+        {
+            return Ok(old);
+        }
+        let mut journal = None;
+        let result = self.store.write(|db| {
+            let published =
+                record_edition(db, task, &dir, "pipeline", markdown, &meta, &mut journal)?;
+            receipt(db, &scope, OPERATION, key, &hash, &content, &published)?;
+            publication::checkpoint("before_commit");
+            Ok(published)
+        });
+        self.finish_edition(&dir, journal, result.is_ok())?;
+        result
+    }
+
+    fn finish_edition(
+        &self,
+        dir: &Path,
+        journal: Option<PathBuf>,
+        defer_committed_cleanup_sync: bool,
+    ) -> CoreResult<()> {
+        publication::checkpoint("after_commit");
+        if let Some(path) = journal {
+            self.store.read(|db| {
+                if defer_committed_cleanup_sync {
+                    PublicationIntent::reconcile_completed(dir, &path, db)
+                } else {
+                    PublicationIntent::reconcile(dir, &path, db)
+                }
+            })?;
+        }
+        publication::checkpoint("after_cleanup");
+        Ok(())
     }
     /// Only the runtime calls this method. Worker routes must expose
     /// create_draft (which refuses the pipeline template), not this method.
@@ -521,34 +730,13 @@ impl<'a> Publisher<'a> {
         let content = crate::digest(markdown.as_bytes());
         let mut journal = None;
         let result=self.store.write(|db| {
-            let revision:i64=db.query_row("SELECT coalesce(max(revision),0) FROM source_revisions WHERE task_id=?",[task],|r|r.get(0))?;
-            if meta.source_revision>revision {return refuse("invalid_source_revision");}
-            let existing:Option<(String,String)>=if kind=="pipeline" {db.query_row(
-                "SELECT r.id,e.digest FROM reports r JOIN editions e ON e.report_id=r.id WHERE r.task_id=? AND r.kind='pipeline' ORDER BY e.sequence DESC LIMIT 1",
-                [task],|r|Ok((r.get(0)?,r.get(1)?))).optional()?} else {None};
-            let rid=existing.as_ref().map(|v|v.0.clone()).unwrap_or_else(||format!("r_{}",&uuid::Uuid::new_v4().simple().to_string()[..12]));
-            let filename=if kind=="pipeline" {"pipeline.md".to_owned()} else {format!("{rid}.md")};
-            let (intent,path)=PublicationIntent::prepare(&dir,&rid,&filename,&markdown,existing.as_ref().map(|v|v.1.as_str()))?;
-            journal=Some(path);publication_checkpoint("after_prepare");intent.install(&dir)?;
-            publication_checkpoint("after_install");
-            let size=fs::metadata(dir.join(&filename))?.len();
-            if existing.is_none() {db.execute("INSERT INTO reports VALUES (?,?,?,?,?)",(&rid,task,&kind,&filename,crate::now()))?;}
-            db.execute("INSERT INTO editions(report_id,title,summary,author,updated_at,digest,size_bytes) VALUES (?,?,?,?,?,?,?)",
-                (&rid,meta.title,meta.summary,meta.author,crate::now(),intent.digest(),i64::try_from(size).map_err(|_|CoreError::Refused("document_too_large"))?))?;
-            let seq=db.last_insert_rowid();
-            db.execute("INSERT INTO report_provenance VALUES (?,?,?)",(seq,meta.source_revision,serde_json::to_string(&meta.artifacts)?))?;
-            db.execute("UPDATE drafts SET published_report_id=?,published_digest=? WHERE id=?",(&rid,&content,id))?;
+            let result = record_edition(db, task, &dir, &kind, &markdown, &meta, &mut journal)?;
+            db.execute("UPDATE drafts SET published_report_id=?,published_digest=? WHERE id=?",(&result.report_id,&content,id))?;
             db.execute("INSERT INTO pending_source_deletions VALUES (?,?,?,?)",(task,id,source.to_str(),&content))?;
-            db.execute("INSERT INTO task_changes(task_id,kind,reference,created_at) VALUES (?,'report',?,?)",(task,&rid,crate::now()))?;
-            let result=Published {report_id:rid,sha256:intent.digest().into(),size_bytes:size,source_revision:meta.source_revision,artifacts:meta.artifacts.clone()};
             receipt(db,&scope,"write_report",key,&hash,&content,&result)?;Ok(result)
         });
-        publication_checkpoint("after_commit");
         // Reconcile both commit and rollback paths from the same persisted intent.
-        if let Some(path) = journal {
-            self.store
-                .read(|db| PublicationIntent::reconcile(&dir, &path, db))?;
-        }
+        self.finish_edition(&dir, journal, false)?;
         if result.is_ok() {
             self.reconcile_locked(task, &dir)?;
         }
@@ -619,7 +807,7 @@ impl<'a> Publisher<'a> {
         let _lock = self.lock(false)?;
         let dir = self.directory(task, false)?;
         self.reconcile_locked(task, &dir)?;
-        self.published_page(task, id, cursor, count, &dir, false)
+        self.published_page(task, id, cursor, count, &dir, false, None)
     }
     /// Read only a committed, digest-matching report; never follow a caller's
     /// filesystem path or perform recovery effects on the publishing task.
@@ -632,7 +820,37 @@ impl<'a> Publisher<'a> {
     ) -> CoreResult<ContentPage> {
         limit(count, 4000)?;
         let dir = self.directory(task, false)?;
-        self.published_page(task, id, cursor, count, &dir, true)
+        self.published_page(task, id, cursor, count, &dir, true, None)
+    }
+    /// A bounded initial page positioned by Unicode character offset in an immutable report.
+    pub fn immutable_report_from(
+        &self, task: &str, id: &str, start: u64, count: usize,
+    ) -> CoreResult<ContentPage> {
+        limit(count, 4000)?;
+        let dir = self.directory(task, false)?;
+        self.published_page(task, id, None, count, &dir, true, Some(start))
+    }
+    /// Verify the bytes of the exact committed report selected in the caller's
+    /// current SQLite snapshot. The normal immutable content reader validates
+    /// every byte before returning the bounded first page.
+    pub fn verify_immutable_report_on(
+        &self, db: &Connection, task: &str, id: &str, expected: &str,
+    ) -> CoreResult<()> {
+        safe(task)?;
+        let dir = self.store.key().directory().join(task);
+        locks::private_directory(&dir, false)?;
+        let (filename, digest): (String, String) = db.query_row(
+            "SELECT r.filename,e.digest FROM reports r JOIN editions e ON e.report_id=r.id
+             WHERE r.task_id=? AND r.id=? AND r.kind='report' AND
+                   (SELECT count(*) FROM editions WHERE report_id=r.id)=1",
+            (task, id), |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?.ok_or(CoreError::Refused("not_found"))?;
+        if digest != expected {
+            return refuse("file_conflict");
+        }
+        safe(&filename)?;
+        page(task, id, "cr", &dir.join(filename), Some(expected), None, 1, "invalid_cursor")?;
+        Ok(())
     }
     fn published_page(
         &self,
@@ -642,6 +860,7 @@ impl<'a> Publisher<'a> {
         count: usize,
         dir: &Path,
         immutable_only: bool,
+        start: Option<u64>,
     ) -> CoreResult<ContentPage> {
         let row:Option<(String,String,String)>=self.store.read(|db| Ok(db.query_row(
             "SELECT r.filename,r.kind,e.digest FROM reports r JOIN editions e ON e.report_id=r.id WHERE r.task_id=? AND r.id=? AND (NOT ? OR r.kind='report') ORDER BY e.sequence DESC LIMIT 1",
@@ -650,13 +869,18 @@ impl<'a> Publisher<'a> {
             return refuse("not_found");
         };
         safe(&filename)?;
+        let positioned = start.map(|start| {
+            Ok::<_, CoreError>(format!("cr.{}.{}.{}.{}", binding(task),
+                id.strip_prefix("r_").ok_or(CoreError::Refused("invalid_cursor"))?,
+                digest.get(..12).ok_or(CoreError::Refused("file_conflict"))?, number(start)))
+        }).transpose()?;
         page(
             task,
             id,
             "cr",
             &dir.join(filename),
             Some(&digest),
-            cursor,
+            cursor.or(positioned.as_deref()),
             count,
             if kind == "pipeline" {
                 "cursor_stale"
@@ -723,6 +947,10 @@ mod tests {
         let root = Path::new(&root);
         let s = Store::open(key(root), OpenMode::Initialize).unwrap();
         let api = Publisher::new(&s);
+        if std::env::var("CORTEX_CORE_PUBLICATION_RUNTIME").as_deref() == Ok("1") {
+            api.publish_runtime_pipeline("t", "second", "new", meta()).unwrap();
+            panic!("runtime checkpoint did not run");
+        }
         let id = api
             .own_drafts("t", "owner", "", 100)
             .unwrap()
@@ -798,6 +1026,124 @@ mod tests {
             fs::remove_dir_all(root).unwrap();
         }
     }
+
+    #[test]
+    fn direct_runtime_publication_recovers_after_each_crash_boundary() {
+        for point in [
+            "before_staging",
+            "after_staging",
+            "after_intent_write",
+            "after_intent_rename",
+            "after_prepare",
+            "after_backup",
+            "after_replace",
+            "after_install",
+            "before_commit",
+            "after_commit",
+            "during_cleanup",
+            "after_cleanup",
+        ] {
+            let root = std::env::temp_dir()
+                .join(format!("cortex-pipeline-crash-{}", uuid::Uuid::new_v4()));
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let first = {
+                let store = Store::open(key(&root), OpenMode::Initialize).unwrap();
+                TaskMachine::new(&store)
+                    .create("t", "goal", "owner")
+                    .unwrap();
+                Publisher::new(&store)
+                    .publish_runtime_pipeline("t", "first", "old", meta())
+                    .unwrap()
+            };
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "store::documents::tests::publication_crash_child",
+                ])
+                .env("CORTEX_CORE_PUBLICATION_CRASH_ROOT", &root)
+                .env("CORTEX_CORE_PUBLICATION_RUNTIME", "1")
+                .env("CORTEX_CORE_PUBLICATION_CRASH_POINT", point)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(98), "{point}");
+            {
+                let store = Store::open(key(&root), OpenMode::Initialize).unwrap();
+                let api = Publisher::new(&store);
+                let page = api.read_report("t", &first.report_id, None, 100).unwrap();
+                let committed =
+                    matches!(point, "after_commit" | "during_cleanup" | "after_cleanup");
+                let updated = "new\n\n---\n\nold";
+                assert_eq!(
+                    page.markdown,
+                    if committed { updated } else { "old" },
+                    "{point}"
+                );
+                let result = api
+                    .publish_runtime_pipeline("t", "second", "new", meta())
+                    .unwrap();
+                assert_eq!(result.report_id, first.report_id, "{point}");
+                assert_eq!(result.sha256, crate::digest(updated.as_bytes()), "{point}");
+                let replay = api
+                    .publish_runtime_pipeline("t", "second", "new", meta())
+                    .unwrap();
+                assert_eq!(replay, result, "{point}");
+                assert_eq!(
+                    api.publish_runtime_pipeline("t", "second", "different", meta())
+                        .unwrap_err()
+                        .code(),
+                    "delivery_conflict",
+                    "{point}"
+                );
+                let counts = store.read(|db| {
+                    Ok(db.query_row(
+                        "SELECT (SELECT count(*) FROM reports), (SELECT count(*) FROM editions), (SELECT count(*) FROM drafts)",
+                        [],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+                    )?)
+                }).unwrap();
+                assert_eq!(counts, (1, 2, 0), "{point}");
+                let files: Vec<_> = fs::read_dir(store.key().directory().join("t"))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                assert_eq!(files, ["pipeline.md"], "{point}");
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_pending_legacy_runtime_draft_finishes_under_its_original_receipt() {
+        let root =
+            std::env::temp_dir().join(format!("cortex-pipeline-legacy-{}", uuid::Uuid::new_v4()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        {
+            let store = Store::open(key(&root), OpenMode::Initialize).unwrap();
+            TaskMachine::new(&store)
+                .create("t", "goal", "owner")
+                .unwrap();
+            let api = Publisher::new(&store);
+            let old = api
+                .create_pipeline_draft("t", crate::pipeline::OWNER, "legacy")
+                .unwrap();
+            let result = api
+                .publish_runtime_pipeline("t", "legacy", "body", meta())
+                .unwrap();
+            assert!(!old.draft_path.exists());
+            let page = api.read_report("t", &result.report_id, None, 100).unwrap();
+            assert_eq!(page.markdown, marker(&old.draft_id) + "body");
+            assert_eq!(
+                api.publish_runtime_pipeline("t", "legacy", "body", meta())
+                    .unwrap(),
+                result
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+/// Offset already verified by the immutable page reader. Used in a page receipt.
+pub fn report_cursor_offset(cursor: &str) -> CoreResult<u64> {
+    parse(cursor.rsplit('.').next().ok_or(CoreError::Refused("invalid_cursor"))?)
 }
 fn page(
     task: &str,

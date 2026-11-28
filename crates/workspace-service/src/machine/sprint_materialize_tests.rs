@@ -350,6 +350,26 @@ fn a_failure_part_way_leaves_no_task_and_the_plan_ready_and_a_retry_completes_it
 }
 
 #[test]
+fn an_existing_same_project_draft_cannot_supply_a_plan_item() {
+    let env = env("same-project-conflict", 2);
+    let before = env.bytes();
+    let id = task_id("p", "sp", 1, "t2");
+    let store = Store::open(context::key(&env.root).unwrap(), OpenMode::RuntimeValidate).unwrap();
+    store.write(|db| {
+        db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,created_at) VALUES (?,'p','Other work','now')", [&id])?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(env.run(1).unwrap_err().code, "payload_conflict");
+    assert_eq!(env.bytes(), before);
+    let rows = store.read(|db| {
+        let mut query = db.prepare("SELECT task_id,description FROM workspace_tasks")?;
+        let rows = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }).unwrap();
+    assert_eq!(rows, [(id, "Other work".into())]);
+}
+
+#[test]
 fn creating_again_returns_the_same_tasks_and_never_a_second_set() {
     let env = env("again", 12);
     let first = env.run(1).unwrap();
@@ -358,9 +378,86 @@ fn creating_again_returns_the_same_tasks_and_never_a_second_set() {
     assert_eq!(again["taskIds"], first["taskIds"]);
     assert_eq!(env.drafts().len(), 12);
     assert_eq!(env.saved()["sprints"][0]["taskIds"], first["taskIds"]);
+    let before = env.saved();
+    let changed = super::super::product::sprint(
+        &env.state,
+        "p",
+        &json!({"action":"patch","sprintId":"sp","patch":{"materializedVersion":null,"taskIds":[]}}),
+        Some(&env.root),
+    );
+    assert_eq!(changed.unwrap_err().code, "sprint_started");
+    assert_eq!(env.saved(), before);
     // Another version of an already created sprint is refused, not created beside it.
     assert_eq!(env.run(2).unwrap_err().code, "sprint_started");
     assert_eq!(env.drafts().len(), 12);
+    let mut product = env.saved();
+    product["sprints"][0]["taskIds"].as_array_mut().unwrap().push(json!("later-draft"));
+    settings::write_json(&product_path(&env.state, "p").unwrap(), &product).unwrap();
+    assert_eq!(env.run(1).unwrap()["taskIds"], first["taskIds"]);
+}
+
+#[test]
+fn a_saved_materialization_with_a_missing_draft_is_not_acknowledged() {
+    let env = env("unconfirmed", 2);
+    // Exercise the persisted state left if the process exits after publishing
+    // the product JSON and SQLite then rolls back the draft transaction.
+    let mut product = env.saved();
+    let ids: Vec<_> = ["t1", "t2"].map(|key| task_id("p", "sp", 1, key)).into();
+    product["sprints"][0]["planning"] = json!("created");
+    product["sprints"][0]["materializedVersion"] = json!(1);
+    product["sprints"][0]["taskIds"] = json!(ids);
+    for id in ids {
+        product["tasks"][id] = json!({"sprintId":"sp","planning":false});
+    }
+    settings::write_json(&product_path(&env.state, "p").unwrap(), &product).unwrap();
+    let before = env.bytes();
+    assert_eq!(env.run(1).unwrap_err().code, "machine_outcome_unknown");
+    assert!(env.drafts().is_empty());
+    assert_eq!(env.bytes(), before);
+}
+
+#[test]
+fn materialization_crash_child() {
+    let Some(base) = std::env::var_os("CORTEX_TEST_MATERIALIZE_CRASH_DIR") else {
+        return;
+    };
+    let base = PathBuf::from(base);
+    let checkpoint = std::env::var("CORTEX_TEST_MATERIALIZE_CRASH_CHECKPOINT").unwrap().parse().unwrap();
+    FAIL.with(|fail| fail.set(checkpoint));
+    let result = materialize(
+        &base.join("repo"),
+        "p",
+        &base.join("state"),
+        &json!({"action":"materialize","sprintId":"sp","planVersion":1}),
+    );
+    panic!("expected process exit before materialize returned: {result:?}");
+}
+
+#[test]
+fn materialization_recovers_process_exit_on_either_side_of_commit() {
+    for (checkpoint, committed) in [(3, false), (4, true)] {
+        let env = env("crash", 2);
+        let before = env.saved();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "machine::sprint_materialize::tests::materialization_crash_child"])
+            .env("CORTEX_TEST_MATERIALIZE_CRASH_DIR", &env.base)
+            .env("CORTEX_TEST_MATERIALIZE_CRASH_CHECKPOINT", checkpoint.to_string())
+            .output()
+            .unwrap();
+        assert_eq!(child.status.code(), Some(80 + checkpoint), "{:?}", child);
+        let ids: Vec<_> = ["t1", "t2"].map(|key| task_id("p", "sp", 1, key)).into();
+        if committed {
+            assert_eq!(env.saved()["sprints"][0]["taskIds"], json!(ids));
+            assert_eq!(env.drafts().len(), 2);
+        } else {
+            assert_eq!(env.saved(), before);
+            assert!(env.drafts().is_empty());
+        }
+        let retried = env.run(1).unwrap();
+        assert_eq!(retried["created"], if committed { 0 } else { 2 });
+        assert_eq!(retried["taskIds"], json!(ids));
+        assert_eq!(env.drafts().into_iter().map(|d| d.0).collect::<Vec<_>>(), ids);
+    }
 }
 
 #[test]
@@ -389,6 +486,22 @@ fn a_stale_or_unready_plan_is_refused_before_any_effect() {
     saved["sprints"][0]["plan"]["items"][2]["dependsOn"] = json!(["t2"]);
     settings::write_json(&product_path(&env.state, "p").unwrap(), &saved).unwrap();
     assert_eq!(env.run(1).unwrap_err().code, "invalid_plan", "a cycle");
+    assert!(env.drafts().is_empty());
+}
+
+#[test]
+fn an_ambiguous_or_foreign_sprint_binding_cannot_publish_drafts() {
+    let env = env("ambiguous", 2);
+    let path = product_path(&env.state, "p").unwrap();
+    let saved = env.saved();
+    let mut foreign = saved.clone();
+    foreign["sprints"][0]["projectId"] = json!("another-project");
+    settings::write_json(&path, &foreign).unwrap();
+    assert_eq!(env.run(1).unwrap_err().code, "sprint_membership_invalid");
+    let mut duplicate = saved.clone();
+    duplicate["sprints"].as_array_mut().unwrap().push(saved["sprints"][0].clone());
+    settings::write_json(&path, &duplicate).unwrap();
+    assert_eq!(env.run(1).unwrap_err().code, "sprint_membership_invalid");
     assert!(env.drafts().is_empty());
 }
 

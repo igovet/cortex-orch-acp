@@ -24,13 +24,13 @@ async function mount(path: string, hasGit = true, worktrees = true) {
   return { p, world };
 }
 const choose = async (kind: "main" | "worktree") => {
-  const input = document.querySelectorAll<HTMLInputElement>('input[name="checkout"]')[kind === "main" ? 1 : 0];
+  const input = document.querySelectorAll<HTMLInputElement>('[role="radiogroup"][aria-label="Working folder"] input[type="radio"]')[kind === "main" ? 1 : 0];
   input.click(); await settle();
 };
 
 it.each(["main", "worktree"] as const)("saves %s for a new sprint using the same composer and checkout controls as a task", async kind => {
   const { p } = await mount("new?kind=sprint&project=p");
-  expect(document.querySelector('input[name="checkout"]:checked')?.closest("label")?.textContent).toContain("Worktree");
+  expect(document.querySelector('[role="radiogroup"][aria-label="Working folder"] input[type="radio"]:checked')?.closest("label")?.textContent).toContain("Worktree");
   await choose(kind);
   expect(named("Attach files")).toBeDefined();
   expect(named("Voice input")).toBeDefined();
@@ -40,7 +40,7 @@ it.each(["main", "worktree"] as const)("saves %s for a new sprint using the same
   expect(p.commands.map(c => c.payload)).toContainEqual(expect.objectContaining({ type: "create_sprint", checkout: kind === "main" ? { kind } : { kind, shared: true }, description: "Make these two changes" }));
   p.receipt(false); await settle();
   expect(area.value).toBe("Make these two changes");
-  expect(document.querySelector('input[name="checkout"]:checked')?.closest("label")?.textContent).toContain(kind === "main" ? "Project folder" : "Worktree");
+  expect(document.querySelector('[role="radiogroup"][aria-label="Working folder"] input[type="radio"]:checked')?.closest("label")?.textContent).toContain(kind === "main" ? "Project folder" : "Worktree");
   expect(p.commands.some(c => (c.payload as WorkspaceCommand).type === "start_task")).toBe(false);
 });
 
@@ -124,7 +124,7 @@ it("shows only work decisions and exact integration holds in Automatic attention
 
 it("disables the worktree choice on a non-Git project even on a supporting service", async () => {
   await mount("new?kind=task&project=p", false, true);
-  const input = document.querySelector<HTMLInputElement>('input[name="checkout"]')!;
+  const input = document.querySelector<HTMLInputElement>('[role="radiogroup"][aria-label="Working folder"] input[type="radio"]')!;
   expect(input.disabled).toBe(true);
   expect(input.closest("label")?.textContent).toContain("needs a Git repository");
 });
@@ -151,7 +151,7 @@ it("offers one worktree for the whole sprint by default and per-task worktrees a
 it("keeps the sprint worktree available with Automatic and Hybrid", async () => {
   await mount("new?kind=sprint&project=p");
   const mode = (value: string) => [...document.querySelectorAll<HTMLInputElement>('input[name="sprint-run"]')].find(input => input.closest("label")?.querySelector(".t")?.textContent === value)!;
-  const inputs = () => [...document.querySelectorAll<HTMLInputElement>('input[name="checkout"]')];
+  const inputs = () => [...document.querySelectorAll<HTMLInputElement>('[role="radiogroup"][aria-label="Working folder"] input[type="radio"]')];
   for (const value of ["Automatic", "Hybrid"]) {
     mode(value).click(); await settle();
     expect(inputs()[0].disabled).toBe(false);
@@ -162,7 +162,7 @@ it("keeps the sprint worktree available with Automatic and Hybrid", async () => 
 
 it.each([false, true])("selects Project folder when worktrees are unsupported (Git: %s)", async hasGit => {
   await mount("new?kind=sprint&project=p", hasGit, false);
-  const inputs = [...document.querySelectorAll<HTMLInputElement>('input[name="checkout"]')];
+  const inputs = [...document.querySelectorAll<HTMLInputElement>('[role="radiogroup"][aria-label="Working folder"] input[type="radio"]')];
   expect(inputs[0].disabled).toBe(true);
   expect(inputs[1].checked).toBe(true);
 });

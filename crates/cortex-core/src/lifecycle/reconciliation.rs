@@ -687,7 +687,9 @@ pub(crate) fn has_checkout_changes(db: &Connection, task: &str) -> CoreResult<bo
     let written: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND
          type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED',
-                  'VERIFICATION_REVISION_CHANGED','RUNTIME_UNCERTAINTY_RECORDED'))",
+                  'VERIFICATION_REVISION_CHANGED','RUNTIME_UNCERTAINTY_RECORDED')
+         OR task_id=?1 AND type='ASSIGNMENT_WORKTREE_INTEGRATED'
+              AND json_array_length(payload_json,'$.paths')>0)",
         [task],
         |r| r.get(0),
     )?;
@@ -766,8 +768,15 @@ pub fn review_packet_tx(
          FROM runtime_events e LEFT JOIN trusted_channels c ON c.task_id=e.task_id
            AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
          LEFT JOIN runtime_nodes n ON n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
-         WHERE e.task_id=? AND e.type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED')
-           AND length(json_extract(e.payload_json,'$.path'))>0 ORDER BY e.id")?;
+         WHERE e.task_id=?1 AND e.type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED')
+           AND length(json_extract(e.payload_json,'$.path'))>0
+         UNION ALL
+         SELECT e.id, p.value, 'modified', NULL, n.node_id, n.revision
+         FROM runtime_events e JOIN json_each(e.payload_json,'$.paths') p
+         JOIN runtime_nodes n ON n.task_id=e.task_id
+           AND n.assignment_ref=json_extract(e.payload_json,'$.assignment_ref')
+         WHERE e.task_id=?1 AND e.type='ASSIGNMENT_WORKTREE_INTEGRATED' AND p.type='text'
+         ORDER BY 1")?;
     let mut rows = statement.query([task])?;
     while let Some(row) = rows.next()? {
         let path: String = row.get(1)?;
@@ -941,6 +950,36 @@ pub fn review_packet_tx(
     let mut packet = json!({"changed_files":changed,"change_boundary":boundary,"predecessor_reports":reports,"read_scope":scope,
         "read_scope_covers_change":outside.is_empty(),"outside_read_scope":outside,"review_binding":binding,
         "goal":review_goal(db, task)?});
+    if let Some(plan) = super::plan::plan_in_force(db, task)? {
+        let mut decisions = super::plan::plan_competency_decisions(&plan);
+        let mut repairs = db.prepare(
+            "SELECT n.node_id, n.role, n.objective FROM runtime_nodes r
+             JOIN runtime_tasks t ON t.task_id=r.task_id AND t.revision=r.revision
+             JOIN json_each(r.dependencies_json) dep
+             JOIN runtime_nodes n ON n.task_id=r.task_id AND n.revision=r.revision AND n.node_id=dep.value
+             WHERE r.task_id=? AND r.node_id=? AND n.stage='execution'
+             ORDER BY n.rowid",
+        )?;
+        let rows = repairs.query_map((task, review_node), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        for row in rows {
+            let (node, role, objective) = row?;
+            if let Some(mut decision) = super::plan::competency_decision(&plan["routing"][&node]) {
+                decision["node"] = json!(node);
+                decision["role"] = json!(role);
+                decision["objective_excerpt"] = json!(objective.chars().take(500).collect::<String>());
+                decisions.push(decision);
+            }
+        }
+        if !decisions.is_empty() {
+            packet["competency_decisions"] = json!(decisions);
+            packet["competency_review_guidance"] = json!("Assess whether each specialist selection or base-only rationale fits its work. Use the relevant node, predecessor report and goal as context. Treat a material mismatch as a finding when it affected correctness, safety or evidence.");
+        }
+    }
+    packet["review_strategy"]["path_risk"] = json!(crate::strategy::path_risk(
+        files.keys().filter(|p| required(p)).map(String::as_str),
+    ).name());
     let outstanding = super::completion::unaccepted_commands(db, task)?;
     if !outstanding.is_empty() {
         packet["outstanding_verification_commands"] = json!(outstanding);
@@ -1033,15 +1072,21 @@ fn escape_markdown(text: &str) -> String {
 pub fn investigation_only(db: &rusqlite::Connection, task: &str) -> CoreResult<bool> {
     let roles = db
         .prepare(
-            "SELECT n.role,n.stage FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+            "SELECT n.role,n.stage,n.revision,n.node_id FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
              WHERE n.task_id=? AND n.revision=t.revision AND n.stage='execution'",
         )?
-        .query_map([task], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .query_map([task], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?, r.get::<_, String>(3)?)))?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(!roles.is_empty()
-        && roles
-            .iter()
-            .all(|(role, stage)| crate::scheduler::policy::read_only(role, stage)))
+    if roles.is_empty() {
+        return Ok(false);
+    }
+    for (role, stage, revision, node) in roles {
+        if !crate::scheduler::policy::node_read_only(db, task, revision, &node, &role, &stage)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 /// Compose the final text without a coordinator turn on the clean first-review
 /// path, record it and `SYNTHESIS_RUNTIME_COMPOSED`. Returns None, changing
@@ -1189,21 +1234,59 @@ pub fn compose_runtime_synthesis_tx(
 pub fn direct_answer_allowed(db: &Connection, task: &str) -> CoreResult<bool> {
     Ok(answer_grounds(db, task)?.is_some())
 }
-/// Why a direct answer is allowed: `informational` (no plan yet), `owner_closed`
+pub(super) fn planless_read_only(db: &Connection, task: &str) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT revision=0 AND plan_json IS NULL
+         AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=?1 AND role_id!='orchestrator')
+         AND NOT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1
+            AND type IN ('PLAN_ACCEPTED','PLAN_AMENDED','ASSIGNMENT_CREATED','NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED'))
+         FROM runtime_tasks WHERE task_id=?1",
+        [task], |r| r.get(0),
+    )?)
+}
+
+/// Rework can clarify an earlier Direct answer. The owner reopen must retain the
+/// exact closed answer and there must be no planned, delegated or attributed work.
+pub(super) fn informational_grounds(db: &Connection, task: &str) -> CoreResult<Option<&'static str>> {
+    if super::automatic::enabled(db, task)? || !planless_read_only(db, task)? {
+        return Ok(None);
+    }
+    let Some(rework) = crate::workspace::control::owner_rework_event(db, task)? else {
+        return Ok(Some("informational"));
+    };
+    if super::sprint_planning::enabled(db, task)? {
+        return Ok(None);
+    }
+    let exact: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events r JOIN runtime_events a ON a.id=(
+             SELECT max(p.id) FROM runtime_events p WHERE p.task_id=r.task_id AND p.id<r.id
+             AND p.type IN ('ANSWER_SUBMITTED','SYNTHESIS_SUBMITTED','SYNTHESIS_RUNTIME_COMPOSED'))
+         WHERE r.task_id=? AND r.id=? AND a.type='ANSWER_SUBMITTED'
+         AND json_extract(r.payload_json,'$.previous')='COMPLETED'
+         AND json_extract(r.payload_json,'$.revision')=0
+         AND json_type(a.payload_json,'$.text')='text'
+         AND json_extract(r.payload_json,'$.closed.synthesis')=json_extract(a.payload_json,'$.text'))",
+        (task,rework), |r| r.get(0),
+    )?;
+    Ok(exact.then_some("informational_followup"))
+}
+
+/// Why a direct answer is allowed: a planless informational answer, `owner_closed`
 /// (the owner answered a question asked after verification or a runtime stop
 /// question, deciding how the task ends) or `steered` (an owner message after a
 /// passed verification returned the work to planning). None: not allowed.
 pub fn answer_grounds(db: &Connection, task: &str) -> CoreResult<Option<&'static str>> {
     let allowed = |v: bool, why: &'static str| Ok(v.then_some(why));
+    if let Some(grounds) = informational_grounds(db, task)? {
+        return Ok(Some(grounds));
+    }
     if super::automatic::enabled(db, task)? || domain::owner_rework_needs_plan(db, task)? {
         return Ok(None);
     }
-    let (revision,informational):(i64,bool)=db.query_row("SELECT revision,plan_json IS NULL
-        AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?)
-        AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator')
-        FROM runtime_tasks WHERE task_id=?",(task,task,task),|r|Ok((r.get(0)?,r.get(1)?)))?;
-    if revision == 0 && informational {
-        return Ok(Some("informational"));
+    let revision: i64 = db.query_row("SELECT revision FROM runtime_tasks WHERE task_id=?", [task], |r| r.get(0))?;
+    if revision == 0 {
+        return Ok(None);
     }
     let active:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=? AND status IN ('pending','running'))",[task],|r|r.get(0))?;
     if active {
@@ -1318,6 +1401,7 @@ pub fn submit_answer_tx(
             "ANSWER_SUBMITTED",
             json!({"text":text,"not_verified":args["not_verified"],
                 "outcomes":if outcomes.is_empty() { Value::Null } else { json!(outcomes) },
+                "strategy":(revision == 0).then(|| json!({"mode":crate::strategy::Mode::Direct.name(),"ground":grounds})),
                 "owner_closed_as_is":owner_closed && !unmet.is_empty()}),
         )?;
         domain::state_tx(db, task, TaskState::AnswerReady, None)?;
@@ -1372,7 +1456,7 @@ pub fn submit_verification_tx(
         if state != TaskState::Planning || kind != "VERIFICATION_FAILED" || !ready {
             return refuse("verification_repair_not_expected");
         }
-        if super::automatic::consultation(db, task)?.is_some() {
+        if super::automatic::consultation(db, task, revision)?.is_some() {
             return refuse("automatic_consultation_plan_required");
         }
         super::automatic::require_failed_checks(db, task, &args["verification"])?;
@@ -1569,6 +1653,34 @@ mod tests {
             Store::open(key, crate::OpenMode::Initialize).unwrap(),
         )
     }
+    #[test]
+    fn direct_followup_binds_exactly_to_completed_planless_answer() {
+        let (root, store) = store();
+        lifecycle::TaskMachine::new(&store).create("t", "Compare the existing options", "o").unwrap();
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
+            submit_answer_tx(db, "t", "coordinator", "first", &json!({"text":"Original comparison"}), None)?;
+            super::super::completion::complete_tx(db, "t", &Default::default())?;
+            let reopen = domain::owner_rework_tx(db, "t", json!({}))?;
+            domain::state_tx(db, "t", TaskState::Planning, None)?;
+            assert_eq!(informational_grounds(db, "t")?, Some("informational_followup"));
+
+            db.execute("UPDATE runtime_events SET payload_json=json_set(payload_json,'$.closed.synthesis','Mismatched') WHERE id=?",
+                [reopen])?;
+            assert_eq!(informational_grounds(db, "t")?, None);
+            db.execute("UPDATE runtime_events SET payload_json=json_set(payload_json,'$.closed.synthesis','Original comparison') WHERE id=?",
+                [reopen])?;
+
+            submit_answer_tx(db, "t", "coordinator", "followup", &json!({"text":"Clarified comparison"}), None)?;
+            super::super::completion::complete_tx(db, "t", &Default::default())?;
+            assert_eq!(domain::task_tx(db, "t")?.0, TaskState::Completed);
+            assert_eq!(db.query_row("SELECT count(*) FROM runtime_nodes WHERE task_id='t'", [], |r| r.get::<_, i64>(0))?, 0);
+            Ok(())
+        }).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn manifest(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
         entries
             .iter()

@@ -1,6 +1,6 @@
 import { createRoot } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { emptyWorkspace, type WorkspaceState } from "@cortex/workspace-domain";
+import { emptySession, emptyWorkspace, type ConversationUpdate, type WorkspaceState } from "@cortex/workspace-domain";
 import { createWorkspaceStore } from "../src/store";
 import { flush, projection, scriptedPort, withTask } from "./support";
 
@@ -10,6 +10,52 @@ const storeOn = (port: Parameters<typeof createWorkspaceStore>[0], options: Para
 const titles = (state: WorkspaceState) => state.tasks.map(t => t.title);
 
 describe("workspace store", () => {
+  it("reuses only the initial attachment references of the same started task and execution", async () => {
+    const s = scriptedPort(), file = { name: "note.txt", mimeType: "text/plain", size: 2, sha256: "a".repeat(64) };
+    const read = vi.fn(async () => [file]);
+    s.port.readTaskAttachments = read;
+    const store = storeOn(s.port);
+    await flush();
+    const state = withTask(emptyWorkspace(), "Task attachments");
+    s.emit(projection("1", state));
+    await store.readTaskAttachments("t");
+    await store.readTaskAttachments("t");
+    expect(read).toHaveBeenCalledTimes(2);
+    const install = (version: string, executionId: string) => s.emit(projection(version, {
+      ...state, tasks: [{...state.tasks[0], executionId}],
+    }));
+    install("2", "first");
+    await store.readTaskAttachments("t");
+    expect(await store.readTaskAttachments("t")).toEqual([file]);
+    expect(read).toHaveBeenCalledTimes(3);
+    install("3", "second");
+    await store.readTaskAttachments("t");
+    expect(read).toHaveBeenCalledTimes(4);
+  });
+
+  it("updates a conversation only at its installed project version and execution", async () => {
+    const s = scriptedPort(), store = storeOn(s.port);
+    await flush();
+    const state = withTask(emptyWorkspace(), "Confirmed task"), task = state.tasks[0];
+    task.executionId = "execution";
+    const session = emptySession(task.id);
+    session.coordinator.note = "Held coordinator facts";
+    s.emit({ kind: "projection", scope: "project", version: "7", slice: { project: state.projects[0], tasks: [task], sessions: [session] } });
+    const next: ConversationUpdate = {
+      kind: "conversation", projectId: task.projectId, executionId: task.executionId, version: "7",
+      conversation: { taskId: task.id, timeline: [{ id: "chunk", kind: "cortex", text: "Confirmed fragment" }], decisions: [] },
+    };
+    s.emit({ ...next, version: "6" });
+    s.emit({ ...next, version: "8" });
+    s.emit({ ...next, executionId: "retired" });
+    expect(store.state().sessions[0].timeline).toEqual([]);
+
+    s.emit(next);
+    expect(store.state().sessions[0].timeline).toEqual(next.conversation.timeline);
+    expect(store.state().sessions[0].coordinator.note).toBe("Held coordinator facts");
+    expect(store.state().tasks[0].title).toBe("Confirmed task");
+  });
+
   it("retains a native patch arriving during a coherent read, then installs only the newer version", async () => {
     const s = scriptedPort();
     const store = storeOn(s.port);

@@ -303,12 +303,19 @@ pub(super) fn normalize_on(
 
 /// Old overlay-only dispositions did not record a runtime close event. Do not
 /// let a plain owner message reopen one of those, including archived tasks.
+#[derive(Clone)]
+pub(crate) struct SprintPlanningPrompt {
+    pub observed: Value,
+    pub run: Value,
+}
+
 pub(crate) fn with_plain_prompt_guard<T>(
     store: &Store,
     state: &Path,
     project: &str,
     execution: &str,
     held_lock: Option<&Lock>,
+    planning: Option<&SprintPlanningPrompt>,
     action: impl FnOnce() -> CoreResult<T>,
 ) -> CoreResult<T> {
     let _lock = if held_lock.is_none() {
@@ -321,6 +328,33 @@ pub(crate) fn with_plain_prompt_guard<T>(
         let root = store.key().root().to_string_lossy();
         let b =
             control::rework_binding_for_execution(db, &root, project, &crate::actor(), execution)?;
+        if let Some(planning) = planning {
+            let stale = || CoreError::Refused("planning_observation_stale");
+            let sprint = planning.observed["id"].as_str().ok_or_else(stale)?;
+            let index = super::sprint_live::sprint_index(&product, project, sprint).map_err(|_| stale())?;
+            let current = &product["sprints"][index];
+            if *current != planning.observed
+                || current["planningTaskId"] != b.draft
+                || planning.run["runtimeTask"] != b.task
+                || !current["archivedAt"].is_null()
+                || (!current["deleting"].is_null() && current["deleting"] != false)
+                || !current["materializedVersion"].is_null()
+                || !matches!(current["planning"].as_str(), Some("planning" | "question" | "ready"))
+                || !cortex_core::lifecycle::sprint_planning::enabled(db, &b.task)?
+            {
+                return Err(stale());
+            }
+            let completed: Option<i64> = db.query_row(
+                "SELECT max(e.id) FROM runtime_tasks t JOIN runtime_events e ON t.task_id=e.task_id
+                 WHERE t.task_id=? AND t.state='COMPLETED' AND e.actor='runtime'
+                 AND e.type='TASK_STATE_CHANGED' AND json_extract(e.payload_json,'$.state')='COMPLETED'",
+                [&b.task],
+                |row| row.get(0),
+            )?;
+            if completed.is_none() || completed != planning.run["handled"].as_i64() {
+                return Err(stale());
+            }
+        }
         normalize_on(db, project, &mut product, &b.draft, &b.task)?;
         let record = &product["tasks"][&b.draft];
         if closed(record)

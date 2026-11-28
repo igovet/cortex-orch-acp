@@ -37,7 +37,14 @@ int main(int argc, char **argv) {
             return 2;
         for (int j = 0; j < a.height; ++j) {
             for (int i = 0; i < a.width; ++i) {
-                unsigned long c = XGetPixel(image, i, j);
+                unsigned long c;
+                if (image->bits_per_pixel == 32 && image->byte_order == LSBFirst) {
+                    const unsigned char *p = (const unsigned char *)image->data
+                        + (size_t)j * image->bytes_per_line + (size_t)i * 4;
+                    c = ((unsigned long)p[2] << 16) | ((unsigned long)p[1] << 8) | p[0];
+                } else {
+                    c = XGetPixel(image, i, j);
+                }
                 pixels[(size_t)j * a.width + i] =
                     (77 * ((c >> 16) & 255) + 150 * ((c >> 8) & 255) + 29 * (c & 255)) >> 8;
             }
@@ -47,7 +54,7 @@ int main(int argc, char **argv) {
         if (fwrite(stamp, sizeof(stamp), 1, stdout) != 1
             || fwrite(pixels, length, 1, stdout) != 1 || fflush(stdout)) return 2;
         struct timespec next = begin;
-        next.tv_nsec += 40000000L;
+        next.tv_nsec += 8000000L;
         if (next.tv_nsec >= 1000000000L) { ++next.tv_sec; next.tv_nsec -= 1000000000L; }
         if (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL)) return 2;
     }

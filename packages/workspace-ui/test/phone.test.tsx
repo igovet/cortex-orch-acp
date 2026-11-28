@@ -7,7 +7,8 @@ import type { PhoneNotificationWords, PhoneTap } from "../src/phone-shell";
 import { workspaceCopy } from "../src/copy";
 import { notificationWords } from "../src/phone-shell";
 import { createRealPort } from "../src/port/real";
-import { capabilitiesWire, flush, scriptedPort, scriptedTransport } from "./support";
+import { emptyWorkspace, LOCAL_MACHINE_ID } from "@cortex/workspace-domain";
+import { capabilitiesWire, flush, scriptedPort, scriptedTransport, snapshot, wireTask } from "./support";
 
 /** The phone app against a native side driven by hand, and each machine's service scripted through the real port. */
 let disposers: (() => void)[] = [];
@@ -64,6 +65,67 @@ async function mount(shell: PhoneShell) {
   expect(root.querySelector(".ws-tooltip-host")).toBeNull();
   return app;
 }
+
+it("restores a phone conversation after WebView remount and isolates machines and renewed pairings", async () => {
+  const desk = machine("m1", "Desk", {pairedAt: 100});
+  const laptop = machine("m2", "Laptop", {pairedAt: 200});
+  const f = fakeShell({active: desk.id, machines: [desk, laptop]});
+  for (const id of [desk.id, laptop.id]) {
+    const transport = service();
+    Object.assign(transport.answers, {
+      "service.capabilities": () => ({ methods: ["projects.list", "machine.call"], machine: true }),
+      "machine.call": ({ op }: { op: string }) => {
+        const result = op === "product.read" ? {tasks:{}, messages:[], sprints:[]} : op === "workers" ? []
+          : op === "config.read" ? {config:emptyWorkspace().machines[0].config, connections:[], tokens:{}, usage:[]}
+          : op === "repo.snapshot" ? null : op === "project.config.read" ? {value:{revisions:{}}, tokens:{}} : {};
+        return {ok:true, result};
+      },
+      "projects.list": () => [{projectId:"p", displayName:"Project", canonicalRoot:"/fixture", activation:{}}],
+      "capabilities.get": () => capabilitiesWire(["capabilities.get", "project.snapshot", "history.page"]),
+      "project.snapshot": () => snapshot("1", [wireTask({executionId:"e", phase:"execution", runtimeState:"EXECUTING", executionState:"running",
+        draftBinding:{runtimeTaskId:"r", ownerEpoch:"1", sessionId:"s"}})]),
+      "history.page": () => ({items:[], nextCursor:null, highWatermark:"0"}),
+    });
+    f.transports.set(id, transport);
+  }
+  const openTask = async () => {
+    history.pushState(null, "", `/m/${LOCAL_MACHINE_ID}/t/task-1`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await settle();
+    const field = document.querySelector<HTMLTextAreaElement>(".dock textarea");
+    expect(field, location.pathname + " " + document.body.textContent?.slice(0, 700)).not.toBeNull();
+    return field!;
+  };
+  const first = await mount(f.shell);
+  await openTask();
+  type("Message", "Only on the phone");
+  first.dispose();
+  await mount(f.shell);
+  expect(location.pathname).toBe("/m/local/t/task-1");
+  expect(document.querySelector<HTMLTextAreaElement>(".dock textarea")?.value).toBe("Only on the phone");
+  await f.shell.select(laptop.id); await settle();
+  expect(location.pathname).not.toContain("/t/");
+  expect((await openTask()).value).toBe("");
+  await f.shell.select(desk.id); await settle();
+  expect((await openTask()).value).toBe("Only on the phone");
+  f.publish({active: desk.id, machines:[{...desk, pairedAt: 101}, laptop]}); await settle();
+  expect(location.pathname).not.toContain("/t/");
+  expect((await openTask()).value).toBe("");
+  for (const transport of f.transports.values())
+    expect(transport.calls.some(call => JSON.stringify(call.message)?.includes("Only on the phone"))).toBe(false);
+});
+
+it.each([
+  ["/m/local/t/task-1", null],
+  ["/m/local/t/task-1", JSON.stringify(["phone", "different-peer", "100"])],
+  ["/m/another-machine/t/task-1", JSON.stringify(["phone", "m1", "100"])],
+  ["/m/local/t/%zz", JSON.stringify(["phone", "m1", "100"])],
+])("opens Home for an unbound, foreign or malformed restored address %s", async (path, pairing) => {
+  history.replaceState({ phonePairing: pairing }, "", path!);
+  await mount(fakeShell({active: "m1", machines: [machine("m1", "Desk", {pairedAt: 100})]}).shell);
+  expect(location.pathname).not.toContain("/t/");
+  expect(document.querySelector(".ws-phonebar-t")?.textContent).toBe("Home");
+});
 
 it("opens the machine Board from the phone drawer and keeps the drawer available", async () => {
   const f = fakeShell({ active: "m1", machines: [machine("m1", "Desk")] });

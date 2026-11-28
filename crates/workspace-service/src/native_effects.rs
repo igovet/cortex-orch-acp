@@ -252,6 +252,96 @@ pub(super) async fn verify_worktree(
         .map_err(|_| CoreError::Refused("native_verification_sandbox_unavailable"))?;
     run_verifier(Command::from(sandbox.command(argv)?), root, argv, cancel, VERIFICATION_DEADLINE).await
 }
+pub(super) async fn verify_cargo(
+    root: PathBuf,
+    logical: Option<PathBuf>,
+    argv: &[String],
+    selection: &crate::native_cargo::Selection,
+    mode: crate::native_cargo::Mode,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> CoreResult<Value> {
+    let physical = root.clone();
+    let rebuild = mode == crate::native_cargo::Mode::Rebuild;
+    let mut sandbox = tokio::task::spawn_blocking(move || match logical {
+        Some(logical) => crate::native_command_sandbox::Sandbox::prepare_worktree(&physical, &logical, &[]),
+        None => {
+            let writes = if rebuild { Vec::new() } else { ignored_directories(&physical)? };
+            Sandbox::prepare(&physical, Profile::ReadOnly, &writes, &[], false)
+        }
+    }).await.map_err(|_| refused())?
+        .map_err(|_| CoreError::Refused("native_verification_sandbox_unavailable"))?;
+    let target = if rebuild {
+        let target = sandbox.scratch().join("target");
+        sandbox.set_environment("CARGO_TARGET_DIR", target.clone().into_os_string());
+        sandbox.set_environment("CARGO_BUILD_BUILD_DIR", target.clone().into_os_string());
+        sandbox.set_environment("CARGO_INCREMENTAL", "0".into());
+        target
+    } else {
+        root.join("target")
+    };
+    let actual = selection.instrumented(argv);
+    let command = sandbox.command(&actual)?;
+    if !crate::native_cargo::is_pinned_cargo(&command) {
+        if rebuild {
+            return Err(CoreError::Refused("cargo_build_tool_changed"));
+        }
+        return run_verifier(
+            Command::from(sandbox.command(argv)?), root, argv, cancel, VERIFICATION_DEADLINE,
+        ).await;
+    }
+    let started = std::time::Instant::now();
+    let build = selection.build_only(argv);
+    let compiled = run_verifier(
+        Command::from(sandbox.command(&build)?), root.clone(), argv, cancel.clone(), VERIFICATION_DEADLINE,
+    ).await?;
+    if compiled["observation"]["complete"] != true || compiled["observation"]["exit_code"] != 0 {
+        return Ok(compiled);
+    }
+    let build_ref = compiled["tool_call_ref"].clone();
+    let (compiled_root, compiled_target, selected) =
+        (root.clone(), target.clone(), selection.clone());
+    let before = tokio::task::spawn_blocking(move || {
+        crate::native_cargo::artifact(&compiled, &compiled_root, &compiled_target, &selected)
+    }).await.ok().flatten();
+    if *cancel.borrow() {
+        return Err(CoreError::Refused("owner_stopped"));
+    }
+    let remaining = VERIFICATION_DEADLINE.checked_sub(started.elapsed())
+        .ok_or(CoreError::Refused("command_timeout"))?;
+    let mut receipt = run_verifier(
+        Command::from(command), root.clone(), argv, cancel, remaining,
+    ).await?;
+    let (output, actual_target, selected) = (receipt.clone(), target.clone(), selection.clone());
+    let after = tokio::task::spawn_blocking(move || {
+        crate::native_cargo::artifact(&output, &root, &actual_target, &selected)
+    }).await.ok().flatten();
+    if let Some(mut built) = before {
+        if after.as_ref().is_some_and(|artifact| artifact["fresh"] == true
+            && artifact["binary_path"] == built["binary_path"]
+            && crate::native_cargo::same_artifact(artifact, &built)
+            && crate::native_cargo::launched_harness(&receipt, &target, artifact, argv, selection))
+        {
+            built["private_target"] = json!(rebuild);
+            built["build_ref"] = build_ref;
+            built["build_exit"] = json!(0);
+            receipt["cargo_artifact"] = built;
+        }
+    }
+    // Cargo's verbose command lines can include local compiler or runner
+    // arguments. The receipt keeps the selected digests and ordinary diagnostics.
+    if let Some(stderr) = receipt["observation"]["stderr"].as_str() {
+        receipt["observation"]["stderr"] = json!(stderr.split_inclusive('\n')
+            .filter(|line| !line.trim_start().starts_with("Running `")).collect::<String>());
+    }
+    if rebuild && receipt["observation"]["complete"] == true
+        && receipt["observation"]["exit_code"] == 0
+        && receipt["cargo_artifact"]["fresh"] != false
+    {
+        receipt["observation"]["complete"] = json!(false);
+        receipt["observation"]["failure"] = json!("cargo_artifact_unobservable");
+    }
+    Ok(receipt)
+}
 /// Production uses the owner's resolved tool path; tests can supply a fixture environment.
 async fn verify_in(
     root: PathBuf,
@@ -374,7 +464,7 @@ pub(super) async fn plan_preflight(
         false
     }
     for n in tasks {
-        if !cortex_core::scheduler::policy::read_only(n["role"].as_str().unwrap(), "execution") {
+        if !cortex_core::scheduler::policy::plan_node_read_only(n) {
             continue;
         }
         for path in n["scope"].as_array().unwrap() {
@@ -383,7 +473,7 @@ pub(super) async fn plan_preflight(
                 continue;
             }
             let writer = tasks.iter().any(|w| {
-                !cortex_core::scheduler::policy::read_only(w["role"].as_str().unwrap(), "execution")
+                !cortex_core::scheduler::policy::plan_node_read_only(w)
                     && (depends(tasks, n["id"].as_str().unwrap(), w["id"].as_str().unwrap())
                         || depends(tasks, w["id"].as_str().unwrap(), n["id"].as_str().unwrap()))
                     && w["scope"].as_array().unwrap().iter().any(|s| {
@@ -592,6 +682,15 @@ struct CheckoutHead {
     /// Preserve the project digest input, including the symbolic ref when present.
     digest_input: Vec<u8>,
 }
+impl CheckoutHead {
+    fn branch(&self) -> Option<&str> {
+        self.digest_input
+            .splitn(2, |b| *b == 0)
+            .nth(1)
+            .and_then(|s| std::str::from_utf8(s).ok())
+            .and_then(|s| s.trim_end_matches('\n').strip_prefix("refs/heads/"))
+    }
+}
 async fn git_head(root: &Path) -> CoreResult<CheckoutHead> {
     let head = git_ref(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).await?;
     let symbolic = git_ref(root, &["symbolic-ref", "--quiet", "HEAD"]).await?;
@@ -677,6 +776,10 @@ pub(super) struct CommitObservation {
 
 pub(super) async fn observe_commit(root: PathBuf) -> Option<CommitObservation> {
     let listing = git_listing(&root, false).await.ok()?;
+    // A detached or unborn checkout cannot yield a commit witness. The
+    // caller still performs its required independent project digest.
+    listing.head.commit.as_ref()?;
+    listing.head.branch()?;
     let o = observe_listed(root, 0, ManifestMode::Commit, false, listing)
         .await
         .ok()?;
@@ -700,11 +803,19 @@ const NESTED_DEPTH: u8 = 4;
 pub(super) async fn observe(root: PathBuf) -> CoreResult<EvidenceSnapshot> {
     Ok(observe_with(root, ManifestMode::None).await?.0)
 }
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static DIGEST_OBSERVATION_FAILURE: &'static str;
+}
 /// `observe`'s project digest alone, for presentation reads that compare a result with
 /// the folder. Ignored files feed only the ignored digest and completeness flags, so
 /// this pass never lists or visits them (a dependency folder can hold most of a
 /// project's files); the digest is the one `observe` returns for the same folder.
 pub(super) async fn observe_digest(root: PathBuf) -> CoreResult<String> {
+    #[cfg(test)]
+    if let Ok(code) = DIGEST_OBSERVATION_FAILURE.try_with(|code| *code) {
+        return Err(CoreError::Refused(code));
+    }
     Ok(observe_checkout(root, 0, ManifestMode::None, false)
         .await?
         .digest)
@@ -1108,16 +1219,11 @@ async fn observe_listed(
         }
         heads.insert(path, value);
     }
+    let branch = head.branch().map(str::to_owned);
     let CheckoutHead {
         commit,
         digest_input,
     } = head;
-    let branch = digest_input
-        .splitn(2, |b| *b == 0)
-        .nth(1)
-        .and_then(|s| std::str::from_utf8(s).ok())
-        .and_then(|s| s.trim_end_matches('\n').strip_prefix("refs/heads/"))
-        .map(str::to_owned);
     let for_commit = with_manifest == ManifestMode::Commit;
     let git_oid_len = if for_commit {
         Some(commit.as_ref().ok_or_else(refused)?.len())

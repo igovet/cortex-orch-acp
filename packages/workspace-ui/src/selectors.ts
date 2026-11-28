@@ -1,4 +1,4 @@
-import { automaticQueueOf, boardPhase, dependencyReady, descriptionLabel, isOpen, orderReasonText, plainModel, targetBranch } from "@cortex/workspace-domain";
+import { automaticQueueOf, boardPhase, deliverableWaitText, dependencyReady, descriptionLabel, isOpen, orderReasonText, plainModel, targetBranch } from "@cortex/workspace-domain";
 import type { Decision as TaskDecision, Check, CheckOutcome, EngineWeeklyUsage, HoldActor, LiveSprintGraph, Machine, OwnerHoldAction, Project, PlanningFailure, Sprint, SprintOrder, SprintOrderPending, SprintRunMode, Task, TaskStatus, Worker, WorkspaceState } from "@cortex/workspace-domain";
 import type { Scope } from "./router";
 import { share } from "./stable";
@@ -344,6 +344,12 @@ function automaticStatusFact(task: Task, sprint: Sprint | null): Fact | undefine
   }
 }
 
+export function sprintOutputWait(sprint: Sprint | null, taskId: string, pending?: SprintOrderPending | null): string | null {
+  const hold = automaticQueueOf(sprint);
+  if (hold?.taskId === taskId && deliverableWaitText(hold.code)) return hold.reason;
+  return pending?.taskId === taskId && pending.rank === null ? deliverableWaitText(pending.reason) : null;
+}
+
 function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; pending?: SprintOrderPending | null; held?: boolean }): Fact {
   if (task.status === "closed_unverified") return { text: "Closed by you · Not verified", tone: "st-idle", icon: "alert" };
   const handoff = task.merge?.handoff?.state;
@@ -367,6 +373,8 @@ function statusFact(task: Task, filesWait: TaskView["filesWait"], ctx: { target:
   switch (task.status) {
     case "draft": {
       if (ctx.held) return { text: REVISION_WAIT, tone: "st-idle", icon: "hourglass" };
+      const outputWait = sprintOutputWait(ctx.sprint, task.id, ctx.pending);
+      if (outputWait) return { text: outputWait, tone: "st-warn", icon: "hourglass" };
       const waiting = task.dependencies.find(id => !ctx.ready(id));
       if (waiting) return { text: `Waits for ${ctx.title(waiting)}`, tone: "st-idle", icon: "hourglass" };
       // With the service's order, its words: Next only for its current candidate, a place for a ranked task, a reason otherwise.
@@ -744,13 +752,47 @@ export function planningPlace(machine: string, sprint: Sprint, route: { tab?: st
     ? { name: "sprint" as const, machine, project: sprint.projectId, sprint: sprint.id, tab: "workers" as const, ...(route.worker ? { worker: route.worker } : {}) }
     : { name: "sprint" as const, machine, project: sprint.projectId, sprint: sprint.id, tab: "planning" as const };
 }
-type SideTask = { kind: "task"; view: TaskView; nested: boolean; needsYou?: boolean };
-type SideSprint = { kind: "sprint"; sprint: Sprint; started: number; total: number };
+type SideTask = { kind: "task"; view: TaskView; nested: boolean };
+type SprintProgress = {
+  total: number; done: number; working: number; waiting: number; notStarted: number;
+  outside: number; unverifiedDone: number; closed: number; archived: number; unavailable: number;
+};
+type SideSprint = { kind: "sprint"; sprint: Sprint; progress: SprintProgress };
 export type SideRow = SideTask | SideSprint;
 const sideColumns = COLUMNS.filter(c => c.id === "work" || c.id === "review" || c.id === "merge");
 const sideTask = (view: TaskView, nested = false): SideTask => ({ kind: "task", view, nested });
+
+function sprintProgress(index: WorkspaceIndex, sprint: Sprint): SprintProgress {
+  const members = new Set(sprint.taskIds);
+  const count = { total: members.size, done: 0, working: 0, waiting: 0, notStarted: 0, outside: 0, unverifiedDone: 0, closed: 0, archived: 0, unavailable: 0 };
+  const queue = automaticQueueOf(sprint);
+  for (const id of members) {
+    const view = index.byId.get(id);
+    if (!view || view.project.id !== sprint.projectId || view.unknown) {
+      count.unavailable++;
+      continue;
+    }
+    const task = view.task;
+    if (view.column === "done") {
+      count.done++;
+      if (task.closedAs === "external") count.outside++;
+      else if (task.notVerifiedByCortex || (task.closedAs === "as_is" && !task.acceptance && task.result?.automaticReady !== true)) count.unverifiedDone++;
+    }
+    else if (view.column === "closed_unverified") count.closed++;
+    else if (task.archive) count.archived++;
+    else if (view.liveDecision || (queue?.taskId === id && queue.needsOwner)) count.waiting++;
+    else if (task.status === "draft") count.notStarted++;
+    // Hybrid accepts a passing result itself. Owner integration and blocked reviews still need the owner.
+    else if (view.column === "work" || task.conflict === "resolving" ||
+      (sprint.runMode === "hybrid" && view.column === "review")) count.working++;
+    else if (awaitsOwner(view)) count.waiting++;
+    else count.unavailable++;
+  }
+  return count;
+}
+
 const sideSprint = (index: WorkspaceIndex, sprint: Sprint): SideSprint =>
-  ({ kind: "sprint", sprint, started: sprintView(index, sprint).started, total: sprint.taskIds.length });
+  ({ kind: "sprint", sprint, progress: sprintProgress(index, sprint) });
 
 function sprintChildren(views: TaskView[], sprintIds: ReadonlySet<string>) {
   const children = new Map<string, SideTask[]>();
@@ -771,7 +813,7 @@ const finishedColumn = (view: TaskView) => view.column === "done" || view.column
 /** At most five visible rows, counting sprint parents and their children alike. Completed sprints
  *  remain until archived. Tasks with no visible sprint group keep the normal column ordering.
  *  A finished task that `keep` holds follows the tasks that need the owner. */
-export function sideRows(index: WorkspaceIndex, summary: ProjectSummary, keep?: SideKeep): SideRow[] {
+export function sideRows(index: WorkspaceIndex, summary: ProjectSummary, keep?: SideKeep, limit = 5): SideRow[] {
   const open = summary.sprints;
   const sprints = [...open.filter(s => s.queueState !== "complete"), ...open.filter(s => s.queueState === "complete")];
   const ids = new Set(sprints.map(s => s.id));
@@ -789,59 +831,23 @@ export function sideRows(index: WorkspaceIndex, summary: ProjectSummary, keep?: 
     ...keptHere.filter(v => !hasParent(v)).map(v => sideTask(v)),
     ...sprints.flatMap(s => [sideSprint(index, s), ...(children.get(s.id) ?? [])]),
     ...work.filter(v => !hasParent(v)).map(v => sideTask(v)),
-  ].slice(0, 5);
+  ].slice(0, limit);
 }
 
-export type TopWorkGroup = { id: string; label: string; rows: (SideRow & { projectName: string })[] };
-
-/** Active work prioritizes actionable waits and unsuccessful ends, not all tasks in the board's Needs you column. */
-function needsYouInActiveWork(view: TaskView) {
-  const { task } = view;
-  if (view.unknown || view.column === "archive" || finishedColumn(view) || task.status === "stopping") return false;
-  if (view.liveDecision || task.status === "failed" || task.status === "cancelled") return true;
-  const hold = automaticQueueOf(view.sprint);
-  return (task.status === "paused" && !task.automaticContinuation?.pause)
-    || (hold?.kind === "continuation" && hold.taskId === view.id && hold.needsOwner);
-}
-
-/** Uncapped machine-wide status groups. Running and paused sprints have one tree each;
- *  their children are not repeated in the standalone status groups. With `keep`, a Finished group
- *  holds the finished tasks and sprints it keeps, each sprint with its kept tasks under it. */
-export function topWorkRows(index: WorkspaceIndex, machine: string, keep?: SideKeep): TopWorkGroup[] {
-  const projects = projectsOn(index, machine);
-  const sprints = projects.flatMap(({ project, sprints }) => sprints
-    .filter(s => s.queueState === "running" || s.queueState === "paused")
-    .map(sprint => ({ sprint, projectName: project.name })));
-  const ids = new Set(sprints.map(({ sprint }) => sprint.id));
-  const views = projects.flatMap(p => p.views);
-  const needs = views.filter(needsYouInActiveWork);
-  const needsIds = new Set(needs.map(v => v.id));
-  const groups = sideColumns.map(c => ({ ...c, views: views.filter(v => v.column === c.id && !needsIds.has(v.id)) }));
-  const finished = keep ? views.filter(v => finishedColumn(v) && keep.task(v)) : [];
-  const done = keep ? projects.flatMap(({ project, sprints }) => sprints.filter(s => !ids.has(s.id) && keep.sprint(s)).map(sprint => ({ sprint, projectName: project.name }))) : [];
-  // Every sprint with a tree here, in progress or finished, holds its tasks: none of them is listed again on its own.
-  const parents = new Set([...ids, ...done.map(({ sprint }) => sprint.id)]);
-  // A sprint in progress lists only the tasks that ask or work: its Done tasks are not rows of its tree, opened or not.
-  // Only a finished sprint's tree holds its kept finished tasks.
-  const keptFinished = finished.filter(v => !v.sprint || !ids.has(v.sprint.id));
-  const needsChildren = sprintChildren(needs, ids);
-  const children = sprintChildren([...groups.flatMap(c => c.views), ...keptFinished], parents);
-  const result: TopWorkGroup[] = groups.map(({ id, label, views }) => ({
-    id, label, rows: views.filter(v => !v.sprint || !parents.has(v.sprint.id)).map(v => ({ ...sideTask(v), projectName: v.project.name })),
-  }));
-  const tree = (list: { sprint: Sprint; projectName: string }[]) => list.flatMap(({ sprint, projectName }) => [
-    { ...sideSprint(index, sprint), projectName },
-    ...(needsChildren.get(sprint.id) ?? []).map(row => ({ ...row, needsYou: true, projectName })),
-    ...(children.get(sprint.id) ?? []).map(row => ({ ...row, projectName })),
-  ]);
-  result.unshift({ id: "needs", label: "Needs you", rows: needs.filter(v => !v.sprint || !ids.has(v.sprint.id))
-    .map(v => ({ ...sideTask(v), needsYou: true, projectName: v.project.name })) });
-  result.push({ id: "sprints", label: "Sprints in progress", rows: tree(sprints) });
-  result.push({ id: "finished", label: "Finished", rows: [
-    ...keptFinished.filter(v => !v.sprint || !parents.has(v.sprint.id)).map(v => ({ ...sideTask(v), projectName: v.project.name })),
-    ...tree(done),
-  ] });
-  return result.filter(group => group.rows.length > 0);
+/** The active tree keeps confirmed ongoing work and outstanding owner actions. */
+export function activeProject(summary: ProjectSummary): ProjectSummary | null {
+  const views = summary.views.filter(view => {
+    const { task } = view;
+    if (view.unknown || view.column === "archive" || task.status === "draft" || task.status === "done" || finishedColumn(view)) return false;
+    const hold = automaticQueueOf(view.sprint);
+    if (hold?.taskId === view.id && hold.needsOwner) return true;
+    if (view.liveDecision || task.conflict !== "none" || automaticAcceptanceHold(view)) return true;
+    if (task.status === "failed" || task.status === "cancelled") return !!ownerHold(view);
+    return task.status === "paused" || view.column === "work" || view.column === "review" || view.column === "merge";
+  });
+  if (!views.length) return null;
+  const parents = new Set(views.map(v => v.sprint?.id));
+  return { ...summary, views, sprints: summary.sprints.filter(s => parents.has(s.id)) };
 }
 
 const ENGINE_LABEL = { claude: "Claude", codex: "Codex", opencode: "OpenCode" } as const;

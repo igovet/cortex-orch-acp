@@ -45,6 +45,9 @@ pub fn storage_diagnostic(error: &io::Error) -> Option<cortex_core::store::Stora
 pub(crate) fn store_missing(key: &cortex_core::ProjectKey, error: &cortex_core::CoreError) -> bool {
     matches!(error, cortex_core::CoreError::Io(e) if e.kind() == io::ErrorKind::NotFound)
         && matches!(key.database().symlink_metadata(), Err(e) if e.kind() == io::ErrorKind::NotFound)
+        && key.home_directory().is_none_or(|home| {
+            matches!(home.join("cortex.sqlite3").symlink_metadata(), Err(e) if e.kind() == io::ErrorKind::NotFound)
+        })
 }
 pub fn uid() -> u32 {
     unsafe { libc::geteuid() }

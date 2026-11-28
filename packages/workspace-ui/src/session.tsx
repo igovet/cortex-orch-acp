@@ -9,9 +9,10 @@ import { Confirmed, createBodyMark, createTicker, ScreenActive } from "./freshne
 import { A, closePop, Count, createFollow, I, Keyed, MenuItem, Pop, useWantOverview } from "./kit";
 import { ConflictPanel, ReadyPanel } from "./merge";
 import { Answered, QuestionForm, type Ask, type AskAnswer } from "./questions";
+import { taskDraftScope } from "./local-drafts";
 import { AcceptBlocker, ChangesPanel, ResultCard, type ChangesViewState } from "./review";
 import { ActionBar, Page, StatusLane, Toolbar, Whole, type StripItem } from "./layout";
-import { taskWhyId, titleBlock } from "./task-chrome";
+import { TaskActions, taskWhyId, titleBlock } from "./task-chrome";
 import { inConflict, mergeControls, repoOf, sentence, taskCheckout } from "./review-model";
 import type { Route, TaskTab } from "./router";
 import { age, attemptsSpentOn, clock, humanStatus, ownerHold, replanStopping, reviewDeadEnd, sprintRoute, stopReason, type OwnerHold } from "./selectors";
@@ -31,8 +32,7 @@ import { shownFold } from "./port/history";
 import { usePlanningSprint, useTaskRoutes } from "./task-place";
 import { conversationReadOf, createFirstView, orderedConversationOf, type FirstRead } from "./first-view";
 import { EdgeStrip, ReserveSkeleton, FirstViewNotice, LoadingStrip, Skeleton, unreachable } from "./skeleton";
-import { firstCard, revealIntent, revealKey, settleReveal } from "./reveal-intent";
-import { scrollIntoFeed } from "./follow";
+import { firstCard, revealDecision, revealIntent, revealKey, settleReveal } from "./reveal-intent";
 import { createEdgeApproach, createRevealer, nearEdge } from "./edge-pager";
 import { createRowSlots, sameItems } from "./row-slots";
 import { SideChat, SIDE_CHAT_KEYS, toggleSideChat } from "./side-chat";
@@ -345,7 +345,8 @@ function Questions(props: { m: SessionModel; asks: Decision[]; now: number }) {
     if (sprint) return ws.run({ type: "answer_planning", sprintId: sprint.id, decisionId: first.ask.id, answer: first.text, optionId: first.optionId, attachments: first.attachments, now: ws.store.clock(), ...batch });
     return ws.run({ type: "answer_decision", taskId: props.m.view.id, decisionId: first.ask.id, answer: first.text, optionId: first.optionId, attachments: first.attachments, now: ws.store.clock(), ...batch });
   };
-  return <QuestionForm asks={props.asks} needs={planning() ? "answer_planning" : "answer_decision"} blocked={blocked} projectId={props.m.view.project.id} onSend={send} waiting={ask => ask.at === null ? "" : questionCopy(ask.language).waiting(age(ask.at, props.now))}
+  return <QuestionForm asks={props.asks} needs={planning() ? "answer_planning" : "answer_decision"} blocked={blocked} projectId={props.m.view.project.id}
+    draftScope={taskDraftScope(props.m.view.task, props.m.view.machine.id)} onSend={send} waiting={ask => ask.at === null ? "" : questionCopy(ask.language).waiting(age(ask.at, props.now))}
     note={ask => <>
       <Show when={blocked(ask) && props.m.mode === "paused"}><div class="cap muted ws-dc-note">{questionCopy(ask.language).paused}</div></Show>
       <StopTargets m={props.m} d={decision(ask)} />
@@ -520,16 +521,11 @@ export function DeadEndCard(props: { m: SessionModel }) {
  * session is still being stopped the runtime decides by itself: one quiet line. Otherwise it is the owner's: what happened in plain
  * words, where to inspect it, and Close as is… with its confirmation, which replays nothing.
  */
-export function UnconfirmedCard(props: { m: SessionModel; route: TaskRoute }) {
+export function UnconfirmedCard(props: { m: SessionModel; route: TaskRoute; recheck?: JSX.Element }) {
   const ws = useWs();
   const state = () => unconfirmedState(props.m);
   const view = () => props.m.view;
-  const [checking, setChecking] = createSignal(false);
-  const recheck = () => {
-    if (checking()) return;
-    setChecking(true);
-    void ws.store.reload().finally(() => setChecking(false));
-  };
+
   const title = () => view().sprint?.runMode === "automatic" ? "Automatic needs your decision" : "This task needs your decision";
   const reason = () => state()?.kind === "exit_unconfirmed"
     ? "A process of this task did not confirm that it stopped, so it is not known whether it still runs. Nothing it did is repeated, and the task cannot continue while this is unknown. The service checks it again by itself the next time it starts."
@@ -552,7 +548,7 @@ export function UnconfirmedCard(props: { m: SessionModel; route: TaskRoute }) {
         <p>What you can do:</p><ul class="chat-review-asks"><For each={asks()}>{ask => <li>{ask}</li>}</For></ul>
       </div>
       <ActionBar place="card">
-        <button class="btn btn-line btn-sm" aria-busy={checking() ? "true" : undefined} onClick={recheck}>Re-check state</button>
+        {props.recheck}
         <Show when={s().kind === "exit_unconfirmed"}><A class="btn btn-line btn-sm" to={workers()}>Open workers</A></Show>
         <A class="btn btn-line btn-sm" to={{ name: "settings", machine: view().machine.id, section: "diagnostics" }}>Open Diagnostics</A>
         <button class={`btn ${s().closable ? "btn-primary" : "btn-line"} btn-sm`} {...ws.needs("close_task")} aria-disabled={blocked() ? "true" : undefined}
@@ -645,7 +641,9 @@ function createTaskFirstView(ws: Ws, model: Accessor<SessionModel | null>, part:
 export function Conversation(props: {
   model: Accessor<SessionModel | null>; now: number; pick: string; onPick: (key: string) => void; route?: TaskRoute; hidden?: boolean;
   /** Sprint content stays visible independently of the first read of its linked runtime task. */
-  sprintFeed?: { brief: JSX.Element; saved: (runtimeVisible: Accessor<boolean>) => { tail: JSX.Element; count: Accessor<number> }; onUnsent: (unsent: boolean) => void };
+  sprintFeed?: { brief: JSX.Element; saved: (runtimeVisible: Accessor<boolean>) => { tail: JSX.Element; actions: JSX.Element; count: Accessor<number> }; onUnsent: (unsent: boolean) => void };
+  actions?: JSX.Element;
+  recheck?: JSX.Element;
 }) {
   const ws = useWs();
   // Only use the task-only helpers while the linked model is present.
@@ -766,8 +764,8 @@ export function Conversation(props: {
     void m().open; void m().session.timeline;
     queueMicrotask(() => {
       if (disposed || !scroller || asked() !== intent) return;
-      const card = firstCard(scroller.closest(".task-panel") ?? scroller, intent.selectors);
-      if (card) { settleReveal(intent); scrollIntoFeed(card); }
+      const card = firstCard(scroller.querySelector(".conversation-actions") ?? scroller, intent.selectors);
+      if (card) { settleReveal(intent); revealDecision(card, intent.focus); }
       else if (settled) settleReveal(intent);
     });
   });
@@ -779,18 +777,29 @@ export function Conversation(props: {
     const model = props.model();
     return !model || model.view.task.closedAs === "unconfirmed" ? [] : model.session.decisions.filter(d => d.kind === "question" && (isOpen(d) || d.held));
   });
-  const askGroup = (d: Decision) => {
-    if (!asks().some(q => q.id === d.id)) return [];
-    if (!orderedConversationOf(m().session)) return asks();
-    // Only siblings from the same native opening share a form. Unrelated questions stay at their own positions.
-    if (d.batchId === null) return [d];
-    const order = m().session.timeline.flatMap(e => e.kind === "decision" ? [e.decisionId] : []);
-    const group = new Map(asks().filter(q => q.batchId === d.batchId).map(q => [q.id, q]));
-    return order.flatMap(id => group.get(id) ?? []);
-  };
+  const actions = createMemo(() => {
+    const model = props.model();
+    if (!model) return [];
+    const grouped = new Map<string, Decision[]>();
+    const active = new Set([...model.open, ...asks()].map(d => d.id));
+    const ordered = orderedConversationOf(model.session);
+    for (const d of model.session.decisions) {
+      if (!active.has(d.id)) continue;
+      const key = d.kind !== "question" ? `permission:${d.id}`
+        : !ordered ? "questions" : d.batchId == null ? `question:${d.id}` : `batch:${d.batchId}`;
+      const group = grouped.get(key);
+      if (group) group.push(d);
+      else grouped.set(key, [d]);
+    }
+    return [...grouped.entries()].map(([key, decisions]) => ({ key, decisions }));
+  });
+  const activeDecisionIds = createMemo(() => new Set(actions().flatMap(group => group.decisions.map(d => d.id))));
   // While a decision waits or work runs, no completed result and no Accept stand beside it: the last one stays as history.
   const held = () => m().view.task.result ? resultHeld(m(), asks().length > 0) : null;
   const changesAt = (): Route => ({ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "changes" });
+  const waiting = () => runtimeVisible() && stranded() && m().view.task.observedPhase !== "recovery"
+    && (m().view.task.status === "needs_you" || m().view.task.conflict !== "none");
+  const currentResult = () => runtimeVisible() && !!m().view.task.result && !held() && !planning();
   const team = () => <Show when={runtimeVisible()}><TeamBar m={m()} now={props.now} pick={props.pick} onPick={props.onPick} /></Show>;
   return <section class="task-panel" classList={{ "sp-conv": !!props.sprintFeed }} aria-label="Conversation" hidden={props.hidden}>
     <div class="timeline" classList={{ "ws-history-end": partialTail() !== undefined }} ref={scroller} aria-busy={loading() ? "true" : undefined} onScroll={() => { follow.onScroll(); checkEarlier(true); }}>
@@ -838,8 +847,7 @@ export function Conversation(props: {
           })()}</Match>
           <Match when={entry(id).kind === "decision"}>{(() => {
             const d = () => decision((entry(id) as Extract<TimelineEntry, { kind: "decision" }>).decisionId);
-            const group = createMemo(() => askGroup(d()));
-            return <Show when={group().length} fallback={<DecisionCard m={m()} d={d()} now={props.now} />}><Show when={group()[0]?.id === d().id}><Questions m={m()} asks={group()} now={props.now} /></Show></Show>;
+            return <Show when={d() && !activeDecisionIds().has(d().id)}><DecisionCard m={m()} d={d()} now={props.now} /></Show>;
           })()}</Match>
           <Match when={entry(id).kind === "line"}>{(() => {
             const l = () => entry(id) as Extract<TimelineEntry, { kind: "line" }>;
@@ -850,11 +858,6 @@ export function Conversation(props: {
           </Match>
         </Switch>}</For>
         <Show when={!props.sprintFeed}><SentMessages place={sentHere()} /></Show>
-        {/* Keyed by decision id: a refreshed record of an open decision keeps its card, and the answer being written in it. */}
-        <Keyed each={m().open.filter(d => !m().session.timeline.some(e => e.kind === "decision" && e.decisionId === d.id))} by={d => d.id}>{d => <Show when={d().kind === "question"} fallback={<DecisionCard m={m()} d={d()} now={props.now} />}><Questions m={m()} asks={[d()]} now={props.now} /></Show>}</Keyed>
-        {/* Only a task that waits on the owner reads as waiting for a decision: a cancelled or failed run has none. */}
-        <Show when={stranded() && m().view.task.observedPhase !== "recovery" && (m().view.task.status === "needs_you" || m().view.task.conflict !== "none")}><Waiting m={m()} /></Show>
-        <Show when={m().view.task.result && !held() && !planning()}><ResultCard m={m()} /></Show>
         <Show when={m().view.task.result && held() && !planning()}>
           <div class="answered ws-prev-result" role="note"><I n="eye" s={14} /><span>Previous result v{m().view.task.result!.version}, read-only. {held()}.</span> <A class="lnk ws-ml4" to={changesAt()}>Open</A></div>
         </Show>
@@ -864,13 +867,31 @@ export function Conversation(props: {
         <Show when={runtimeVisible() && m().mode === "live" && m().view.task.observedPhase !== "recovery"}>
           <Show when={workingNow(m())} fallback={<Show when={!stranded()}><WaitingIndicator /></Show>}><WorkingIndicator text={coordinatorLine(m())} /></Show>
         </Show>
+        {/* Current controls follow all retained rows, including late messages. The feed can still be scrolled
+            independently of the composer; tall batches never take space away from the reading viewport. */}
+        <div class="conversation-actions">
+          <Show when={runtimeVisible()}>
+          <div class="conversation-actions" hidden={actions().length === 0 && !waiting() && !currentResult()}>
+            <Keyed each={actions()} by={group => group.key}>{group =>
+              <Show when={group().decisions[0].kind === "question"} fallback={<DecisionCard m={m()} d={group().decisions[0]} now={props.now} />}>
+                <Questions m={m()} asks={group().decisions} now={props.now} />
+              </Show>
+            }</Keyed>
+            <Show when={waiting()}><Waiting m={m()} /></Show>
+            <Show when={currentResult()}><ResultCard m={m()} /></Show>
+          </div>
+          </Show>
+          <Show when={props.route && props.model() && !planning()}><OwnerHoldCard m={m()} route={props.route!} /><UnconfirmedCard m={m()} route={props.route!} recheck={props.recheck} /><DeadEndCard m={m()} /><TaskOwnerActions task={m().view.id} /></Show>
+          <Show when={!loading()}>{saved?.actions}</Show>
+          {props.actions}
+          <Show when={props.route && props.model() && !planning()}><TaskActions view={m().view} place="conversation" /></Show>
+        </div>
       </div>
     </div>
     {/* Everything pinned below the feed is in the dock. Latest hangs over the feed, not over a decision card. */}
     <div class="dock">
       <Pill follow={follow} />
       <FirstViewNotice view={first} />
-      <Show when={props.route && !planning()}><OwnerHoldCard m={m()} route={props.route!} /><UnconfirmedCard m={m()} route={props.route!} /><DeadEndCard m={m()} /></Show>
       <Show when={ws.can(capabilityOf(props.sprintFeed ? "plan_message" : "send_message"))} fallback={team()}>
         <Composer model={props.model} team={team()} folded={props.model()?.open.some(d => d.kind === "question")} onUnsent={props.sprintFeed?.onUnsent} />
       </Show>
@@ -896,6 +917,19 @@ export function WorkersList(props: { m: SessionModel; now: number; pick: string 
   const routes = useTaskRoutes(() => ({ machine: props.m.view.machine.id, id: props.m.view.id }));
   const at = (worker: string): Route => routes.workers(worker);
   const lane = (name: "execution" | "review") => props.m.workers.filter(w => w.lane === name && !isFinished(w));
+  const workersById = createMemo(() => new Map(props.m.workers.map(w => [w.id, w])));
+  const finished = createMemo(() => new Map(attemptsByNode(props.m.finished).map(group => [group.latest.id, group.earlier])));
+  const moveFocus = (event: KeyboardEvent) => {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (!(event.target instanceof HTMLElement) || event.target.getAttribute("role") !== "tab") return;
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const tabs = [...(event.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('[role="tab"]')];
+    const index = tabs.indexOf(event.target);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+      : (index + (event.key === "ArrowDown" ? 1 : -1) + tabs.length) % tabs.length;
+    event.preventDefault();
+    tabs[next]?.focus();
+  };
   const coordinator = () => props.m.session.coordinator;
   const coordinatorElapsed = () => duration(elapsedOf(coordinator(), props.now));
   const ws = useWs();
@@ -905,11 +939,11 @@ export function WorkersList(props: { m: SessionModel; now: number; pick: string 
   // card replaced between press and release swallows the click.
   const Group = (g: { title: string; list: Worker[] }) => <Show when={g.list.length > 0}>
     <div class="wg">{g.title}<Count n={g.list.length} /></div>
-    <For each={g.list.map(w => w.id)}>{id => <WorkerCard w={props.m.workers.find(w => w.id === id)!} now={props.now} to={at(id)} selected={props.pick === id} />}</For>
+    <For each={g.list.map(w => w.id)}>{id => <WorkerCard w={workersById().get(id)!} now={props.now} to={at(id)} selected={props.pick === id} />}</For>
   </Show>;
   // One card by id: it keeps its element while the machine refreshes the worker it shows.
-  const Card = (c: { id: string }) => <Show when={props.m.workers.find(w => w.id === c.id)}>{w => <WorkerCard w={w()} now={props.now} to={at(c.id)} selected={props.pick === c.id} />}</Show>;
-  return <div class="wlist" role="tablist" aria-orientation="vertical" aria-label="Workers">
+  const Card = (c: { id: string }) => <Show when={workersById().get(c.id)}>{w => <WorkerCard w={w()} now={props.now} to={at(c.id)} selected={props.pick === c.id} />}</Show>;
+  return <div class="wlist" onKeyDown={moveFocus} role="tablist" aria-orientation="vertical" aria-label="Workers">
     {/* What the task spent so far, as its engines reported it. */}
     <SpendLine task={props.m.view.task} />
     <div class="wg">Coordinator</div>
@@ -929,8 +963,8 @@ export function WorkersList(props: { m: SessionModel; now: number; pick: string 
     {/* Finished workers by plan step: the newest attempt of each step, its earlier attempts folded under it. */}
     <Show when={props.m.finished.length > 0}>
       <div class="wg">Finished<Count n={props.m.finished.length} /></div>
-      <For each={attemptsByNode(props.m.finished).map(g => g.latest.id)}>{id => {
-        const earlier = () => attemptsByNode(props.m.finished).find(g => g.latest.id === id)?.earlier ?? [];
+      <For each={[...finished().keys()]}>{id => {
+        const earlier = () => finished().get(id) ?? [];
         const [open, setOpen] = createSignal(false);
         const shown = () => open() || earlier().some(w => w.id === props.pick);
         return <>
@@ -1090,13 +1124,17 @@ export function TaskPage(props: { id: string }) {
     }] : []),
     ...(m().mode !== "stopping" && titleBlock(m()) ? [titleWhy] : []),
   ]);
-  return <ResultScope.Provider value={() => ({ projectId: m().view.project.id, taskId: props.id })}><Page class="l-work l-task" scroll="none" head={<TaskBar m={m()} tab={tab()} route={route()} />} status={<StatusLane items={status()} />}>
+  return <ResultScope.Provider value={() => ({ projectId: m().view.project.id, taskId: props.id })}><Page class="l-work l-task" scroll="none" head={<TaskBar m={m()} tab={tab()} route={route()} />} status={<StatusLane items={status()} hideActions={tab() === undefined} />}>
     <div class="main-body">
       <Show when={live()} fallback={
         <div class="task-body">
-          <TaskOwnerActions task={props.id} />
+          <Show when={tab()}><TaskOwnerActions task={props.id} /></Show>
           <Switch>
-            <Match when={tab() === undefined}><Conversation model={model} now={now()} pick={pick()} onPick={onPick} route={route()} /></Match>
+            <Match when={tab() === undefined}><Conversation model={model} now={now()} pick={pick()} onPick={onPick} route={route()} recheck={offline.action} actions={
+              <For each={status().filter(item => item.action && (item !== offline || m().mode === "offline"))}>{item =>
+                <ActionBar place="card">{item.action}</ActionBar>
+              }</For>
+            } /></Match>
             <Match when={tab() === "changes"}><ChangesTab m={m()} route={route()} viewState={changesView} /></Match>
             <Match when={tab() === "code"}><CodeTab m={m()} route={route()} /></Match>
             <Match when={tab() === "terminal"}><div class="note-panel task-panel"><span class="w500">Terminal</span><span>{ws.t("terminalNote")}</span>
@@ -1123,7 +1161,7 @@ export function TaskWorkers(props: { model: Accessor<SessionModel>; now: number;
       <Show when={!first.loading()} fallback={<Skeleton kind="list" label="Loading the workers…" class="ws-skel-pane" />}><WorkersList m={m()} now={props.now} pick={props.pick} /></Show>
       <FirstViewNotice view={first} class="ws-skel-pane" />
     </section>
-    <section class="livepane" aria-label={`${props.pick === CORTEX ? "Coordinator" : props.pick === VERIFICATION ? "Runtime verification" : m().workers.find(w => w.id === props.pick)?.role ?? "Worker"} activity`} aria-busy={waitsForWorker() ? "true" : undefined}><label class="ws-worker-picker">Worker <select class="inp" value={props.pick} onChange={e => props.onPick(e.currentTarget.value)}><option value={CORTEX}>Coordinator</option><Keyed each={m().workers} by={w => w.id}>{w => <option value={w().id}>{w().role}</option>}</Keyed><option value={VERIFICATION}>Runtime verification</option></select></label>
+    <section class="livepane" aria-label={`${props.pick === CORTEX ? "Coordinator" : props.pick === VERIFICATION ? "Runtime verification" : m().workers.find(w => w.id === props.pick)?.role ?? "Worker"} activity`} aria-busy={waitsForWorker() ? "true" : undefined}><label class="ws-worker-picker">Worker <select class="inp" value={props.pick} onChange={e => props.onPick(e.currentTarget.value)}><option value={CORTEX}>Coordinator</option><Keyed each={m().workers} by={w => w.id}>{w => <option value={w().id}>{w().role} · {workerState(w()).label}{w().goal ? " · " + w().goal : ""}</option>}</Keyed><option value={VERIFICATION}>Runtime verification</option></select></label>
       <Show when={!waitsForWorker()} fallback={<Skeleton kind="activity" label="Loading activity…" />}><WorkerPane model={props.model} pick={props.pick} now={props.now} /></Show></section>
   </div>;
 }

@@ -62,8 +62,10 @@ The Paseo Routing editor offers cached per-model observed efforts for pins, floo
 Cortex automatically selects worker engine, model, and effort from the runtime's
 current model catalog, task tier, work kind, routing policy and each engine's
 observed subscription plan usage; how often an engine was chosen before is not
-an input. The model may submit a routing recommendation in
-its plan. A recommendation alone is advisory. An explicit model choice
+an input. For execution work with selected competencies, complexity sets the starting
+automatic tier. Existing role-tier defaults apply when the selection is empty.
+[Adaptive worker profiles](../../project/adaptive-profiles.md).
+The model may submit a routing recommendation in its plan. A recommendation alone is advisory. An explicit model choice
 confirmed from the task's recorded user messages or answers has first priority
 on covered exact-route nodes in every tier, including retries and review fixes.
 It overrides pins, preferences, usage ranking, automatic membership and role-tier
@@ -498,8 +500,8 @@ The install snapshot uses the portable `claude-agent-acp/opus` coordinator at
 medium effort and explicitly denies `opencode/*`. Sonnet (`sonnet`) and Terra
 are light and standard candidates; Sol is standard and deep; Opus and Astra are
 deep and flagship. Haiku and Luna are light-only and preferred for investigation,
-with no standard-testing stretch. Sonnet's exact ID is also used for its
-seven-day quota window.
+with no standard-testing stretch. The `seven_day_sonnet` window maps to
+`claude-sonnet-5`, a separate standard/light candidate the owner can enable.
 Opus and Astra list frontend design implementation and review. Their written
 conditions guide ordinary preferences, while frontend-design routing uses the
 structured preference on the affinity engine. Standard-tier plain design or
@@ -791,6 +793,8 @@ caller's own responsibility around this call, exactly as for any other
 replacement.
 
 ### Automatic trigger: `OrchestratingRuntime._attempt_worker_route_fallback`
+
+> Historical implementation. The symbols and algorithm below describe the retired runtime. For the current Rust decision path see [native routing and retained consent](../../project/native-incoming-acp.md#native-routing-and-retained-consent).
 
 `OrchestratingRuntime` wires the actual decision
 point: a worker's own `EngineTurnFailed` (the classified

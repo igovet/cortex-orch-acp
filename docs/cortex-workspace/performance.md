@@ -111,7 +111,7 @@ With nothing changing, CPU is effectively zero; with work running, cost follows 
 | Opening a screen | once, as it opens or a parked tab is shown again | moving between pages of the same project and kind reads nothing more |
 | Git screen on view | on open, after the owner's own Git action or a merge, on its Refresh Git status control, and every 30 s (`GIT_VISIBLE_REFRESH_MS`) while it is on view and the window focused | files change outside the app without any event, so this one light refresh stays; none while the window is hidden or another window has the focus; a failed repository read is retried on its own (3 s, doubling to 30 s) only while such a screen is on view |
 | Return to the window | on focus or on becoming visible | rereads only the projects on view, and only what is older than 10 s (`FOCUS_STALE_MS`); facts reach the screens only when they differ, as data, from what the screens last received, and a project whose facts did not change keeps its records in place |
-| Machine facts | about every 5 minutes, lined up with the engine limits snapshot, while the window is visible | the sidebar shows the engine limits, so this read stays; the machine overview is read when a screen that shows it opens (again only when older than 60 s), joins this poll only while such a screen is on view, and is never read at startup |
+| Machine facts | about every 5 minutes, lined up with the engine limits snapshot, while the window is visible | the startup configuration read publishes the channel’s saved machine name before waiting for project settings. The same subscription updates the title bar after a confirmed rename. The sidebar also shows engine limits; the machine overview is read when a screen that shows it opens (again only when older than 60 s), joins this poll only while such a screen is on view, and is never read at startup |
 | Engine limits refresh in the service | one background pass when a settings read asks for it, at most one pass per 15 s, each connection at most once per 5 minutes | no thread runs between reads: with no window reading settings, no engine CLI starts |
 | Sprint loop in the service | once per project at start or activation; on an owner or loop change of a sprint or task record; on a runtime task event while the project has a sprint in motion (a queue running, planning, or a result waiting for an automatic settle); every 30 s for such a project as a safety tick | at most one pass per project per 2 s however often it is woken; a project with no sprint in motion costs nothing between changes; automatic acceptance rides the same passes |
 | Conversation history | only for the task on view (its page or board preview); newest-first open on about one screen (the entries a window of its height holds, in pages of one screen's rows, at most 100, until that or about 150 rows are held; every later read of the same conversation asks for that same page size, which its cursors are bound to), then append from the forward cursor on task stream events; prefetch earlier only while the visible feed is near its held-history boundary | at most one read in flight per project, the next right after it when more events arrived, never sooner than 120 ms after the previous began; a forward read seeks its position through the display tables' (session, seq) indexes, so it costs the same on a long conversation as on a short one (in-memory synthetic session, debug build: about 5,100 SQLite VM steps, 1.5–2 ms, to read 10 new rows after 200 or after 10,000 rows); a service without forward cursors gets the former whole reread; incomplete reads never cached |
@@ -151,7 +151,7 @@ The production window later exited without intervention. With no window, the sam
 - The window previously replayed every task's history on every refresh. Complete histories are reused until the task or execution changes, relevant journal events arrive, or the owner sends input. If the journal cannot be read completely, changed project history is reread conservatively; incomplete history reads are not cached.
 - With a native board, every executed task's complete history was read inside one details read, and nothing was published until all of them finished with the watermark unchanged. On 2026-11-17 the installed service was measured with read-only `history.page` calls against a 3.2 GB release store without `host_updates_by_call`. Ten executed tasks held 7,872 visible rows, read in 92 pages. One complete pass took about 466 s, with the window's own reads running at the same time. Single pages took 0.1–15 s, and the longest conversation (1,554 rows, 18 pages) took 91 s. The board read itself took 2–9 s while it queued behind these pages. Any stream event in those minutes discarded the pass, so with a working task no conversation was ever shown. Conversations are now read and published per task, outside the details read (see [consistency and recovery](consistency-and-recovery.md)). The cost of one conversation read is unchanged by this; the per-tool-row lookup above sets it. History pages remain serial per project.
 - A streaming conversation lagged by minutes and showed a message cut off mid-word. Each change of a running task reread its whole history from the first page, so the screen was always one complete reread old, and a message still being streamed was shown as of the chunk the last complete read reached; on the installed build a 1,554-row conversation took 18 pages. Every history page now names a forward cursor, and after the first complete read the window reads only the rows written after the ones it holds, driven by the task's stream events; only the conversation on view is read this way. A page's newest position is now taken from each table's own maximum through its index, and its rows from each table's (session, seq) index separately, merged in order; before, the newest position was a maximum over a union of the whole session. Measured with `cortex-core` `projections::history::tests::a_forward_reads_cost_does_not_grow_with_the_history_before_it` (in-memory synthetic sessions, debug build): reading 10 new rows took 5,193 SQLite VM steps (1.5 ms) after 200 rows and 5,056 (2.0 ms) after 10,000 rows. The installed app and an owner store were not measured. After a local commit, the project's reader can wake immediately when idle; commits from another process still rely on its 250 ms fallback. Neither interval bounds the full trip to a rendered conversation.
-- Every streamed message chunk was its own fully synced store commit. Audited stores averaged 11 to 12 bytes and about 21 rows per message, up to 1,609 rows for one message; on a busy HDD commits topped out at about 25 a second, the writer's 128-job queue filled and tool calls were refused with `busy`/`storage_unavailable`. Chunk rows are now deferred writes that commit together within 250 ms, before any later ordinary write and on shutdown (see [consistency and recovery](consistency-and-recovery.md)): a streaming turn needs one commit per 250 ms window (more only past 64 waiting rows) instead of one per chunk; rows, order and message identities are unchanged, and only up to 250 ms of display text is lost if the service is killed. `synchronous` stays `FULL`. Covered by `native_activity::tests` (`streamed_chunks_commit_deferred_in_order_before_the_next_update`, `a_settled_turn_ends_the_streamed_message_and_its_text_commits_first`, `deferred_text_commits_after_the_window_and_on_shutdown`) and `cortex-core` `tests/executor.rs`; the commit rate was not measured on an owner store or the installed app.
+- Historically, every streamed message chunk was its own fully synced store commit. On a busy HDD commits topped out at about 25 per second, the 128-job writer queue filled, and tool calls were refused with `busy` or `storage_unavailable`. The first chunk after stream inactivity is now due immediately. A continuing stream shares a commit in up to 40 ms on an available writer, with earlier flushes for a full batch, an ordered ordinary write or shutdown. See [consistency and recovery](consistency-and-recovery.md) and [commit durability](../project/storage.md#commit-durability).
 - Sandboxed command preparation walked the whole project twice per command (once stating every entry for hard links, once listing every directory for nested private entries) and resolved every denial path again for each hard-linked file. On this 549,000-entry checkout (379,000 entries in one build directory) audited commands took 1.96 s median, 2.4 s p90 and 22 s at most to prepare, and up to 222 s on a loaded HDD (`native_command_sandbox_unavailable`). Preparation now makes one parallel pass that only states writable regular files (see [permissions and containment](../features/permissions-and-containment/index.md#git-and-tool-state)). Measured with `native_command_sandbox::tests::preparation_benchmark` (read-only profile, whole project as write set, debug build, warm cache, five rounds): before, the preparation took 1,686 to 1,772 ms and its hard-link walk alone 1,226 to 1,254 ms; after, 223 to 263 ms, of which the scan took 159 to 184 ms for about 490,000 entries, the bubblewrap probe 12 to 23 ms and the overlay probe 10 ms. A cold first round took 1.1 s. It stays proportional to the number of entries: no scan is cached, because a link count changes without any directory changing. The installed app was not measured.
 - A long conversation showed nothing of its latest part for minutes after a restart. Its first read in a window paged `history.page` from the first row, 100 rows a request. One real task held about 22,000 rows in one session (13,270 updates and 8,965 transcript rows), so the first open after a service restart needed more than 220 sequential requests before the latest messages appeared. A first read now starts at the end with `history.earlier`. It reads backward pages of one screen's worth of rows (from the window's height, at most 100) until about one screen of entries is held or about 150 rows are, so a conversation of messages opens after one request and one whose steps fold together after a few. The service binds every history cursor to the page size it was read with, so the earlier reads and the forward reads that continue that conversation ask for the same size. Earlier parts are prefetched when the boundary is near the viewport, including on open, resize and upward scroll, with one earlier read in flight per conversation. Each read checks for visible progress after each bounded page and continues across invisible pages until there is more to show or the beginning is reached (see [consistency and recovery](consistency-and-recovery.md)). A backward page reads each display table through its (session, seq) index before its position. Measured with `cortex-core` `projections::history::tests::a_backward_read_seeks_and_does_not_grow_with_the_history` (in-memory synthetic sessions, debug build), the newest 100-row page took 40,102 SQLite VM steps on a 200-row session and 40,432 on a 10,000-row one. The Workspace UI `conversation-earlier` test bounds the first open of a 22,000-row scripted history at four requests. The installed app and an owner store were not measured.
 - Slow Git completion previously emitted a full-refresh request. If the refresh outlasted the Git cache, it spawned another slow Git read and repeated. Completion now publishes facts, not another full task/history read. A superseded completion keeps the last confirmed facts until the next read of that screen. A failed repository read also keeps them, but while a screen showing that project's Git is on view it is retried on its own after 3 s, doubling up to 30 s, and a success publishes facts the same way; so a cause fixed outside the app (a folder's permissions, a Git lock) clears without a restart or an event. A refusal with an owner-readable reason (for example an unsafe private folder) is shown as the review's unavailable reason.
@@ -286,6 +286,38 @@ The foreground table does not include the service's durable outbox reads. Those
 reads no longer wait for a shared polling round to finish; one slow project can
 still delay its own reader.
 
+A confirmed native history read carries its project snapshot watermark. A later
+task delta covered by that same generation and watermark needs no repeat
+history request. The board can reuse that execution's revision-verified
+question cards when the confirmed history also covers the board position.
+Native task deltas may also include a bounded history head. It carries the
+committed source position for the task's bound display session. The service
+looks up heads for at most 64 changed tasks in the same projection snapshot,
+using the session end indexes. The head contains no transcript or question
+content. On the same execution and generation, a repeated head that confirms
+there are no questions can keep an already confirmed empty decision set and
+skip the conversation read. A newer head starts the visible tail read
+alongside board projection, with the usual decision revision checks. When the
+running state stays stable and the heads confirm there are no questions,
+additional heads within 120 ms of the leading read share the next read. If the
+head is missing, the conversation follows the regular read path.
+
+The UI drains buffered native changes in sequence. Successive updates to a
+running execution can share a projection when they differ only in version and
+confirmation time. Insertions, removals and changes to task state stay
+separate during coalescing. A gap, invalidation or conflicting version requests a
+fresh board. The confirmed conversation and its decision cards can be reused
+while their inputs are unchanged. When a visible running conversation confirms
+the same decision revision on its next history read, the board can keep those
+cards without another decisions request. The independent read still follows a
+change, an incomplete history read or a view that closes during the check.
+
+An ordered history update for a confirmed execution can update that
+conversation directly. It uses the installed project version and execution
+identity and preserves the separately loaded worker and owner facts. A
+matching conversation can also be applied after a pending coherent board read
+without a service request.
+
 ## Native delta broadcast diagnostic
 
 No-paid debug builds ran the same disposable single-project workload on ext4
@@ -316,3 +348,121 @@ These are diagnostic measurements on disposable stores, not a delivery
 deadline or a performance claim for external writers, installed builds,
 large projects, concurrent projects or the UI. See the
 [focused no-paid checks](../project/verification.md#native-delta-notification-checks).
+
+## Deferred display batch diagnostic
+
+[measured] The same debug test submitted 256 synthetic 1 KiB display rows at
+4 ms intervals to disposable NVMe stores. It matched every row to its exact
+transaction's commit return and measured the time spent waiting to enter its
+write body. The second run of each variant started with a 180 ms writer job
+in progress. Times are nearest-rank p50 / p95 in milliseconds. WAL growth is
+the increase in allocated file length during the sample.
+
+| Batch policy | Writer at start | First commit ms | Submit to commit ms | Submit to body ms | Transactions | WAL growth bytes |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 250 ms | Available | 254.437 | 132.833 / 246.327 | 130.679 / 242.384 | 5 | 593,280 |
+| 40 ms with immediate first fragment | Available | 0.561 | 24.616 / 42.011 | 22.826 / 40.263 | 27 | 1,277,200 |
+| 250 ms | Held | 254.269 | 132.774 / 246.190 | 130.653 / 242.335 | 5 | 593,280 |
+| 40 ms with immediate first fragment | Held | 184.238 | 25.539 / 135.515 | 24.737 / 132.622 | 23 | 1,157,720 |
+
+At this input cadence the available writer used 5.4 times as many transactions
+and approximately twice the WAL growth. A held writer still delays the first
+fragment. The diagnostic excludes engine delivery and window rendering.
+
+## Returning to a task or attachment
+
+A started task's initial attachment references stay in memory for up to 32
+executions per Workspace store. Editing an unstarted draft still reads its
+current files. Reopening a file can use the window's existing bounded cache of
+attachment bodies by digest. Opening an uncached file reads its bytes on demand.
+
+On 2026-11-27 a private 1280 × 800 Chromium/Xvfb fixture opened two working
+tasks, switched between two workers, and opened the same text attachment twice.
+The scripted port delayed attachment replies by 25 ms. Each build ran the same
+eight actions in six fresh page sessions. Times below are from the DOM click
+to the second animation frame showing the destination. With six observations,
+the empirical p95 is the longest observed time.
+
+| Action | Before median / p95 (ms) | After median / p95 (ms) | File reads across six actions, before → after |
+| --- | ---: | ---: | --- |
+| Select a worker for the first time | 23.5 / 25.0 | 23.8 / 30.5 | 0 → 0 |
+| Return to a worker | 32.1 / 32.4 | 32.5 / 32.9 | 0 → 0 |
+| Open another task with a saved file | 49.5 / 50.1 | 49.6 / 50.3 | 6 lists → 6 lists |
+| Return to the previous task | 48.9 / 49.4 | 32.3 / 32.9 | 6 lists → 0 |
+| Open the file for the first time | 49.4 / 49.9 | 49.3 / 49.8 | 6 bodies → 6 bodies |
+| Reopen the same file | 45.3 / 46.1 | 28.9 / 29.6 | 6 bodies → 0 |
+
+Each task switch also invoked the scripted port's project-facts query twice in
+both builds. The worker selections used records already loaded in the task.
+The fixture did not measure desktop IPC, compositor paint, Android, or upstream
+service request counts.
+
+## Delivery to an open native conversation
+
+When the service advertises `native.history.follow` and the transport implements
+it, opening a conversation starts a private subscription for that project, task,
+and execution. Leaving the conversation releases the subscription. Returning can
+resume at the last confirmed cursor for the same generation. The client applies
+a page once the installed board covers its sequence and the decision revision
+matches. A cursor gap, an overrun, or a disconnected stream triggers the
+existing paged history read. A transport without the capability uses paged
+history throughout.
+
+The rendered desktop comparison uses a disposable project, the same scripted
+peer, and an authenticated private X display for each trial. It brackets
+peer-emission-to-visible latency between the last negative and first positive
+screen captures, verifies which wire message supplied the visible row, and
+counts history, detail and full refresh requests over the same observation
+window. A separately linked service can count SQLite statement starts and rows
+for all its connections and threads during that window.
+
+On 2026-11-27, twelve rotating three-way trials used the original Dev build,
+a build with the new capability suppressed, and that same build with private
+delivery enabled. All 36 observations used the same peer, observer and
+1440 × 900 X display. Each trace identified the fragment's execution and
+delivery source. Times below are peer emission to the first visible frame.
+With twelve observations per arm, the empirical p95 is the longest observation.
+
+| Delivery | Median interval (ms) | p95 interval (ms) | History RPCs/s | Detail RPCs/s |
+| --- | ---: | ---: | ---: | ---: |
+| Original Dev build | 95.2–117.1 | 162.7–174.7 | 1.86 | 4.31 |
+| Current build, paged | 86.9–101.4 | 161.3–177.3 | 1.54 | 3.18 |
+| Current build, private stream | 68.1–80.5 | 93.8–113.1 | 0 | 3.07 |
+
+The original-to-stream median speedup was bounded at 1.18–1.72×, below the
+2.5× target. All arms recorded zero full refreshes during observation. The
+twelve private views opened twelve subscriptions and received 65 pages
+containing 84 rows in 87,656 bytes. The median time from peer emission to
+delivery was 61.9 ms on the original build, 31.7 ms with current paging and
+19.3 ms with the stream. From delivery to the end of the first positive
+capture, the corresponding medians were 45.5, 61.2 and 59.0 ms. These
+component medians are calculated independently across trials.
+
+Six additional paired trials counted SQL on the current service. Paged
+delivery executed 17,535 read-only result statements in 17.350 s (1,010.65/s).
+Private delivery executed 18,111 in 18.676 s (969.76/s). The average number
+of such statements per trial increased 3.3%, while the rate fell 4.0%.
+All SQL statement starts per second decreased from 1,900.90 to 1,815.24.
+The six private streams reported 37 history projections and 37 decision
+projections through their last observed frames. SQL counters cover every
+service connection within the measured windows. SQL counts for the original
+archived Dev executable were unavailable.
+
+The measured desktop and service SHA-256 prefixes were `517cd813c5d1` and
+`02d3dd2f03ed`. The SQL-counted service was `7af9a08162de`. Median SQL
+read statements per observation were 2,928 with paging and 2,896.5 with the
+stream. A later first-view change prevents pending controls from entering the
+DOM before the conversation's decision revision is confirmed. The timings
+above belong to the earlier identified desktop. The paired phone transport
+continues to read history in pages.
+
+A separate trace on the same desktop placed the covering board delta 11.1 ms
+after peer emission, the private page at 12.0 ms, insertion of the text into
+the DOM at 37.9–40.3 ms and its first positive screen capture at 63.2–66.3 ms.
+In a second trace on a desktop with additional JavaScript timing marks, the
+page reached the service socket observer at 9.2 ms and the UI callback at
+29.1–32.0 ms. The client held the complete batch for 22 ms until the matching
+board was installed. A separate replay showed tool rows and a changed decision
+revision in the marker batch. The DOM contained the instrumented trial's text
+at 68.1–71.0 ms, and the first positive capture ended at 90.4 ms. These are
+individual traces, separate from the comparison above.

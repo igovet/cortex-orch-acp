@@ -35,9 +35,9 @@ const ownerResolved = () => mapTask(wireTask({ taskId: "t", executionId: "e", ph
 
 describe("a run that ended by itself", () => {
   for (const status of ["failed", "cancelled"] as const) {
-    it(`a ${status} run offers Close task… in the title band, and the dialog closes it as is without offering Stop`, async () => {
+    it(`a ${status} run offers Close task… at the end of the conversation, and the dialog closes it as is without offering Stop`, async () => {
       const p = await mount(world({ status }));
-      const close = button("Close task…", band());
+      const close = button("Close task…", document.querySelector(".conversation-actions")!);
       expect(close).toBeTruthy();
       expect(close!.getAttribute("aria-disabled")).toBeNull();
       close!.click(); await settle();

@@ -31,6 +31,25 @@ pub fn read_only(role: &str, stage: &str) -> bool {
         ]
         .contains(&role)
 }
+pub fn plan_node_read_only(node: &Value) -> bool {
+    node["read_only"] == true || read_only(node["role"].as_str().unwrap_or(""), "execution")
+}
+
+/// Keep the original plan's authority for live attempts from older revisions.
+pub fn node_read_only(
+    db: &Connection, task: &str, revision: i64, node: &str, role: &str, stage: &str,
+) -> CoreResult<bool> {
+    if read_only(role, stage) {
+        return Ok(true);
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events e, json_each(e.payload_json,'$.plan.tasks') n
+         WHERE e.id=(SELECT max(p.id) FROM runtime_events p WHERE p.task_id=?1
+            AND p.type IN ('PLAN_ACCEPTED','PLAN_AMENDED') AND json_extract(p.payload_json,'$.revision')=?2)
+           AND json_extract(n.value,'$.id')=? AND json_extract(n.value,'$.read_only')=1)",
+        (task, revision, node), |r| r.get(0),
+    )?)
+}
 pub fn canonical(path: &str) -> String {
     let absolute = path.starts_with('/');
     let p = path
@@ -46,25 +65,23 @@ pub fn canonical(path: &str) -> String {
         p
     }
 }
-pub fn overlaps(left: &str, right: &str) -> bool {
-    fn prefix(s: &str) -> (String, bool) {
-        let s = canonical(s);
-        let idx = s.find(['*', '?', '[']);
-        let p = s[..idx.unwrap_or(s.len())].trim_end_matches('/');
-        (
-            if p == "." { String::new() } else { p.into() },
-            idx.is_some(),
-        )
-    }
-    let (a, aw) = prefix(left);
-    let (b, bw) = prefix(right);
+fn scope_prefix(scope: &str) -> (String, bool) {
+    let scope = canonical(scope);
+    let idx = scope.find(['*', '?', '[']);
+    let prefix = scope[..idx.unwrap_or(scope.len())].trim_end_matches('/');
+    (if prefix == "." { String::new() } else { prefix.into() }, idx.is_some())
+}
+fn prefix_overlaps((a, aw): &(String, bool), (b, bw): &(String, bool)) -> bool {
     a.is_empty()
         || b.is_empty()
         || a == b
-        || a.starts_with(&(b.clone() + "/"))
-        || b.starts_with(&(a.clone() + "/"))
-        || aw && b.starts_with(&a)
-        || bw && a.starts_with(&b)
+        || a.strip_prefix(b.as_str()).is_some_and(|suffix| suffix.starts_with('/'))
+        || b.strip_prefix(a.as_str()).is_some_and(|suffix| suffix.starts_with('/'))
+        || *aw && b.starts_with(a)
+        || *bw && a.starts_with(b)
+}
+pub fn overlaps(left: &str, right: &str) -> bool {
+    prefix_overlaps(&scope_prefix(left), &scope_prefix(right))
 }
 fn strings(v: &Value) -> CoreResult<Vec<String>> {
     v.as_array()
@@ -77,7 +94,7 @@ fn strings(v: &Value) -> CoreResult<Vec<String>> {
         })
         .collect()
 }
-fn root_tx(db: &Connection, task: &str) -> CoreResult<String> {
+pub(crate) fn root_tx(db: &Connection, task: &str) -> CoreResult<String> {
     Ok(db.query_row("SELECT coalesce((SELECT workspace_root FROM task_workspaces WHERE task_id=t.id),project_root) FROM tasks t WHERE id=?",
         [task],|r|r.get(0))?)
 }
@@ -157,6 +174,7 @@ pub fn effective_scope_tx(
 struct Holding {
     task: String,
     assignment: Option<String>,
+    root: Option<String>,
     paths: Vec<String>,
 }
 /// The write scopes other work must not overlap. A node holds its files while its
@@ -166,7 +184,7 @@ struct Holding {
 /// every delegation row is terminated with no reservation left unreleased. Rows
 /// written by earlier builds are read the same way.
 fn holdings_tx(db: &Connection) -> CoreResult<Vec<Holding>> {
-    let rows=db.prepare("SELECT n.task_id,n.assignment_ref,n.scope_json,n.role,n.stage FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+    let rows=db.prepare("SELECT n.task_id,n.assignment_ref,n.scope_json,n.role,n.stage,n.revision,n.node_id FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
         WHERE t.state NOT IN ('COMPLETED','CANCELLED','FAILED')
         AND EXISTS(SELECT 1 FROM tasks b WHERE b.id=n.task_id)
         AND NOT EXISTS(SELECT 1 FROM pending_deletions d WHERE d.task_id=n.task_id)
@@ -184,18 +202,27 @@ fn holdings_tx(db: &Connection) -> CoreResult<Vec<Holding>> {
             AND NOT EXISTS(SELECT 1 FROM capacity_reservations a WHERE a.attempt_id=p.attempt_id AND a.state IN ('reserved','ambiguous')))
         AND ((n.status='running' AND t.state IN ('EXECUTING','REVIEWING')) OR EXISTS(
             SELECT 1 FROM delegation_provisioning p WHERE p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref))")?
-        .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?)))?
+        .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,i64>(5)?,r.get::<_,String>(6)?)))?
         .collect::<Result<Vec<_>,_>>()?;
     let mut out = Vec::new();
-    for (task, a, scope, role, stage) in rows {
-        if !read_only(&role, &stage) {
+    for (task, a, scope, role, stage, revision, node) in rows {
+        if !node_read_only(db, &task, revision, &node, &role, &stage)? {
+            use crate::workspace::worktrees::assignments;
+            let logical_root = root_tx(db, &task)?;
+            let isolated = a.as_deref().map(|assignment| assignments::root_on(db, &task, assignment)).transpose()?.flatten();
+            let root = match isolated {
+                Some(path) => Some(path.into_os_string().into_string().map_err(|_| crate::CoreError::Refused("invalid_project"))?),
+                None if a.as_deref().map(|assignment| assignments::selected(db, &task, assignment)).transpose()?.unwrap_or(false) => None,
+                None => Some(logical_root.clone()),
+            };
             out.push(Holding {
                 paths: absolute(
-                    &root_tx(db, &task)?,
+                    &logical_root,
                     &effective_scope_tx(db, &task, a.as_deref(), &scope)?,
                 ),
                 task,
                 assignment: a,
+                root,
             });
         }
     }
@@ -263,7 +290,7 @@ fn review_needs_checkout(
 }
 
 /// Change review and host verification hold a stable checkout through reconciliation.
-fn review_holder_tx(db: &Connection, task: &str) -> CoreResult<Option<String>> {
+pub(crate) fn review_holder_tx(db: &Connection, task: &str) -> CoreResult<Option<String>> {
     let root = root_tx(db, task)?;
     let mut query = db.prepare("SELECT t.task_id,t.state,t.revision FROM runtime_tasks t JOIN tasks b ON b.id=t.task_id
         LEFT JOIN task_workspaces w ON w.task_id=t.task_id
@@ -296,6 +323,24 @@ fn review_holder_tx(db: &Connection, task: &str) -> CoreResult<Option<String>> {
     Ok(None)
 }
 
+/// Integration changes the shared checkout. Reuse its review and writer
+/// reservations and check every path against a live owner file lease.
+pub(crate) fn require_assignment_integration(
+    db: &Connection,
+    task: &str,
+    root: &str,
+    scope: &[String],
+) -> CoreResult<()> {
+    if root_tx(db, task)? != root
+        || review_holder_tx(db, task)?.is_some()
+        || holdings_tx(db)?.iter().any(|h| h.root.as_deref() == Some(root))
+        || owner_blocker_tx(db, root, &absolute(root, scope))?.is_some()
+    {
+        return crate::error::refuse("assignment_worktree_target_busy");
+    }
+    Ok(())
+}
+
 /// Check before entering review, in the same transaction that reserves the checkout.
 pub fn review_writer_tx(db: &Connection, task: &str) -> CoreResult<Option<Value>> {
     let (state, revision): (String, i64) = db.query_row(
@@ -307,14 +352,87 @@ pub fn review_writer_tx(db: &Connection, task: &str) -> CoreResult<Option<Value>
         return Ok(None);
     }
     let root = root_tx(db, task)?;
+    if let Some(holder) = crate::workspace::worktrees::assignments::integration_holder(db, &root)? {
+        return Ok(Some(json!({"node":"review","holder_task":holder,"paths":[root]})));
+    }
     for h in holdings_tx(db)? {
-        if h.task != task && root_tx(db, &h.task)? == root {
+        if h.task != task && h.root.as_deref() == Some(&root) {
             return Ok(Some(
                 json!({"node":"review","holder_task":h.task,"paths":h.paths}),
             ));
         }
     }
     Ok(None)
+}
+/// Explain contention at intake. Reservations are still granted by the
+/// transactional claim path because a current holder can change at any time.
+pub fn plan_scope_warnings(db: &Connection, task: &str, plan: &Value) -> CoreResult<Vec<Value>> {
+    let root = root_tx(db, task)?;
+    let holdings = holdings_tx(db)?;
+    let review_holder = review_holder_tx(db, task)?;
+    let Some(nodes) = plan["tasks"].as_array() else { return Ok(Vec::new()); };
+    let dependencies: std::collections::BTreeMap<&str, Vec<&str>> = nodes.iter().filter_map(|n| {
+        Some((n["id"].as_str()?, n["dependencies"].as_array()?.iter().filter_map(Value::as_str).collect()))
+    }).collect();
+    let ancestors = |node| {
+        let mut pending = vec![node];
+        let mut seen = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if seen.insert(id) {
+                pending.extend(dependencies.get(id).into_iter().flatten().copied());
+            }
+        }
+        seen
+    };
+    let mut writers = Vec::new();
+    let mut warnings = Vec::new();
+    let mut omitted = 0;
+    let mut warn = |warning| {
+        if warnings.len() < 64 {
+            warnings.push(warning);
+        } else {
+            omitted += 1;
+        }
+    };
+    for node in nodes.iter().filter(|n| !plan_node_read_only(n)) {
+        let id = node["id"].as_str().ok_or(CoreError::Refused("invalid_plan_node"))?;
+        let scope = strings(&node["scope"])?;
+        let paths = absolute(&root, &scope);
+        if let Some(held) = owner_blocker_tx(db, &root, &paths)? {
+            warn(json!({"reason":"owner_file_lease_held","node":id,"paths":[held.path]}));
+        }
+        if let Some(holder) = &review_holder {
+            warn(json!({"reason":"checkout_review_held","node":id,"holder_task":holder}));
+        }
+        if let Some(holder) = holdings.iter().find(|h| h.task != task
+            && paths.iter().any(|a| h.paths.iter().any(|b| overlaps(a, b))))
+        {
+            warn(json!({"reason":"write_scope_held","node":id,"holder_task":holder.task}));
+        }
+        let scopes = scope.into_iter().map(|s| {
+            let prefix = scope_prefix(&s);
+            (s, prefix)
+        }).collect::<Vec<_>>();
+        writers.push((id, scopes, ancestors(id)));
+    }
+    for (index, (id, scope, parents)) in writers.iter().enumerate() {
+        for (peer, other, peer_parents) in &writers[..index] {
+            if parents.contains(peer) || peer_parents.contains(id) {
+                continue;
+            }
+            if let Some((left, right)) = scope.iter().find_map(|(left, prefix)| {
+                other.iter().find(|(_, other)| prefix_overlaps(prefix, other))
+                    .map(|(right, _)| (left, right))
+            }) {
+                warn(json!({"reason":"independent_write_scope_overlap",
+                    "node":id,"peer_node":peer,"paths":[left,right]}));
+            }
+        }
+    }
+    if omitted != 0 {
+        warnings.push(json!({"reason":"additional_scope_warnings","count":omitted}));
+    }
+    Ok(warnings)
 }
 fn pending_tx(db: &Transaction<'_>) -> CoreResult<Vec<Value>> {
     let tasks = db
@@ -353,9 +471,14 @@ impl Default for NativePolicy {
 }
 impl SchedulingPolicy for NativePolicy {
     fn may_claim(&self, db: &Transaction<'_>, task: &str, node: &str) -> CoreResult<bool> {
-        let (role,stage,scope,assignment):(String,String,String,Option<String>)=db.query_row(
-            "SELECT role,stage,scope_json,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=(SELECT revision FROM runtime_tasks WHERE task_id=?) AND node_id=?",
-            (task,task,node),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+        self.may_claim_with_checkout(db, task, node, false)
+    }
+}
+impl NativePolicy {
+    pub(crate) fn may_claim_with_checkout(&self, db: &Transaction<'_>, task: &str, node: &str, isolated: bool) -> CoreResult<bool> {
+        let (role,stage,scope,assignment,revision):(String,String,String,Option<String>,i64)=db.query_row(
+            "SELECT role,stage,scope_json,assignment_ref,revision FROM runtime_nodes WHERE task_id=? AND revision=(SELECT revision FROM runtime_tasks WHERE task_id=?) AND node_id=?",
+            (task,task,node),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
         let held:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN runtime_tasks t USING(task_id)
             WHERE e.task_id=? AND e.type='ASSIGNMENT_RETRIED' AND json_extract(e.payload_json,'$.revision')=t.revision
             AND json_extract(e.payload_json,'$.node')=? AND json_extract(e.payload_json,'$.retry_not_before')>?
@@ -364,13 +487,16 @@ impl SchedulingPolicy for NativePolicy {
         if held {
             return Ok(false);
         }
+        if crate::workspace::worktrees::assignments::integration_holder(db, &root_tx(db, task)?)?.is_some() {
+            return Ok(false);
+        }
         if stage == "review" {
             return Ok(review_writer_tx(db, task)?.is_none());
         }
-        if read_only(&role, &stage) {
+        if node_read_only(db, task, revision, node, &role, &stage)? {
             return Ok(true);
         }
-        if review_holder_tx(db, task)?.is_some() {
+        if !isolated && review_holder_tx(db, task)?.is_some() {
             return Ok(false);
         }
         let scope = effective_scope_tx(db, task, assignment.as_deref(), &scope)?;
@@ -458,7 +584,7 @@ pub(crate) fn write_conflict(db: &Connection, task: &str) -> CoreResult<Option<V
             (task, revision, &node),
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
-        if read_only(&role, &node_stage) {
+        if node_read_only(db, task, revision, &node, &role, &node_stage)? {
             continue;
         }
         if let Some(holder) = review_holder_tx(db, task)? {
@@ -561,7 +687,7 @@ pub fn claim_obstacles_tx(
             } else {
                 json!("claimable")
             }
-        } else if read_only(&role, &node_stage) {
+        } else if node_read_only(db, task, revision, &node, &role, &node_stage)? {
             json!("claimable")
         } else if let Some(holder) = review_holder_tx(db, task)? {
             item["holder_task"] = json!(holder);
@@ -668,12 +794,12 @@ fn predicate_tx(
 ) -> CoreResult<Option<&'static str>> {
     let task = waits::field(w, "task_id")?;
     let assignment = waits::field(w, "assignment_ref")?;
-    let (role, stage): (String, String) = db.query_row(
-        "SELECT role,stage FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+    let (role, stage, revision, node): (String, String, i64, String) = db.query_row(
+        "SELECT role,stage,revision,node_id FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
         (task, assignment),
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
-    if read_only(&role, &stage) {
+    if node_read_only(db, task, revision, &node, &role, &stage)? {
         return Ok(Some("read_only_role"));
     }
     if paths

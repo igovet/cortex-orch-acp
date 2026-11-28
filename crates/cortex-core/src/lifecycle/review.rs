@@ -11,6 +11,22 @@ use crate::{
 use rusqlite::{OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+
+pub fn escalate_for_observed_risk_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    risk: crate::strategy::Risk,
+) -> CoreResult<()> {
+    use crate::strategy::{self, Mode, Risk};
+    if risk == Risk::High && strategy::current_mode(db, task)?.is_some_and(|m| m < Mode::Deep) {
+        event_tx(db, task, "STRATEGY_ESCALATED", json!({
+            "revision":domain::task_tx(db,task)?.1,
+            "strategy":{"mode":Mode::Deep.name()},
+            "reason":"observed_review_risk"
+        }))?;
+    }
+    Ok(())
+}
 /// A refusal is a committed result, not an error that rolls back the new binding.
 /// The outer runtime request ledger permanently retains this key's refusal.
 pub fn preflight_result_tx(
@@ -171,54 +187,6 @@ fn matches(path: &str, scope: &str) -> bool {
     }
     dp[p.len()]
 }
-/// A test file wherever it lives: under a `tests`/`test` folder, or named like a
-/// test (`*.test.*`, `*.spec.*`, `*_test.*`, `test_*`).
-fn test_file(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    path.split('/')
-        .rev()
-        .skip(1)
-        .any(|d| d == "tests" || d == "test" || d == "__tests__")
-        || name.contains(".test.")
-        || name.contains(".spec.")
-        || name.contains("_test.")
-        || name.starts_with("test_")
-}
-
-/// The developer for product code a review finding names: frontend sources to the
-/// frontend developer, scripts and CI to DevOps, a mix of frontend and other code
-/// to the full-stack developer, anything else to the backend developer.
-fn code_role(files: &[String]) -> &'static str {
-    let ext = |p: &str| p.rsplit_once('.').map_or("", |(_, e)| e).to_owned();
-    let frontend = |p: &String| {
-        [
-            "ts", "tsx", "js", "jsx", "mjs", "css", "scss", "html", "vue", "svelte",
-        ]
-        .contains(&ext(p).as_str())
-    };
-    let ops = |p: &String| {
-        p.starts_with("scripts/")
-            || p.starts_with(".github/")
-            || p.rsplit('/')
-                .next()
-                .is_some_and(|n| n.starts_with("Dockerfile"))
-            || ext(p) == "sh"
-    };
-    let code: Vec<&String> = files
-        .iter()
-        .filter(|p| !p.ends_with(".md") && !p.starts_with("docs/") && !test_file(p))
-        .collect();
-    if !code.is_empty() && code.iter().all(|p| ops(p)) {
-        "worker-devops-engineer"
-    } else if !code.is_empty() && code.iter().all(|p| frontend(p)) {
-        "worker-frontend-dev"
-    } else if code.iter().any(|p| frontend(p)) {
-        "worker-fullstack-dev"
-    } else {
-        "worker-backend-dev"
-    }
-}
-
 fn strings(v: &Value) -> CoreResult<Vec<String>> {
     v.as_array()
         .ok_or(CoreError::Refused("invalid_review_findings"))?
@@ -716,7 +684,7 @@ fn no_progress_tx(
 /// (this one included), a further fix round is granted while this review raises a
 /// finding no earlier review of the lineage raised (same files and normalized fix):
 /// new problems are progress. It is refused when every finding was already raised
-/// before (the work is going around), and after [`MAX_LINEAGE_REVIEW_CYCLES`] rounds
+/// before (the work is going around), and at the risk-specific hard lineage limit
 /// in any case, so reworded repeats cannot cycle forever. Counting findings instead
 /// stopped a task whose three reviews each found one different problem (owner store
 /// 2026-11-22); before any budget, one task ran nine review-cycle ladders with
@@ -735,20 +703,19 @@ fn lineage_budget_exhausted_tx(
         .filter(requests_changes)
         .collect();
     let rounds = earlier.len() + 1;
-    if rounds < MAX_REVIEW_CYCLES {
+    let policy = crate::strategy::review_policy(db, task)?;
+    if rounds < policy.cycles {
         return Ok(None);
     }
     let current = finding_subjects(result);
     let seen: BTreeSet<_> = earlier.iter().flat_map(finding_subjects).collect();
     let previous = earlier.first().map_or(0, |p| finding_subjects(p).len());
     let new_problem = current.iter().any(|f| !seen.contains(f));
-    if new_problem && rounds < MAX_LINEAGE_REVIEW_CYCLES {
+    if new_problem && rounds < policy.lineage_cycles {
         return Ok(None);
     }
     Ok(Some((rounds, previous, current.len())))
 }
-/// Change-requesting reviews one task lineage may run while each raises a new problem.
-const MAX_LINEAGE_REVIEW_CYCLES: usize = 12;
 /// The parts of the change a review reports it did not cover, as given in its
 /// `not_covered`.
 fn uncovered(result: &Value) -> Vec<Value> {
@@ -1209,7 +1176,12 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     let converging = plan_review
         && cycle < super::sprint_planning::MAX_PLAN_REVIEW_CYCLES
         && super::sprint_planning::fewer_findings_tx(db, task, &result)?;
-    if cycle >= MAX_REVIEW_CYCLES as i64 && !converging {
+    let max_cycles = if plan_review {
+        MAX_REVIEW_CYCLES
+    } else {
+        crate::strategy::review_policy(db, task)?.cycles
+    };
+    if cycle >= max_cycles as i64 && !converging {
         domain::stop_tx(db, task, "review_cycle_limit")?;
         return Ok(());
     }
@@ -1346,25 +1318,16 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     let tests = |p: &String| p.starts_with("tests/") || p == "tests";
     // The files the findings for one fix name: its own findings, or every finding
     // when the fix is not targeted.
-    let named = |id: &str| -> CoreResult<(Vec<String>, BTreeSet<String>)> {
+    let named = |id: &str| -> CoreResult<Vec<String>> {
         let items: Vec<&Value> = match grouped.get(id) {
             Some(items) if fallback.is_none() => items.clone(),
             _ => findings.into_iter().flatten().collect(),
         };
         let mut files = Vec::new();
-        let mut proposed = BTreeSet::new();
         for item in &items {
             files.extend(strings(&item["files"])?);
-            // The reviewer's choice of specialist, kept only for a writing role.
-            proposed.insert(
-                item["role"]
-                    .as_str()
-                    .map(|r| format!("worker-{}", r.trim_start_matches("worker-")))
-                    .filter(|r| !read_only(r, "execution"))
-                    .unwrap_or_default(),
-            );
         }
-        Ok((files, proposed))
+        Ok(files)
     };
     let mut fixes = Vec::new();
     for (id, role, _, _, _) in &rows {
@@ -1372,29 +1335,27 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
             continue;
         }
         let scope = &scopes[id];
-        // A fix goes to the writing specialist every one of its findings proposes,
-        // else to the specialist for the files they name (owner store 2026-11-21:
-        // four documentation findings on a QA node were routed to QA, and the
-        // coordinator had to replan them to a technical writer), else to the
-        // node's own writing role.
-        let (files, proposed) = named(id)?;
+        // File classes distinguish focused documentation/testing repairs from
+        // the original work's domain without introducing another worker role.
+        let files = named(id)?;
+        let original = super::plan::node_routing(&plan, id);
+        let support_work = matches!(original["work_kind"].as_str(), Some("testing" | "writing"))
+            || matches!(
+                original["competencies"].as_array().map(Vec::as_slice),
+                Some([module]) if module == "testing" || module == "documentation"
+            );
         let some = !files.is_empty();
-        let unanimous = match proposed.len() {
-            1 => proposed.first().filter(|r| !r.is_empty()).cloned(),
-            _ => None,
-        };
-        let role = if let Some(chosen) = unanimous.as_deref() {
-            chosen
-        } else if some && files.iter().all(docs) {
+        let specialty = if some && files.iter().all(docs) {
             "worker-technical-writer"
-        } else if some && files.iter().all(|p| test_file(p)) {
+        } else if some && files.iter().all(|p| crate::strategy::test_file(p)) {
             "worker-qa-engineer"
         } else if some
             && (read_only(role, "execution")
-                || ["worker-qa-engineer", "worker-technical-writer"].contains(&role.as_str()))
+                || ["worker-qa-engineer", "worker-technical-writer"].contains(&role.as_str())
+                || support_work)
         {
             // Product code named on a testing or writing node goes to a developer.
-            code_role(&files)
+            crate::strategy::fix_role(&files)
         } else if !read_only(role, "execution") {
             role.as_str()
         } else if scope.iter().all(docs) {
@@ -1432,10 +1393,25 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
         };
         let fix = format!("_fix_{cycle}_{id}");
         db.execute("INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status)
-            VALUES (?,?,?,?,?,?,?,'execution','pending')",(task,revision,&fix,role,objective,json!(deps).to_string(),json!(scope).to_string()))?;
-        // The fix routes like the node it fixes (complexity, work kind, provider,
-        // model and its reason), not with defaults.
-        let inherited = super::plan::routing_fields(&super::plan::node_routing(&plan, id));
+            VALUES (?,?,?,'worker-general',?,?,?,'execution','pending')",(task,revision,&fix,objective,json!(deps).to_string(),json!(scope).to_string()))?;
+        // Retain the original work's domain and route context on its fix.
+        let mut inherited = super::plan::routing_fields(&original);
+        if let Some((_, competencies)) = super::plan::legacy_profile(specialty)
+            .filter(|_| specialty != role || original.get("competencies").is_none())
+        {
+            inherited["competencies"] = json!(competencies);
+            if specialty != role || inherited.get("work_kind").is_none() {
+                inherited["work_kind"] = json!(crate::scheduler::role_kind(specialty));
+            }
+        } else if let Some(competencies) = original.get("competencies") {
+            inherited["competencies"] = competencies.clone();
+            if let Some(reason) = original.get("base_sufficiency_reason") {
+                inherited["base_sufficiency_reason"] = reason.clone();
+            }
+        }
+        if inherited.get("competencies").is_some() {
+            inherited["competency_decision_source"] = json!("runtime_review_repair");
+        }
         super::plan::record_node_routing_tx(db, task, &fix, &inherited)?;
         fixes.push(fix);
     }

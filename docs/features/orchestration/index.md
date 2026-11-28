@@ -1,15 +1,66 @@
 # ACP orchestration
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
+> Runtime ownership, tool admission and synthesis are grounded in the Rust sources linked below. Detailed behavior without a Rust source or versioned observation remains unverified.
 
 
-Cortex is the incoming ACP agent and the owner of orchestration. ACP transports
+Cortex is the incoming ACP agent and the owner of orchestration. Its [native driver](../../../crates/workspace-service/src/native_driver.rs) runs the shared [Core lifecycle](../../../crates/cortex-core/src/lifecycle.rs), and [the tool catalogue](../../../crates/cortex-engine/src/schema.rs) defines the available model operations. ACP transports
 messages and sessions; the models propose plans, solve assignments and synthesize
 results. The runtime chooses what executes and whether the task can complete.
 See [verification status](../../project/verification.md) for retained test evidence
 and its automated evidence limits.
 
+## Adaptive orchestration
+
+A bounded informational answer uses Direct, including a comparison of known
+material the coordinator can inspect under its existing read permissions. A
+reopened Direct answer can be clarified the same way if the runtime matches
+the exact closed answer and finds no plan, worker or attributed write. Rework of
+planned changes requires a fresh plan. A
+validated plan with one routine execution node uses Fast with targeted checks.
+Multi-node work uses Collaborative with checks covering the integration points.
+Sensitive scope, explicit high complexity, a consultant or at least six execution
+nodes select Deep. Depth sets review and verification expectations. A consultation requires a
+separate escalation for an unresolved decision or a dedicated recovery step.
+The coordinator proposes
+executable checks for the affected surfaces.
+
+`PLAN_ACCEPTED` and `PLAN_AMENDED` record the selected depth. An amended
+graph, a replacement plan or newly observed high review risk can raise it.
+Newly observed high review risk adds high-risk review guidance and records the
+increase in `STRATEGY_ESCALATED`. A smaller later graph preserves the retained
+depth. Each changed result still requires independent review and final
+verification.
+
+## Risk-based review
+
+The runtime classifies the task's attributed paths, plan complexity and visible
+change size. Security, permissions, storage migrations, and concurrency paths
+raise risk. Large change sets and incomplete change attribution also get the
+expanded review. A completely observed docs or test-only change covering
+up to four files and 8 KiB of reviewable content gets a
+packet limited to the task's paths and at most two change-requesting review
+cycles across the lineage. Standard and high-risk review retain the ordinary
+cycle limits. High-risk review asks for separate checks of applicable boundary,
+failure, rollback and concurrent behavior, plus the integration evidence.
+Relevant surrounding files remain available under the existing read policy.
+Models can raise the plan's stated complexity. The runtime retains the highest
+observed risk across replans and rebindings.
+
+The read-only timing view groups started review cycles by their recorded
+risk. Older cycles without a classification appear as unobserved. See
+[timing observations](../observability/index.md).
+
 Repair review packets include the outstanding verification commands from earlier attempts. Reviewers check claims about excluded tests against the applicable build configuration or test listing and disclose gaps. Final verification uses its existing command evidence rules.
+
+A failed worker check identifies its original command receipt. Retrieve the
+recorded argv and working directory from `command_status` or the original
+`outside_command` receipt before rerunning it. A bounded shell setup followed by a single check can establish a
+passing receipt, including a PATH export followed by `exec` of the check.
+Closure still requires the same command identity and a passing run bound to
+the submitted checkout or unchanged work set. Status 1 from a printing grep
+or Git grep, ordinary diff, or `git diff --no-index --check` is an
+observation. It is neither a pass nor a worker failure that needs repair.
+Quiet searches and explicit Git diff assertions keep their exit-status checks.
 
 ## Runtime-composed synthesis
 
@@ -29,11 +80,7 @@ original wording.
 See [runtime-composed lifecycle](../task-lifecycle/index.md#runtime-composed-synthesis)
 for exact eligibility, atomicity, recovery and display limits. The distinct
 `SYNTHESIS_RUNTIME_COMPOSED` event identifies this mechanism; it does not invent
-a coordinator turn or token observation. A decline instead records a
-metadata-only `SYNTHESIS_RUNTIME_DECLINED` event with a deterministic reason
-code (see [runtime-composed lifecycle](../task-lifecycle/index.md#runtime-composed-synthesis)
-and [observability's cohort aggregates](../observability/index.md)); eligibility
-itself is unchanged.
+a coordinator turn or token observation. Ineligible results continue through coordinator reconciliation.
 
 ## Review after a replan or reopen
 
@@ -241,6 +288,15 @@ routing settings. Unknown-stage failures remain uncertain, never a guessed
 rollback. Preserve the original request and key for reconciliation; see
 [MCP tool errors](../failures-and-cancellation/index.md#mcp-tool-errors).
 
+Before a new native proposal is accepted, the runtime rechecks the latest
+recorded file and directory observations for the same checkout, including
+reads made before an owner wait. Direct or inline batched `project_read`
+observations qualify when they came from the coordinator or from an exactly
+bound completed read-only execution specialist. Stable file identities avoid
+rereading the contents. Older path-bearing records and replaced files can be
+rehashed within a bounded budget. Changed or unobservable paths refuse the
+proposal with `plan_inputs_changed` so the coordinator can read them again.
+
 After accepting a plan, `plan_submit` tells the coordinator that its workers
 are starting and to end the turn rather than poll. The runtime does not wait
 for that turn to end: once the coordinator's next tool or text update shows the
@@ -256,7 +312,7 @@ advisory; the runtime does not force a model to end its turn. Worker dispatch
 timing remains at the turn boundary.
 
 The store (`crates/cortex-core`) holds task state, original goal, plan revision, dependency
-nodes, structured results, events and request receipts in `.cortex/cortex.sqlite3`.
+nodes, structured results, events and request receipts in the project's [private home SQLite store](../../project/storage.md#where-the-database-lives-and-how-it-moves).
 State changes and their events commit together. A plan is validated for exact fields,
 known roles, unique node names, existing dependencies, cycles, bounded scope and
 verification commands. Verification commands run as literal argv without a shell, so plan submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses; use a documented project command or script instead. Each new plan node requires a `model` recommendation (`auto`, engine id, or `engine/model`) and may include `model_reason`; neither field grants dispatch authority. JSON `null` for an optional node field (`model_reason`, `complexity`, `work_kind`) is treated as omitted; a required field sent as `null` is still refused. An `invalid_arguments` refusal for a field sent at the wrong level (for example `verification` inside a task or beside `plan`) names the advertised location, such as `arguments.plan.verification`, instead of only telling the model to omit it. The runtime computes tier and effort and revalidates policy and availability. See [automatic routing](../routing-and-fallback/index.md#automatic-worker-routing-tiers-model-hints-and-ranking).
@@ -266,7 +322,9 @@ verification and synthesis. Only dependency-ready nodes are reserved for executi
 Reservations commit before provisioning. A single chat session (the ACP session
 and task it drives) can run at most four workers at once across all engines,
 roles and connections. The scheduler claims only as many dependency-ready nodes
-as that session has free slots; remaining nodes stay `pending`. Atomic capacity
+as that session has free slots; remaining nodes stay `pending`. See
+[worker scheduling](../task-lifecycle/index.md#worker-scheduling) for the host
+ceiling setting and ranking from retained duration measurements. Atomic capacity
 reservation enforces the same session-wide ceiling. A connection's validated
 `max_concurrent_sessions` (default 4, configurable from 1 through 64) can only
 lower that session's worker share on that connection; it neither raises the
@@ -294,7 +352,7 @@ or safely reclaimed. Scope overlap serializes writing nodes across every task of
 the project, including tasks of other chats; review-stage nodes and READ_ONLY
 roles neither block nor are blocked by overlapping scopes. Runtime routing resolves model and
 effort from the current tier, policy, catalog and plan usage; plan hints remain
-advisory. All 23 specialist/consultant profiles remain available.
+advisory. Fresh plans select an investigation or implementation profile and the domain competencies relevant to each objective.
 
 The workers of one claimed batch run their turns concurrently, each in its own
 session with its own channel, write reservation and result. One failing turn, a
@@ -582,12 +640,11 @@ and `LOOP_OBSERVED` (`kind: review_findings`, with how many reviews of the task
 returned those findings) and stops once with `review_no_progress`, a continuation
 that changes approach, instead of another round. The review-cycle budget belongs to
 the task, not to one plan: `review_cycle` still numbers the reviews and fixes of one
-revision and bounds them at three, and every new revision gets its mandatory review,
-but once three change-requesting reviews were recorded across the task's revisions
-(since the newest reopen), a further fix round is granted while the review raises a
-finding no earlier review of the task raised (same files and normalized fix): a new
-problem is progress, however many there are. When every finding was already raised
-before, or after twelve change-requesting reviews in any case, the review stops with
+revision. Low-risk work has a two-cycle per-revision limit and a two-round
+lineage limit. Standard and high risk allow three cycles per revision. From the
+third change-requesting review in their lineage, a further round needs a finding
+with previously unseen files and normalized fix. Twelve change-requesting rounds
+exhaust that lineage budget. The runtime stops with
 `review_cycle_limit` (`LOOP_OBSERVED`, `kind: review_cycle`, with both counts).
 Counting findings instead had stopped a task whose reviews each found one different
 problem (owner store 2026-11-22). Before this, each continuation's new plan started a fresh budget, and
@@ -720,9 +777,15 @@ retain the original plan's direct dependency edges: each fix depends on the
 review and on generated fixes for its direct plan parents. Independent branches
 remain parallel. It never infers a contract change; a reviewer marks one
 `cross_cutting`. `REVIEW_CHANGES_REQUESTED` records
-`targeted` and the `fallback` reason. The three-cycle ceiling is unchanged.
+`targeted` and the `fallback` reason. The risk-specific review budget still applies.
 
-**Fix role.** A review finding may name, in its optional `role`, the writing specialist who should make the fix (any domain: documentation, build scripts, interface code, a render pipeline). A fix goes to that specialist when every finding it carries (its own findings for a targeted fix, every finding for a fallback fix) proposes the same writing role; a read-only or conflicting proposal is ignored. Otherwise it goes by the files those findings name: `worker-technical-writer` when every named file is under `docs/` or is a Markdown file, `worker-qa-engineer` when every named file is a test (under a `tests`, `test` or `__tests__` folder, or named `*.test.*`, `*.spec.*`, `*_test.*` or `test_*`), and, on a QA, technical-writer or read-only node, a developer for the product code they name (`worker-frontend-dev` for interface sources, `worker-devops-engineer` for scripts and CI, `worker-fullstack-dev` for a mix, `worker-backend-dev` otherwise). Owner store 2026-11-21: documentation findings on a QA node were routed to QA and the coordinator had to replan them. Without named files a fix node never keeps a read-only source role. The runtime replaces a role in its `READ_ONLY` class (for example reviewer, architect, UX designer, consultant or auditor) with a writing specialist chosen from the original node's effective scope: `worker-technical-writer` when every path is under `docs/` or is a Markdown file, `worker-qa-engineer` when every path is under `tests/`, and `worker-backend-dev` for any other scope, including mixed and whole-project scopes. A writing role is kept unchanged. The fix keeps that effective scope exactly, so neither a finding nor its proposed role can widen it, and the choice never reads the findings' prose. The same selection applies to targeted and fallback fixes. The review after the fixes remains a fresh reviewer assignment.
+**Review repairs.** New fixes use the General writing profile and keep the
+original node's effective scope. The runtime chooses documentation or testing
+competencies when all named files match. For product files on a testing,
+documentation or read-only node, it chooses implementation competencies from
+those paths. Other fixes inherit the original domain and route context. A
+retained legacy author or fix keeps its recorded assignment identity. The
+runtime starts a fresh independent reviewer after the repairs.
 
 ### Execution failure repair
 
@@ -1233,8 +1296,7 @@ Reconciliation no longer asks for `replan_request` only to close retained `not_r
 `unverified` checks; the coordinator lists each in `not_verified` with its blocker and
 replans for verification only when the user asked for that check or an unverified changed
 surface puts the requested result at real risk. Evidence-only replans made one task take
-8 revisions (2026-10-22). The `SYNTHESIS_RUNTIME_DECLINED` diagnostic no longer reports
-`review_not_approved` when the runtime waived review for an unchanged project.
+8 revisions (2026-10-22).
 
 Completion of planned work requires current completed nodes, an approving review
 (or the runtime's `REVIEW_NOT_REQUIRED` record for an unchanged project), complete passing
@@ -1431,11 +1493,11 @@ stops the work under its own name and is never retried. See
 [routing and fallback](../routing-and-fallback/index.md#automatic-worker-routing-unavailable-routes). Coordinator, worker and review turns have no runtime total or idle kill
 deadline; a stalled engine receives an adapter nudge rather than being killed. Scope reservations remain occupied until engine termination
 is observed. A task waiting for another task's capacity remains pending with a
-bounded wait. Senior escalation (`escalation_request`, the only consultant route) inserts a
+bounded wait. Runtime-detected plan risk and an accepted senior escalation can insert a
 read-only consultant routed automatically by the runtime. The runtime builds that
 consultant's packet from the reports the escalation names and the escalated revision's
 reports; a plan that names the consultant is refused. Three accepted automatic replans since the latest user message or
-answer and three review cycles bound the respective loops; exhausted limits require
+answer and the risk-specific review cycle budget bound the respective loops; exhausted limits require
 user input or a new plan, and any user message or completed question answer restores
 the replan budget. Worker-local answers emit `WORKER_USER_ANSWER_RECEIVED` in the
 answer transaction; a batch resets the budget only once all its answers are
@@ -1445,9 +1507,16 @@ Materialized sprint coordinators can inspect their authenticated dependency
 graph with `sprint_graph` and read a member's bounded durable outcome and
 published reports with `sprint_task_result`. The runtime supplies direct
 predecessor/dependent context at coordinator start and keeps these reads within
-the current sprint. Code availability is reported only from exact, receipt-bound
-file evidence. The graph view does not alter dependency scheduling, review,
-verification or acceptance.
+the current sprint. Each card has its own execution. Assignment-level
+`predecessor_reports` remain scoped to the work graph within one execution.
+The report catalogue and report pages distinguish reports
+bound by ID and digest to a completed assignment of the current plan revision
+from earlier bindings and unbound publications. Reading through the last page
+confirms the retained report content. The coordinator checks whether that
+content delivers the inputs it needs. A checkout availability result covers
+only paths with recorded file evidence. Queue readiness follows task
+dispositions, including eligible owner decisions, independently of these
+report and checkout observations.
 
 ### Sprint impact checks after an owner change
 
@@ -1478,3 +1547,26 @@ and the approved plan are never written. Details:
 The runtime records metadata-only startup, first-update and changing scheduler
 wait observations. They do not alter dependency, scope, capacity, review or
 release decisions. The former phase timeline reader was removed (see [removed readers](../observability/index.md#removed-python-era-readers)); missing historical evidence is not inferred.
+
+## Typed sprint dependencies
+
+A sprint plan can declare named outputs and the inputs that consume them. An
+input names a direct predecessor and matches its declared name, version and
+kind exactly. A plan with a missing declaration is refused before its drafts
+are created. Existing dependencies without typed inputs retain their previous
+settlement rules.
+
+An execution worker publishes named evidence with its immutable report.
+A Markdown output identifies the report itself. A JSON output carries a
+complete object of up to 8 KiB alongside that report. The runtime checks the
+publication receipt, the accepted worker result, the report bytes and the
+current independent approval and verification. The independent reviewer
+assesses whether the content satisfies the objective. The consumer's
+coordinator can retrieve the exact declaration through `sprint_task_result`.
+
+A typed prerequisite with missing, ambiguous, altered or stale evidence holds
+the consumer. A manual close cannot supply this evidence. Reopening or
+replanning the producer invalidates earlier evidence until the producer
+publishes and clears the same review and verification gates again. A running
+consumer keeps its original binding. Once the producer has repaired the
+output, the consumer needs a fresh execution plan to adopt the new binding.

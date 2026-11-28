@@ -490,6 +490,13 @@ fn native_task_projection_matches_frozen_oracle_for_interrupted_state() {
     let expected: Value =
         serde_json::from_str(include_str!("fixtures/task-projection-interrupted.json")).unwrap();
     let mut actual = serde_json::to_value(get(&r)).unwrap();
+    // The additive wire 1.13 binding is checked independently of the frozen oracle.
+    assert_eq!(
+        actual.as_object_mut().unwrap().remove("draftBinding"),
+        Some(serde_json::json!({
+            "ownerEpoch": "1", "runtimeTaskId": "runtime", "sessionId": "session"
+        }))
+    );
     // The confirmation time is the store's wall clock; everything else is frozen.
     assert!(actual["lastConfirmedAt"].is_string());
     assert_eq!(expected["lastConfirmedAt"], "<timestamp>");

@@ -11,7 +11,7 @@ import { FieldEdit } from "./field-edit";
 import { A, FactLine, I, Keyed, Modal, Pop } from "./kit";
 import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, mergeControls, taskCheckout } from "./review-model";
-import { pauseSettingsPage, checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, externalDoneBlocked, languageLabel, modeLabel, resumeState, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerModel, workerState, workersOutcome, type SessionModel } from "./session-model";
+import { pauseSettingsPage, checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, externalDoneBlocked, externalExitPending, languageLabel, modeLabel, pausedExternalClose, pausedExternalCloseBlocked, resumeState, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerModel, workerState, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
 import { archiveBlocked, ARCHIVE_STOP_UNCONFIRMED } from "./git-actions-model";
 import { spendRows, StallBadge, useLiveSpend } from "./task-spend";
@@ -88,7 +88,7 @@ export function titleBlock(m: SessionModel): string | null {
  * the Git controls and the task menu. Its state reads in the strip under the tabs, the sidebar and the composer; Start, Stop
  * and Resume are the composer's action button and stay in the menu. Offline and unconfirmed tasks offer nothing that could mislead.
  */
-export function TaskActions(props: { view: TaskView; git?: JSX.Element }) {
+export function TaskActions(props: { view: TaskView; git?: JSX.Element; place?: "conversation" }) {
   const ws = useWs();
   const model = useModel(() => props.view.id);
   const actions = createMemo(() => taskActionsFor(props.view, ws));
@@ -109,21 +109,35 @@ export function TaskActions(props: { view: TaskView; git?: JSX.Element }) {
         <RequestLabel pending={ws.store.pendingTask("start_task", props.view.id)} text={REQUESTING.start_task}>Start</RequestLabel>
       </Show>
     </button>}</Show>;
-  return <>
-    <StallBadge task={task()} />
-    <Button id="answer" />
-    <Show when={action("review")}>{a => <A class="btn btn-primary" data-task-action={a().id}
-      to={{ name: "task", machine: props.view.machine.id, task: props.view.id, tab: "changes", sub: "diff" }}>{a().label}</A>}</Show>
+  const conversation = () => {
+    const route = ws.router.route();
+    return route.name === "task" && route.task === props.view.id && !route.tab && !route.live;
+  };
+  const next = () => <>
     <Show when={closePrimary()}><Button id="close" label={closeLabel()} /></Show>
     <Button id="rework" line css="tb-rework" icon />
-    <Show when={!task().archive}><Button id="archive" line css="tb-archive" icon /></Show>
-    <Button id="needed" />
     <Button id="continue" icon />
     <Show when={!canMessage()}>
       <Show when={model()?.mode === "live" && task().status === "working"}><Button id="stop" line label={stopLabel(ws.can(capabilityOf("continue_task")))} icon /></Show>
       <Show when={action("resume")?.enabled}><Button id="resume" icon /></Show>
       <Show when={model()?.mode === "draft"}><Button id="start" icon /></Show>
     </Show>
+  </>;
+  if (props.place === "conversation") {
+    return <Show when={closePrimary() || action("rework") || action("continue") || !canMessage()}>
+      <ActionBar place="card" label="Task actions">{next()}</ActionBar>
+    </Show>;
+  }
+  return <>
+    <StallBadge task={task()} />
+    <Button id="answer" />
+    <Button id="needed" />
+    <Show when={!conversation()}>
+      <Show when={action("review")}>{a => <A class="btn btn-primary" data-task-action={a().id}
+        to={{ name: "task", machine: props.view.machine.id, task: props.view.id, tab: "changes", sub: "diff" }}>{a().label}</A>}</Show>
+      {next()}
+    </Show>
+    <Show when={!task().archive}><Button id="archive" line css="tb-archive" icon /></Show>
     {props.git}
     <TaskMenuButton view={props.view} label="Task actions" />
   </>;
@@ -266,20 +280,51 @@ export function TaskInspector(props: { id: string; pick: string | null }) {
 export function ExternalDoneDialog(props: { taskId: string | null; how: "external" | "already_in_target"; onClose: () => void }) {
   const ws = useWs();
   const m = createMemo(() => props.taskId ? sessionModel(ws.store.index(), props.taskId) : null);
+  const bound = () => props.how === "external" && !!m() && pausedExternalClose(m()!.view);
+  const [refused, setRefused] = createSignal<string | null>(null);
+  const [reviewedExecution, setReviewedExecution] = createSignal<{ executionId: string | null; bound: boolean } | null>(null);
+  const [closing, setClosing] = createSignal(false);
+  createEffect(on(() => props.taskId, () => {
+    setRefused(null);
+    setReviewedExecution(m() ? { executionId: m()!.view.task.executionId ?? null, bound: bound() } : null);
+  }));
+  const waiting = () => !!m() && externalExitPending(m()!.view);
   const reason = () => {
     const model = m();
     if (!model) return "Refresh the task first.";
-    return externalDoneBlocked(model);
+    const reviewed = reviewedExecution();
+    if (!reviewed || reviewed.executionId !== (model.view.task.executionId ?? null) || reviewed.bound !== bound())
+      return "The execution changed. Reopen this dialog to review the current task.";
+    return bound() ? pausedExternalCloseBlocked(model) : externalDoneBlocked(model);
   };
-  const confirm = () => { if (!reason() && props.taskId) ws.ok({ type: "close_task", taskId: props.taskId, choice: props.how, confirmed: true, now: ws.store.clock() }, props.onClose); };
+  const confirm = async () => {
+    const id = props.taskId;
+    if (reason() || closing() || !id) return;
+    const task = m()!.view.task, choice = props.how;
+    setClosing(true);
+    setRefused(null);
+    try {
+      const receipt = await ws.store.dispatch({
+        type: "close_task", taskId: id, choice, confirmed: true, now: ws.store.clock(),
+        ...(bound() ? { executionId: task.executionId!, expectedVersion: task.sourceVersion! } : {}),
+      }, { quiet: true });
+      if (props.taskId !== id) return;
+      if (receipt.ok) props.onClose();
+      else setRefused(receipt.message);
+    } finally { setClosing(false); }
+  };
   return <Modal open={!!props.taskId} onClose={props.onClose} label="Done outside the app">
     <div class="dlg-h"><h2>Done outside the app</h2><button data-tooltip="" class="ib" aria-label="Keep working" onClick={props.onClose}><I n="x" /></button></div>
     <div class="dlg-b"><p>{props.how === "already_in_target" ? `Already in ${m()?.view.task.integrationFacts?.targetBranch ?? "the target branch"}. ` : ""}Close this task as completed outside the app?</p>
-      <p>No acceptance, merge or passing checks will be recorded. Your files and existing check evidence stay unchanged. Finished dependencies can continue in the sprint queue.</p>
+      <p>{bound() ? "Your files, Git history and existing check evidence stay unchanged. The task is marked as done outside the app, and the sprint queue stays paused." : "No acceptance, merge or passing checks will be recorded. Your files and existing check evidence stay unchanged. Finished dependencies can continue in the sprint queue."}</p>
+      <Show when={bound() && waiting() && !refused()}>
+        <p role="status">{`Waiting for confirmed exit of ${m()!.view.task.issue}. Check again after it stops.`}</p>
+      </Show>
+      <Show when={refused()}><p role="status">{refused()}</p></Show>
     </div>
     <RequestStatus text={props.taskId && ws.store.pendingTask("close_task", props.taskId) ? REQUESTING.close_task : undefined} />
     <ActionBar place="dialog"><button class="btn btn-line btn-lg" onClick={props.onClose}>Keep working</button>
-      <button class="btn btn-primary btn-lg" aria-disabled={reason() ? "true" : undefined} data-why={reason() ?? undefined} {...ws.needs("close_task")} onClick={confirm}>Close task</button>
+      <button class="btn btn-primary btn-lg" aria-disabled={reason() || closing() ? "true" : undefined} data-why={reason() ?? undefined} {...ws.needs("close_task")} onClick={confirm}>{bound() && (waiting() || refused()) ? "Check stop and close" : "Close task"}</button>
     </ActionBar>
   </Modal>;
 }

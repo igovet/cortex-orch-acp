@@ -82,6 +82,7 @@ export function createSends(state: Accessor<WorkspaceState>, dispatch: (command:
   /** Records that already answered a send, by place: a later send of the same words never takes them. */
   const claimed = new Map<string, Set<string>>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const drafts = new WeakMap<WorkspaceCommand, { park: () => void; confirm: () => void }>();
   let again: { command: WorkspaceCommand; key: string } | null = null;
   const [returned, setReturned] = createSignal<{ place: string; text: string; attachments?: AttachmentInput[] } | null>(null);
   onCleanup(() => { for (const t of timers.values()) clearTimeout(t); timers.clear(); });
@@ -117,12 +118,15 @@ export function createSends(state: Accessor<WorkspaceState>, dispatch: (command:
   // How many times the owner sent or answered from this window, by place: a feed that sees it grow brings its end into view.
   const [presses, setPresses] = createSignal<ReadonlyMap<string, number>>(new Map());
   return {
+    /** A retry sends the same command and therefore settles only its captured draft version. */
+    trackDraft(command: WorkspaceCommand, draft: { park: () => void; confirm: () => void }) { drafts.set(command, draft); },
     /** Records a send as it is pressed. Nothing is recorded for a command that is not a message, except that an answer counts
      *  as pressed in the conversation it answers. */
     begin(requestId: string, command: WorkspaceCommand) {
       const place = placeOf(command), at = place ?? answerPlace(command);
       if (at) { const k = placeKey(at); setPresses(m => new Map(m).set(k, (m.get(k) ?? 0) + 1)); }
       if (!place) return;
+      drafts.get(command)?.park();
       const text = "text" in command ? command.text : "", attachments = "attachments" in command ? command.attachments : undefined;
       const known = candidates(place, state()).map(c => c.id);
       // The last line the runtime recorded (the window's own lines come and go with the facts).
@@ -139,6 +143,8 @@ export function createSends(state: Accessor<WorkspaceState>, dispatch: (command:
       const entry = entries().find(e => e.requestId === requestId);
       if (!entry) return;
       if (!receipt.ok) { update(entry.key, { state: "failed", reason: receipt.message || "The message was not sent." }); return; }
+      drafts.get(entry.command)?.confirm();
+      drafts.delete(entry.command);
       update(entry.key, { state: "sent" });
       const key = entry.key;
       timers.set(key, setTimeout(() => { timers.delete(key); setEntries(list => list.filter(e => e.key !== key)); }, SENT_HOLD_MS));

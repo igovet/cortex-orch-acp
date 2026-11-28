@@ -2,6 +2,7 @@
 //! `check-install` runs on the host; its container and user-session halves are the same binary.
 
 use super::seed_large::rpc;
+use super::channel::Channel;
 use super::util::*;
 use super::Cli;
 use crate::json::{Res, Value};
@@ -18,6 +19,14 @@ fn outcome(step: &str, status: &str, details: Vec<(&str, Value)>) {
 fn packages_dir(cli: &Cli) -> Res<PathBuf> {
     cli.path("artifacts")
         .ok_or_else(|| "--artifacts is required".to_string())
+}
+
+fn package_channel(package: &str) -> Res<Channel> {
+    match package {
+        "cortex-workspace" => Channel::new("release"),
+        "cortex-workspace-dev" => Channel::new("dev"),
+        _ => Err("unsupported installed package".into()),
+    }
 }
 
 /// Host: only archives and this reviewed tool enter the container. No checkout, user home,
@@ -114,6 +123,7 @@ fn stop(child: &mut Child) {
 /// service, a project registers and activates, and the sandbox helper is probed.
 pub fn session(package: &str) -> Res<()> {
     let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME unset")?);
+    let channel = package_channel(package)?;
     let runtime = Path::new("/usr/lib").join(package).join("runtime");
     // Real first-run discovery: the product's own startup pass registers connections only for an
     // existing native login marker. The markers are synthetic and owned by this disposable user.
@@ -239,14 +249,10 @@ pub fn session(package: &str) -> Res<()> {
             matches!(status.get("ready"), Some(Value::Bool(true))),
             "project did not become ready",
         )?;
-        let store = if package.ends_with("-dev") {
-            ".cortex-dev"
-        } else {
-            ".cortex"
-        };
+        let store = channel.store_db(&home, &project)?;
         require(
-            project.join(store).join("cortex.sqlite3").is_file(),
-            "project store missing",
+            super::native::count(&store, "SELECT count(*) FROM tasks")? == 0,
+            "clean install fixture unexpectedly contains tasks",
         )?;
         let found = super::discovery::recheck_without_real_login(&socket_path, &config, package)?;
         outcome(
@@ -295,6 +301,7 @@ pub fn session(package: &str) -> Res<()> {
 
 /// Root in the plain container: clean install, removal, legacy shape and upgrade rehearsal.
 pub fn container(package: &str) -> Res<()> {
+    let channel = package_channel(package)?;
     let archive = std::fs::read_dir("/archives")
         .map_err(|e| e.to_string())?
         .flatten()
@@ -344,6 +351,7 @@ pub fn container(package: &str) -> Res<()> {
         "--no-install-recommends",
         &archive_text,
         "xvfb",
+        "sqlite3",
     ])?;
     outcome("clean_install_with_dependencies", "passed", vec![]);
     require(
@@ -359,6 +367,7 @@ pub fn container(package: &str) -> Res<()> {
     run_ok(&["chown", "smoke:smoke", &runtime])?;
     let env = [
         format!("HOME={home}"),
+        format!("XDG_STATE_HOME={home}/.local/state"),
         format!("XDG_RUNTIME_DIR={runtime}"),
         "PATH=/usr/local/bin:/usr/bin:/bin".to_string(),
     ];
@@ -379,18 +388,15 @@ pub fn container(package: &str) -> Res<()> {
             .arg("/smoke/cortex-xtask")
             .args(["check-install-session", package]);
         crate::proc::run(&mut cmd, Duration::from_secs(600))?;
-        let store = Path::new(home)
-            .join("project")
-            .join(if package.ends_with("-dev") {
-                ".cortex-dev"
-            } else {
-                ".cortex"
-            })
-            .join("cortex.sqlite3");
-        let before = std::fs::read(&store).map_err(|e| e.to_string())?;
+        let home = Path::new(home);
+        let project = home.join("project");
+        let anchor = channel.store_anchor(&project);
+        let store = channel.store_db(home, &project)?;
+        let before = (sha_file(&anchor)?, sha_file(&store)?);
         long(&["apt-get", "remove", "-y", package])?;
         require(
-            std::fs::read(&store).map_err(|e| e.to_string())? == before,
+            channel.store_db(home, &project)? == store
+                && (sha_file(&anchor)?, sha_file(&store)?) == before,
             "removal changed the user store",
         )?;
         require(
@@ -421,7 +427,8 @@ pub fn container(package: &str) -> Res<()> {
             "bundled runtime missing after upgrade",
         )?;
         require(
-            std::fs::read(&store).map_err(|e| e.to_string())? == before,
+            channel.store_db(home, &project)? == store
+                && (sha_file(&anchor)?, sha_file(&store)?) == before,
             "upgrade changed the user store",
         )?;
         outcome("upgrade_to_bundled_shape", "passed", vec![]);

@@ -1,3 +1,4 @@
+import { refOf } from "./attachment-reference";
 // @vitest-environment jsdom
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
@@ -13,7 +14,7 @@ import { createRealPort } from "../src/port/real";
 import { sessionModel } from "../src/session-model";
 import { createSettingsState } from "../src/settings-state";
 import { createWorkspaceStore } from "../src/store";
-import { capabilitiesWire, draftTask, flush, refOf, scriptedPort, scriptedTransport, snapshot, stoppedMerge, wireDecision, wireTask } from "./support";
+import { capabilitiesWire, draftTask, flush, scriptedPort, scriptedTransport, snapshot, stoppedMerge, wireDecision, wireTask } from "./support";
 
 const OFFERED = ["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "results.get", "executions.get", "history.page"];
 const png = { name: "clip.png", mimeType: "image/png", data: btoa("fixture png") };

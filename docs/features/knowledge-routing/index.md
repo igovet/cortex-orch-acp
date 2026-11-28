@@ -69,3 +69,26 @@ Repository instructions in `AGENTS.md`, the current `docs/project/` and `docs/fe
 `SECURITY.md` are authoritative for this product. The knowledge-harvest skill
 governs only the harvest workflow. Historical plugin-era census and
 host-qualification procedures are not part of the route.
+
+## Source-backed fact memory
+
+The runtime derives fact memory from its own project-file read and write
+receipts when an execution result is recorded. A fact carries the source
+report, plan revision, assignment and attempt identities, operation, project-relative source
+path and SHA-256. A failed result also retains its structured blocker category
+or a check failure with its observed or unverified status. When a failed check
+binds to one complete command event from the attempt, the fact also carries
+that event's identity, its exit code and a fixed label for recognized command
+families and actions. The command result describes the historical attempt.
+Report bodies, excerpts, blocker prose, command arguments and output, and file
+contents stay outside this memory.
+
+The execution brief can include a versioned selection under `fact_memory`.
+The selection prefers relevant facts from the current task and can include
+matching project history. The strategy checks the assignment's effective
+scope and the file's current SHA-256 in the receiving checkout. A changed,
+missing, unreadable or unsupported source makes its fact stale for that
+checkout and keeps it out of the brief. Another linked checkout can still
+match the original digest. The section uses at most 2,048 serialized bytes and
+includes a digest of its selected facts. These facts are historical evidence
+and carry no access, verification or acceptance authority.

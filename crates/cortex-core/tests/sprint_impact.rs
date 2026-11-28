@@ -107,7 +107,9 @@ fn revise(s: &Store, key: &str, trigger: i64) -> serde_json::Value {
         changes: json!([{"op":"update","member_id":"d1","expected_version":"1","description":"New"}]),
         affected: vec!["d1".into()],
         cancel: vec![],
+        started_affected: vec![],
         context: json!([]),
+        review_projection: json!([]),
     };
     let args = json!({"request_key":key,"trigger":trigger,"verdict":"revise","reason":"Changed"});
     s.write(|db| sprint_impact::submit_tx(db, "t", "c", key, &args, Some(checked))).unwrap()

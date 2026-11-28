@@ -37,6 +37,43 @@ const live = { status: "working", process: "live", executionId: "e" } as Partial
 const typeMessage = (text: string) => { const el = $<HTMLTextAreaElement>('.dock [aria-label="Message"]')!; el.value = text; el.dispatchEvent(new Event("input", { bubbles: true })); return el; };
 const sent = (p: ReturnType<typeof scriptedPort>) => p.commands.map(c => c.payload as WorkspaceCommand).filter(c => c.type === "send_message") as Extract<WorkspaceCommand, { type: "send_message" }>[];
 
+it("uses the header Answer as a shortcut to the only active form", async () => {
+  const p = await mount(world(live, [question()]));
+  const answer = named("Answer")!;
+  const option = $(".conversation-actions button[role=radio]");
+  expect(option).not.toBeNull();
+  answer.focus();
+  answer.click();
+  await settle();
+  expect(document.activeElement).toBe(option);
+  expect($("dialog[open]")).toBeNull();
+  expect(all("#decision-d1")).toHaveLength(1);
+  expect(p.commands).toHaveLength(0);
+});
+
+it("keeps one active decision after late messages and returns settled answers to their history", async () => {
+  const state = world(live, [question()]);
+  const p = await mount(state);
+  const actions = $(".conversation-actions")!;
+  const field = actions.querySelector<HTMLTextAreaElement>('[aria-label="Your answer"]')!;
+  field.value = "Keep the selected answer draft";
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  const session = { ...state.sessions[0], timeline: [...state.sessions[0].timeline, { id: "late", kind: "cortex" as const, text: "Later coordinator message" }] };
+  p.emit(projection("2", { ...state, sessions: [session] })); await settle();
+  const latest = all(".timeline .ai").find(row => row.textContent?.includes("Later coordinator message"))!;
+  expect(latest.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(all("#decision-d1")).toEqual([actions.querySelector("#decision-d1")]);
+  expect(actions.querySelector('[aria-label="Your answer"]')).toBe(field);
+  expect(field.value).toBe("Keep the selected answer draft");
+
+  const answered = question({ answer: { text: "Recorded answer", at: 25 } });
+  p.emit(projection("3", { ...state, sessions: [{ ...session, decisions: [answered] }] })); await settle();
+  const historical = $(".timeline .qa")!;
+  expect(historical.textContent).toContain("Recorded answer");
+  expect(historical.compareDocumentPosition(latest) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(actions.querySelector("#decision-d1")).toBeNull();
+});
+
 it("keeps an earlier result as read-only history while a question waits, and offers no Accept beside it", async () => {
   await mount(world({ ...live, result, workspaceDigest: "d" }, [question()]));
   expect($(".timeline .dc")?.textContent).toContain("Which concurrency level?");

@@ -365,6 +365,8 @@ pub fn snapshot(root: &Path, destination: &Path) -> Res<()> {
         "Cargo.toml",
         "Cargo.lock",
         "rust-toolchain.toml",
+        // The no-paid acceptance peer and workspace tests share this Rust fixture.
+        "tests/fixtures/plan-choice-defaults.rs",
         "packaging/voice/package.json",
         "packaging/voice/package-lock.json",
         "packaging/voice/voice.cjs",

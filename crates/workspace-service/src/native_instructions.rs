@@ -25,7 +25,10 @@ struct Profile {
 struct Bundle {
     version: u32,
     profiles: BTreeMap<String, Profile>,
+    #[serde(rename = "legacySkills", default)]
+    legacy_skills: BTreeMap<String, Vec<String>>,
     skills: BTreeMap<String, String>,
+    competencies: BTreeMap<String, String>,
 }
 fn bundle() -> &'static Bundle {
     static DATA: OnceLock<Bundle> = OnceLock::new();
@@ -37,10 +40,22 @@ fn bundle() -> &'static Bundle {
     })
 }
 fn profile(name: &str) -> CoreResult<&'static Profile> {
+    let canonical = cortex_core::lifecycle::plan::legacy_profile(name)
+        .map_or(name, |(profile, _)| profile);
     bundle()
         .profiles
-        .get(name)
+        .get(canonical)
         .ok_or(CoreError::Refused("native_profile_unavailable"))
+}
+fn profile_skills(name: &str) -> CoreResult<&'static [String]> {
+    if let Some(skills) = bundle().legacy_skills.get(name) {
+        return Ok(skills);
+    }
+    Ok(&profile(name)?.skills)
+}
+
+pub(crate) fn is_profile(name: &str) -> bool {
+    profile(name).is_ok()
 }
 /// One capability filter shared by the gateway and instruction renderer.
 pub(crate) fn supports(stage: Option<&str>, name: &str) -> bool {
@@ -86,7 +101,7 @@ pub(crate) fn read_skill(name: &str, skill: &str) -> CoreResult<&'static str> {
             .filter(|s| !s.trim().is_empty())
             .ok_or(CoreError::Refused("native_skill_unavailable"));
     }
-    if !p.skills.iter().any(|id| id == skill) {
+    if !profile_skills(name)?.iter().any(|id| id == skill) {
         return Err(CoreError::Refused("native_skill_unavailable"));
     }
     bundle()
@@ -99,11 +114,12 @@ pub(crate) fn read_skill(name: &str, skill: &str) -> CoreResult<&'static str> {
 /// Whether `skill` is a Cortex shared/reference id or a profile id of any role.
 pub(crate) fn is_bundled(skill: &str) -> bool {
     bundle().skills.contains_key(skill) || bundle().profiles.contains_key(skill)
+        || cortex_core::lifecycle::plan::legacy_profile(skill).is_some()
 }
 /// Cortex skill ids readable by this profile, for precise refusals.
 pub(crate) fn skill_ids(name: &str) -> Vec<&'static str> {
-    profile(name)
-        .map(|p| p.skills.iter().map(String::as_str).collect())
+    profile_skills(name)
+        .map(|skills| skills.iter().map(String::as_str).collect())
         .unwrap_or_default()
 }
 /// Opening rule of a Claude execution or review worker prompt. Instruction only:
@@ -131,6 +147,23 @@ pub(crate) fn append(text: &mut String, part: &str) {
         .strip_suffix(TOOL_CALLS_ONLY_AGAIN)
         .map_or(text.len(), str::len);
     text.insert_str(end, part);
+}
+
+pub(crate) fn append_competencies(text: &mut String, ids: &[String]) -> CoreResult<Vec<Value>> {
+    let mut assembled = Vec::with_capacity(ids.len());
+    for id in ids {
+        let body = bundle()
+            .competencies
+            .get(id)
+            .ok_or(CoreError::Refused("native_competency_unavailable"))?;
+        let section = format!("\n\n## Competency: {id}\n\n{body}\n");
+        let source = crate::native_project::digest(body.as_bytes());
+        assembled.push(serde_json::json!({"id":id,"version":format!("sha256:{source}"),
+            "source_sha256":source,"source_bytes":body.len(),
+            "section_sha256":crate::native_project::digest(section.as_bytes()),"section_bytes":section.len()}));
+        append(text, &section);
+    }
+    Ok(assembled)
 }
 /// The role/stage comes from Core's authenticated channel, not an engine request.
 /// Only the tools actually served on that channel appear in the Codex supplement.
@@ -299,7 +332,7 @@ mod tests {
     }
     #[test]
     fn every_profile_and_required_skill_is_embedded_and_scoped() {
-        assert_eq!(bundle().profiles.len(), 24); // 22 specialists, consultant, coordinator
+        assert_eq!(bundle().profiles.len(), 6); // five worker bases plus coordinator
         for (name, p) in &bundle().profiles {
             let text = compose(name, Some("execution"), EngineKind::Codex).unwrap();
             assert!(text.starts_with(p.body.trim()));
@@ -314,6 +347,19 @@ mod tests {
         assert!(read_skill("worker-ux-designer", "design-colors").is_ok());
         assert!(read_skill("worker-senior-consultant", "tool-discipline-worker").is_err());
         assert!(read_skill("worker-explorer", "skill-authoring").is_err());
+    }
+
+    #[test]
+    fn competency_sources_match_plan_validation_and_preserve_the_closing_directive() {
+        let ids = cortex_core::lifecycle::plan::COMPETENCIES;
+        assert_eq!(bundle().competencies.keys().map(String::as_str).collect::<Vec<_>>(), ids);
+        let mut text = compose("worker-explorer", Some("execution"), EngineKind::Claude).unwrap();
+        append_competencies(&mut text, &["database".to_owned()]).unwrap();
+        assert!(text.contains("## Competency: database"));
+        assert!(text.contains("lock duration and query plans"));
+        assert!(!text.contains("## Competency: security"));
+        assert!(text.ends_with(TOOL_CALLS_ONLY_AGAIN));
+        assert!(append_competencies(&mut text, &["unknown".to_owned()]).is_err());
     }
     #[test]
     fn owner_language_reminder_is_only_in_coordinator_instructions() {

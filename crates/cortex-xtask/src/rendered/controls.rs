@@ -144,8 +144,8 @@ impl J {
         Ok(())
     }
 
-    fn worker_running(&self, project: &Path) -> Res<bool> {
-        Ok(self.store_count(project, "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')")? == 1)
+    pub(super) fn worker_running(&self, project: &Path) -> Res<bool> {
+        Ok(self.store_count(project, native::GENERAL_WORKER_READY_QUERY)? == 1)
     }
 
     pub fn worker_controls(&mut self, project: &Path) -> Res<String> {
@@ -155,7 +155,7 @@ impl J {
         let command_url =
             self.start_task(project, "Exercise worker controls", "command-scratch-hold")?;
         let workspace_task = scratch_control_task(&command_url)?;
-        let db = self.channel.store_db(project);
+        let db = self.channel.store_db(&self.home, project)?;
         self.step("scratch_control_task_opened", vec![("task", s(workspace_task))]);
         let mut task = String::new();
         let ready = self.wait("scratch_payload_ready", 90, |_| {
@@ -260,16 +260,16 @@ impl J {
         })?;
         self.open_worker(&guidance_url, "Working")?;
         let composer_at = std::time::Instant::now();
-        self.wait_js("live_worker_composer", 20, "const f = document.querySelector('[aria-label=\"Message backend-dev\"]'); return f && !f.disabled ? 'yes' : ''")?;
+        self.wait_js("live_worker_composer", 20, "const f = document.querySelector('[aria-label=\"Message general\"]'); return f && !f.disabled ? 'yes' : ''")?;
         self.step(
             "live_worker_composer",
             vec![("waited_ms", n(composer_at.elapsed().as_millis() as i64))],
         );
         self.fill(
-            "Message backend-dev",
+            "Message general",
             "Keep the worker message verbatim\nsecond line",
         )?;
-        self.click("Send to backend-dev")?;
+        self.click("Send to general")?;
         // The page says the guidance was recorded; the runtime queues it for that exact attempt.
         self.wait("worker_guidance_recorded", 60, |j| {
             Ok(j.store_count(
@@ -329,7 +329,7 @@ impl J {
             let stops = self.store_count(project, "SELECT count(*) FROM runtime_events WHERE type IN ('LIVE_ASSIGNMENTS_CANCELLED','NATIVE_OWNER_CONTROL')")?;
             // Retained diagnostics: what the page offered and what the store holds for this task.
             let page = self.js("const d = document.querySelector('dialog[open]'); const b = d && [...d.querySelectorAll('button')].map(b => ({t: b.textContent.trim().slice(0, 40), l: b.getAttribute('aria-label'), dis: b.getAttribute('aria-disabled'), why: b.getAttribute('data-why')})); return JSON.stringify({path: location.pathname, buttons: b, receipt: document.querySelector('.ws-receipt')?.textContent?.trim().slice(0, 200) ?? null, focus: document.activeElement?.textContent?.trim().slice(0, 40) ?? null});")?;
-            let db = self.channel.store_db(project);
+            let db = self.channel.store_db(&self.home, project)?;
             let store = crate::installed::native::query(&db, "SELECT group_concat(x, ' ; ') FROM (SELECT type||':'||substr(payload_json,1,80) AS x FROM runtime_events WHERE task_id=(SELECT task_id FROM runtime_tasks ORDER BY rowid DESC LIMIT 1) ORDER BY id DESC LIMIT 12)").unwrap_or_else(|e| e);
             let nodes = crate::installed::native::query(&db, "SELECT group_concat(n.node_id||'/'||n.status||'/'||coalesce(p.status,'-')||'/'||n.assignment_ref, ' ; ') FROM runtime_nodes n LEFT JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref WHERE n.task_id=(SELECT task_id FROM runtime_tasks ORDER BY rowid DESC LIMIT 1)").unwrap_or_else(|e| e);
             let requests = crate::installed::native::query(&db, "SELECT group_concat(operation, ' ; ') FROM (SELECT operation FROM runtime_requests ORDER BY rowid DESC LIMIT 6)").unwrap_or_else(|e| e);

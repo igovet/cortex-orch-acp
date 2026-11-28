@@ -2,18 +2,20 @@ import type { Decision as WireDecision, ProjectSnapshot, Task as WireTask } from
 import { LIMITS, PROTOCOL, SCHEMA_FINGERPRINT } from "@cortex/workspace-contract";
 import { applyProjection, emptyWorkspace, type CommandEnvelope, type CommandReceipt, type PortCapabilities, type PortUpdate, type ProjectionUpdate, type QueryOperation, type QueryParameters, type QueryResults, type Task, type WorkspacePort, type WorkspaceState } from "@cortex/workspace-domain";
 import type { RealTransport, TransportEvent } from "../src/port/real";
-import { createHash } from "node:crypto";
-
-/** The reference the machine answers for an uploaded file: what every later command carries instead of its bytes. */
-export function refOf(file: { name: string; mimeType: string; data: string }) {
-  const bytes = Buffer.from(file.data, "base64");
-  return { name: file.name, mimeType: file.mimeType, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
-}
 /** The machine's private attachment files, faked: upload stores bodies by digest, read answers one. */
-function attachmentCall(bodies: Map<string, string>, params: { action?: string; files?: { name: string; mimeType: string; data: string }[]; sha256?: string } = {}) {
-  if (params.action === "upload") return { ok: true, result: (params.files ?? []).map(f => { const ref = refOf(f); bodies.set(ref.sha256, f.data); return ref; }) };
+async function attachmentCall(bodies: Map<string, string>, params: { action?: string; files?: { name: string; mimeType: string; data: string }[]; sha256?: string } = {}) {
+  if (params.action === "upload") {
+    const result = await Promise.all((params.files ?? []).map(async file => {
+      const bytes = Uint8Array.from(atob(file.data), char => char.charCodeAt(0));
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+      bodies.set(sha256, file.data);
+      return { name: file.name, mimeType: file.mimeType, size: bytes.length, sha256 };
+    }));
+    return { ok: true, result };
+  }
   const data = bodies.get(params.sha256 ?? "");
-  return data === undefined ? { ok: false, code: "attachment_unavailable", message: "This attachment is no longer saved here." } : { ok: true, result: { sha256: params.sha256, size: Buffer.from(data, "base64").length, data } };
+  return data === undefined ? { ok: false, code: "attachment_unavailable", message: "This attachment is no longer saved here." } : { ok: true, result: { sha256: params.sha256, size: atob(data).length, data } };
 }
 
 /** A port driven by hand, so a test decides exactly when a receipt or a projection arrives. */

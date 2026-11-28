@@ -1,9 +1,11 @@
 import { createMemo, For, Match, Show, Switch } from "solid-js";
+import { CopyObjectId, type ObjectId } from "./object-id";
 import { LiveTerminal } from "./terminal";
 import { FEATURES, queueDrivenMode, type Sprint } from "@cortex/workspace-domain";
 import { ArchiveFacts, DeleteArchive } from "./archive";
-import { taskContextMenu, TaskMenuButton } from "./task-menu-trigger";
+import { rowContextMenu, taskContextMenu, TaskMenuButton } from "./task-menu-trigger";
 import { useWs, type PhoneFrame, type WindowChrome } from "./ctx";
+import type { CopyKey } from "./copy";
 import { machineLine, machineRefusal } from "./phone-words";
 import { Confirmed } from "./freshness";
 import { CodePanel } from "./code";
@@ -13,7 +15,7 @@ import { revealCutIn, Strip, Whole } from "./layout";
 import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN } from "./prefs";
 import { APP_SECTIONS, MACHINE_SECTIONS, ORCHESTRATION_LABELS, ORCHESTRATION_SECTIONS, orchestrationSection, type OrchestrationSection, type Route, type SettingsSection } from "./router";
 import { defaultCheckout, repoOf, unavailableCheckout } from "./review-model";
-import { asOf, awaitsOwner, humanStatus, checkCounts, clock, dayClock, engineLimits, limitsText, newestObserved, homeView, inboxItems, planningNeedsOwner, projectsOn, rowIcon, sameBranch, sideRows, sideWord, sprintModeLabel, sprintRoute, sprintView, topWorkRows, type EngineLimit, type LimitWindow, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
+import { asOf, awaitsOwner, humanStatus, checkCounts, clock, dayClock, engineLimits, limitsText, newestObserved, homeView, inboxItems, planningNeedsOwner, projectsOn, rowIcon, sameBranch, sideRows, sideWord, sprintModeLabel, sprintRoute, sprintTitle, sprintView, activeProject, type EngineLimit, type LimitWindow, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
 import { workerState } from "./session-model";
 import { same } from "./stable";
 import { SprintActions, SprintCrumb } from "./sprint";
@@ -39,7 +41,20 @@ function useRouteContext() {
     return id ? ws.store.index().summaries.get(id) ?? null : null;
   });
   const sprint = createMemo(() => { const r = ws.router.route(); return r.name === "sprint" ? ws.store.state().sprints.find(s => s.id === r.sprint) ?? null : null; });
-  return { view, summary, sprint };
+  const object = createMemo<ObjectId | null>(() => {
+    const r = ws.router.route();
+    if (r.name === "task" && view()?.machine.id === r.machine) return { kind: "task", id: view()!.task.id };
+    if ((r.name !== "project" && r.name !== "sprint") || summary()?.machine.id !== r.machine) return null;
+    if (r.name === "project") {
+      if (r.scope.kind !== "sprint") return { kind: "project", id: summary()!.project.id };
+      const id = r.scope.id;
+      const scoped = ws.store.state().sprints.find(s => s.id === id && s.projectId === r.project);
+      return scoped ? { kind: "sprint", id: scoped.id } : null;
+    }
+    if (r.name === "sprint" && sprint()?.projectId === r.project) return { kind: "sprint", id: sprint()!.id };
+    return null;
+  }, null, { equals: (a, b) => a?.kind === b?.kind && a?.id === b?.id });
+  return { view, summary, sprint, object };
 }
 
 export const Tile = (props: { name: string; n: number }) => <span class={`mono-tile ${tile(props.name, props.n).cls}`}>{tile(props.name, props.n).letter}</span>;
@@ -129,6 +144,7 @@ export function TitleBar() {
           </>}</Match>
         </Switch>
       </div>
+      <Show when={ctx.object()} keyed>{object => <CopyObjectId object={object} />}</Show>
       <Show when={ctx.view()}>{v => <BranchChip view={v()} />}</Show>
       <Show when={route().name === "home"}><Facts /></Show>
       <Show when={route().name === "archive"}><ArchiveFacts /></Show>
@@ -160,12 +176,12 @@ export function TitleBar() {
   </header>;
 }
 
-function ProjectRow(props: { summary: ProjectSummary; n: number; openByDefault: boolean }) {
+function ProjectRow(props: { summary: ProjectSummary; n: number; openByDefault: boolean; active?: boolean; total: number }) {
   const ws = useWs();
   const id = () => props.summary.project.id;
   const route = () => ws.router.route();
   const current = () => { const r = route(); return r.name === "project" && r.machine === props.summary.machine.id && r.project === id() && r.scope.kind !== "sprint"; };
-  const rows = () => sideRows(ws.store.index(), props.summary, ws.unseen?.keep);
+  const rows = () => sideRows(ws.store.index(), props.summary, props.active ? undefined : ws.unseen?.keep, props.active ? Infinity : 5);
   const hasLive = () => rows().length > 0;
   // Never tied to the route: opening a project must not push the rows below it, or they would move under the pointer.
   const open = () => ws.panels.expanded()[id()] ?? props.openByDefault;
@@ -192,8 +208,8 @@ function ProjectRow(props: { summary: ProjectSummary; n: number; openByDefault: 
     </div>
     <Show when={open() && hasLive()}>
       <div class="tasks">
-        <SideRows rows={rows()} machine={props.summary.machine.id} />
-        <Show when={props.summary.views.length > 0}><A class="task-row all" to={project(props.summary.machine.id, id())}>All {props.summary.views.length}</A></Show>
+        <SideRows rows={rows()} machine={props.summary.machine.id} active={props.active} />
+        <Show when={props.summary.views.length > 0}><A class="task-row all" to={project(props.summary.machine.id, id())}>All {props.total}</A></Show>
       </div>
     </Show>
   </>;
@@ -204,29 +220,23 @@ function NewMark(props: { text: string }) {
   return <><span class="sb-new" aria-hidden="true"></span><span class="ws-sr">, {props.text}</span></>;
 }
 
-function SideRows(props: { rows: (SideRow & { projectName?: string })[]; machine: string }) {
+function SideRows(props: { rows: SideRow[]; machine: string; active?: boolean }) {
   const ws = useWs();
   const listed = createMemo(() => new Set(props.rows.flatMap(r => r.kind === "task" ? [r.view.id] : [])));
   // A sprint row also speaks for its tasks whose own rows are not in this list.
   const members = (sprint: Sprint) => {
     const unseen = ws.unseen;
-    return !!unseen && sprint.taskIds.some(id => { const v = ws.store.index().byId.get(id); return !!v && !listed().has(id) && unseen.task(v); });
+    return !!unseen && sprint.taskIds.some(id => { const v = ws.store.index().byId.get(id); return !!v && !listed().has(id) && unseen.member(v, sprint); });
   };
   return <Keyed each={props.rows} by={r => r.kind === "task" ? `t:${r.view.id}` : `s:${r.sprint.id}`}>{row => {
     const task = () => row() as Extract<SideRow, { kind: "task" }>;
     const sprint = () => row() as Extract<SideRow, { kind: "sprint" }>;
-    return row().kind === "task" ? <TaskRow view={task().view} nested={task().nested} needsYou={task().needsYou} projectName={row().projectName} />
-      : <SprintSideRow row={sprint()} machine={props.machine} projectName={row().projectName} members={members(sprint().sprint)} />;
+    return row().kind === "task" ? <TaskRow view={task().view} nested={task().nested} needsYou={props.active && !!task().view.liveDecision} />
+      : <SprintSideRow row={sprint()} machine={props.machine} members={members(sprint().sprint)} />;
   }}</Keyed>;
 }
 
-function SideTitle(props: { title: string; projectName?: string }) {
-  return <Show when={props.projectName} fallback={<span class="trunc" data-tooltip-cut="">{props.title}</span>}>{name =>
-    <span class="sb-row-title"><span class="trunc" data-tooltip-cut="">{props.title}</span><span class="trunc sb-row-project" data-tooltip-cut="">{name()}</span></span>
-  }</Show>;
-}
-
-function SprintSideRow(props: { row: Extract<SideRow, { kind: "sprint" }>; machine: string; projectName?: string; members?: boolean }) {
+function SprintSideRow(props: { row: Extract<SideRow, { kind: "sprint" }>; machine: string; members?: boolean }) {
   const ws = useWs();
   const sprint = () => props.row.sprint;
   const current = () => { const r = ws.router.route();
@@ -235,26 +245,51 @@ function SprintSideRow(props: { row: Extract<SideRow, { kind: "sprint" }>; machi
   };
   // The sprint owns its planning task's questions and permissions.
   const asks = () => planningNeedsOwner(ws.store.state(), sprint());
-  const word = () => sprint().deletion ? "Deleting" : sprint().planning === "created"
-    ? sprint().queueState === "complete" ? "Done" : `${props.row.started}/${props.row.total}` : asks() ? "Needs you" : sprint().planning === "ready" ? "Plan ready" : "Planning";
+  const showsProgress = () => !sprint().deletion && sprint().planning === "created";
+  const title = () => ws.t("sprintProgressTitle").replace("{title}", () => sprintTitle(sprint()));
+  const shownTitle = () => showsProgress() && ws.panels.sidebarWidth() === SIDEBAR_MIN ? sprintTitle(sprint()) : title();
+  const word = () => {
+    if (!showsProgress()) return sprint().deletion ? "Deleting" : asks() ? "Needs you" : sprint().planning === "ready" ? "Plan ready" : "Planning";
+    const { total, done, unavailable } = props.row.progress;
+    if (total > 0 && unavailable === total) return ws.t("sprintProgressUnavailable");
+    return ws.t(unavailable ? "sprintProgressPartial" : "sprintProgressDone").replace("{done}", String(done)).replace("{total}", String(total));
+  };
+  const breakdown = createMemo(() => {
+    if (!showsProgress()) return "";
+    const { total, working, waiting, notStarted, outside, unverifiedDone, closed, archived, unavailable } = props.row.progress;
+    const describe = (key: CopyKey, count: number) => ws.t(key).replace("{count}", String(count));
+    return [
+      ...(total > 0 && unavailable === total ? [] : [describe("sprintProgressWorking", working), describe("sprintProgressWaiting", waiting), describe("sprintProgressNotStarted", notStarted)]),
+      outside ? describe("sprintProgressOutside", outside) : "",
+      unverifiedDone ? describe("sprintProgressUnverifiedDone", unverifiedDone) : "",
+      closed ? describe("sprintProgressClosed", closed) : "",
+      archived ? describe("sprintProgressArchived", archived) : "",
+      unavailable ? describe("sprintProgressUnknown", unavailable) : "",
+    ].filter(Boolean).join(" · ");
+  });
   const own = () => ws.unseen?.sprint(sprint()) ?? false;
-  return <A class={`task-row${own() || props.members ? " unseen" : ""}`} to={sprintRoute(props.machine, sprint())} aria-current={current() ? "page" : undefined}>
-    <I n="layers" s={14} class="faint" /><SideTitle title={`Sprint: ${sprintView(ws.store.index(), sprint()).title}`} projectName={props.projectName} />
-    <span class={`sig tnum${sprint().deletion || asks() ? " st-warn" : ""}`}>{word()}</span>
+  const progressLabel = () => [word(), breakdown()].filter(Boolean).join(". ");
+  const label = () => [title(), progressLabel(), own() ? "new update" : props.members ? "new update in its tasks" : ""].filter(Boolean).join(" — ");
+  const tooltip = () => [sprintTitle(sprint()), progressLabel()].filter(Boolean).join(" — ");
+  return <div class="task-row-actions" {...rowContextMenu(sprint, ws.openSprintMenu)}><A class={`task-row${own() || props.members ? " unseen" : ""}`} to={sprintRoute(props.machine, sprint())} aria-current={current() ? "page" : undefined}
+    aria-label={label()} data-tooltip={showsProgress() ? tooltip() : undefined}>
+    <I n="layers" s={14} class="faint" /><span class="trunc" data-tooltip-cut={showsProgress() ? undefined : ""}>{shownTitle()}</span>
+    <span class={`sig tnum${showsProgress() ? " sb-sprint-progress" : ""}${sprint().deletion || asks() ? " st-warn" : ""}`}>{word()}</span>
     <Show when={own() || props.members}><NewMark text={own() ? "new update" : "new update in its tasks"} /></Show>
-  </A>;
+  </A><button type="button" class="ib" data-tooltip="Sprint actions" aria-label={`Actions for sprint ${sprintTitle(sprint())}`} aria-haspopup="menu"
+    onClick={e => ws.openSprintMenu(sprint(), e.currentTarget)}><I n="more" s={14} /></button></div>;
 }
 
-function TaskRow(props: { view: TaskView; nested?: boolean; needsYou?: boolean; projectName?: string }) {
+function TaskRow(props: { view: TaskView; nested?: boolean; needsYou?: boolean }) {
   const ws = useWs();
   const current = () => { const r = ws.router.route(); return r.name === "task" && r.machine === props.view.machine.id && r.task === props.view.id; };
   const word = () => props.needsYou ? "Needs you" : sideWord(props.view);
   const attention = () => props.needsYou || awaitsOwner(props.view);
   const icon = () => props.needsYou && props.view.liveDecision ? (props.view.liveDecision.kind === "permission" ? "shield" : "question") : rowIcon(props.view);
   const fresh = () => ws.unseen?.task(props.view) ?? false;
-  const label = () => [taskTitle(props.view.task), props.projectName, word(), fresh() ? "new update" : ""].filter(Boolean).join(" — ");
+  const label = () => [taskTitle(props.view.task), word(), fresh() ? "new update" : ""].filter(Boolean).join(" — ");
   return <div class="task-row-actions" {...taskContextMenu(() => props.view.id)}><A class={`task-row${props.nested ? " in-sprint" : ""}${fresh() ? " unseen" : ""}`} aria-label={label()} to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={current() ? "page" : undefined}>
-    <I n={icon()} s={14} class={attention() ? "st-warn" : props.view.fact.tone} /><SideTitle title={taskTitle(props.view.task)} projectName={props.projectName} /><span class={`sig${attention() ? " st-warn" : ""}`}>{word()}</span>
+    <I n={icon()} s={14} class={attention() ? "st-warn" : props.view.fact.tone} /><span class="trunc" data-tooltip-cut="">{taskTitle(props.view.task)}</span><span class={`sig${attention() ? " st-warn" : ""}`}>{word()}</span>
     <Show when={fresh()}><span class="sb-new" aria-hidden="true"></span></Show>
   </A><TaskMenuButton view={props.view} /></div>;
 }
@@ -326,8 +361,8 @@ function Sidebar() {
     return list;
   });
   const activeView = () => ws.panels.sidebarView() === "active";
-  const work = createMemo(() => activeView() ? topWorkRows(index(), m(), ws.unseen?.keep) : []);
-  const firstLive = createMemo(() => projects().find(s => sideRows(index(), s, ws.unseen?.keep).length > 0)?.project.id);
+  const shownProjects = createMemo(() => activeView() ? projects().flatMap(p => activeProject(p) ?? []) : projects());
+  const firstLive = createMemo(() => shownProjects().find(s => sideRows(index(), s, ws.unseen?.keep).length > 0)?.project.id);
   const pinned = createMemo(() => ws.panels.pins().flatMap(id => { const v = index().byId.get(id); return v && v.machine.id === m() ? [v] : []; }));
   const settled = createMemo(() => ws.store.mode !== "real" || unreachable(ws) || (ws.store.ready() && projectsOn(index(), m()).every(s => ws.store.projectSettled(s.project))));
   let dragging = false;
@@ -359,22 +394,14 @@ function Sidebar() {
           <button type="button" aria-pressed={!activeView()} onClick={() => ws.panels.setSidebarView("projects")}>Projects</button>
           <button type="button" aria-pressed={activeView()} onClick={() => ws.panels.setSidebarView("active")}>Active work</button>
         </div>
-        <Show when={!activeView()}><button data-tooltip="" class="ib" style={{ width: "22px", height: "22px" }} popovertarget="m-sort" aria-label="Sort projects"><I n="chevrons-v" s={14} /></button></Show>
+        <button data-tooltip="" class="ib" style={{ width: "22px", height: "22px" }} popovertarget="m-sort" aria-label="Sort projects"><I n="chevrons-v" s={14} /></button>
       </div>
-      <Show when={!activeView()} fallback={
-        <section class="sb-work" aria-label="Active work">
-          <Show when={work().length} fallback={<p class="cap faint ws-side-empty">No active work on this machine.</p>}>
-            <Keyed each={work()} by={group => group.id}>{group => <>
-              <h2 class="sb-work-group">{group().label}</h2>
-              <SideRows rows={group().rows} machine={m()} />
-            </>}</Keyed>
-          </Show>
-        </section>
-      }>
-        <Show when={projects().length > 0} fallback={<p class="cap faint ws-side-empty">{ws.store.ready() ? "No projects on this machine." : "Not loaded yet."}</p>}>
-          <Keyed each={projects()} by={s => s.project.id}>{(s, i) => <ProjectRow summary={s()} n={i()} openByDefault={s().project.id === firstLive()} />}</Keyed>
+      <section classList={{ "sb-work": activeView() }} aria-label={activeView() ? "Active work" : "Projects"}>
+        <Show when={shownProjects().length} fallback={<p class="cap faint ws-side-empty">{activeView() ? "No active work on this machine." : ws.store.ready() ? "No projects on this machine." : "Not loaded yet."}</p>}>
+          <Keyed each={shownProjects()} by={s => s.project.id}>{(s, i) => <ProjectRow summary={s()} n={i()} active={activeView()}
+            total={index().summaries.get(s().project.id)?.views.length ?? 0} openByDefault={s().project.id === firstLive()} />}</Keyed>
         </Show>
-      </Show>
+      </section>
       </Show>
     </div>
     <SidebarUsage />
@@ -509,7 +536,7 @@ function SprintPanel(props: { sprintId: string }) {
   </>}</Show>;
 }
 
-export function Inspector() {
+export function Inspector(props: { taskWorkspaceDock?: (element: HTMLElement) => void; taskWorkspaceVisible?: boolean } = {}) {
   const ws = useWs();
   const ctx = useRouteContext();
   const route = () => ws.router.route();
@@ -519,7 +546,7 @@ export function Inspector() {
   const repoArea = () => { const r = route(); return r.name === "project" && ["code", "git", "worktrees"].includes(r.view ?? "") && !!repoOf(ws.store.state(), r.project); };
   // A component: called with the task, the button was redrawn every time the task moved on.
   const Open = (p: { v: TaskView }) => <div class="ins-sec"><A class="btn btn-line ws-wide" to={{ name: "task", machine: p.v.machine.id, task: p.v.id }}>Open task<I n="arrow-right" s={14} /></A></div>;
-  return <aside ref={revealCutIn} class="inspector" aria-label="Inspector">
+  const Details = () =>
     <Switch fallback={<MachinePanel />}>
       <Match when={ctx.view() && route().name === "task"}><TaskInspector id={ctx.view()!.id} pick={(route() as { worker?: string }).worker ?? null} /></Match>
       <Match when={selected()}>{v => <><TaskPanel view={v()} heading="Selected task" /><Open v={v()} /></>}</Match>
@@ -537,7 +564,13 @@ export function Inspector() {
       <Match when={scopeSprint()}>{id => <SprintPanel sprintId={id()} />}</Match>
       <Match when={route().name === "project" && ctx.summary()}>{s => <ProjectPanel summary={s()} />}</Match>
       <Match when={route().name === "home" && firstNeed()}>{v => <><TaskPanel view={v()} heading="First decision" /><Open v={v()} /></>}</Match>
-    </Switch>
+    </Switch>;
+  return <aside ref={revealCutIn} class="inspector" aria-label="Inspector" data-task-workspace-dock={props.taskWorkspaceVisible ? "" : undefined}>
+    <div hidden={!props.taskWorkspaceVisible} ref={element => props.taskWorkspaceDock?.(element)} />
+    <Show when={props.taskWorkspaceVisible} fallback={<Details />}><details class="task-workspace__machine">
+      <summary>{ws.t("taskWorkspaceMachineDetails")}</summary>
+      <Details />
+    </details></Show>
   </aside>;
 }
 
@@ -664,6 +697,7 @@ export function PhoneBar(props: { title: string; openDrawer: () => void }) {
     </Show>
     <span class="ws-phonebar-t trunc">{props.title}</span>
     <div class="ws-phonebar-a">
+      <Show when={ctx.object()} keyed>{object => <CopyObjectId object={object} />}</Show>
       <Show when={ctx.view()} fallback={<>
         <Show when={["home", "inbox", "project"].includes(route().name) && !area()}><button class="btn btn-primary" onClick={() => ws.newItem("task")}><I n="plus" s={14} />New task</button></Show>
         <Show when={area() && ws.inspectable()}><button class="ib" aria-label="Details" aria-pressed={ws.panels.inspectorVisible()} onClick={() => ws.panels.toggleInspector()}><I n="panel-right" /></button></Show>

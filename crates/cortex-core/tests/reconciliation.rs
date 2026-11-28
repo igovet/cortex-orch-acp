@@ -713,7 +713,7 @@ fn any_replacement_of_a_failed_check_needs_the_owner_to_complete() {
     }
 }
 #[test]
-fn replanning_budget_scope_policy_and_escalation_injection() {
+fn replan_scope_policy_and_explicit_escalation_injection() {
     let (_p, s, o, e) = setup();
     verify(&s, &o, &e, "pass", 0);
     let plan = json!({"tasks":[{"id":"next","role":"backend-dev","objective":"Continue","dependencies":[],"scope":["src"]}],"verification":[["cargo","test"]]});
@@ -723,7 +723,7 @@ fn replanning_budget_scope_policy_and_escalation_injection() {
         } else {
             "replan_request"
         };
-        let proposal = json!({"reason":"Need independent diagnosis","report_ids":["r_missing"],"request_key":format!("r{n}")});
+        let proposal = json!({"reason":"Existing results do not explain the failure","question":"Which alternative should the plan take?","report_ids":["r_missing"],"request_key":format!("r{n}")});
         s.write(|db| {
             let receipt =
                 propose_replan_tx(db, "t", "coordinator", &format!("r{n}"), op, &proposal)?;
@@ -758,7 +758,7 @@ fn replanning_budget_scope_policy_and_escalation_injection() {
         })
         .unwrap();
     }
-    // No replan limit: the fourth request changes approach to a senior consultation.
+    // A scope request remains a scope request after several plans.
     assert_eq!(
         s.write(|db| propose_replan_tx(
             db,
@@ -769,7 +769,7 @@ fn replanning_budget_scope_policy_and_escalation_injection() {
             &json!({"scope":["src"]})
         ))
         .unwrap()["decision"],
-        "senior_consultation"
+        "replan"
     );
     s.write(|db| {
         lifecycle::event_tx(
@@ -823,6 +823,42 @@ fn replanning_budget_scope_policy_and_escalation_injection() {
         })
         .unwrap();
     assert!(packet.contains("unavailable"));
+}
+
+#[test]
+fn consultation_requires_a_question_and_new_basis_but_replays_the_same_key() {
+    let (_p, s, _, _) = setup();
+    let request = |key: &str, proposal: &Value| {
+        s.write(|db| propose_replan_tx(db, "t", "coordinator", key, "escalation_request", proposal))
+    };
+    let proposal = json!({"question":"What changes the decision?", "reason":"Existing evidence is incomplete"});
+    for invalid in [
+        json!({"reason":proposal["reason"]}),
+        json!({"question":proposal["question"],"reason":"  "}),
+    ] {
+        assert_eq!(request("invalid", &invalid).unwrap_err().code(), "consultation_question_and_reason_required");
+    }
+    let first = request("first-escalation", &proposal).unwrap();
+    assert_eq!(request("first-escalation", &proposal).unwrap(), first);
+    assert_eq!(request("same-under-new-key", &proposal).unwrap_err().code(), "consultation_request_already_recorded");
+    assert_eq!(request("whitespace", &json!({"question":" What  changes the decision?  ",
+        "reason":proposal["reason"],"report_ids":["report-not-in-this-task"]})).unwrap_err().code(),
+        "consultation_request_already_recorded");
+    let changed = json!({"question":proposal["question"],"reason":"The result changed after the chosen procedure"});
+    assert_eq!(request("new-basis", &changed).unwrap_err().code(), "consultation_request_pending");
+    s.write(|db| {
+        propose_replan_tx(db, "t", "coordinator", "scope", "scope_request", &json!({"scope":["src"]}))?;
+        settle_recovery_tx(db, "t", cortex_core::TaskState::Planning)?;
+        lifecycle::plan::accept_tx(db, "t", "coordinator", "plan", &support::with_goal(&json!({
+            "tasks":[{"id":"work","role":"backend-dev","objective":"Proceed","dependencies":[],"scope":["src"]}],
+            "verification":[["cargo","test"]]
+        })))?;
+        let raw: String = db.query_row("SELECT objective FROM runtime_nodes WHERE task_id='t'
+            AND revision=2 AND node_id='_consultation'", [], |row| row.get(0))?;
+        assert!(raw.contains("What changes the decision?"));
+        Ok(())
+    }).unwrap();
+    assert_eq!(request("new-basis", &changed).unwrap()["decision"], "senior_consultation");
 }
 
 fn with_outcomes(s: &Store) {

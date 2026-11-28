@@ -31,6 +31,14 @@ const REPORT_TEMPLATES: &[&str] = &[
     "synthesis",
 ];
 
+pub(crate) const BASE_ROLES: &[&str] = &[
+    "build_verification",
+    "code_reviewer",
+    "explorer",
+    "general",
+    "senior_consultant",
+];
+
 fn verification_source(access_class: &str) -> Option<&'static str> {
     match access_class {
         "write" => Some("verification-write.md"),
@@ -38,6 +46,54 @@ fn verification_source(access_class: &str) -> Option<&'static str> {
         "consultant" => Some("verification-consultant.md"),
         _ => None,
     }
+}
+
+fn base_profile(role: &str, access: &str) -> Option<&'static str> {
+    match (role, access) {
+        ("code_reviewer", "read_only") => Some("reviewer"),
+        ("build_verification", "read_only") => Some("verifier"),
+        ("senior_consultant", "consultant") => Some("consultant"),
+        ("code_reviewer" | "build_verification" | "senior_consultant", _) => None,
+        ("explorer", "read_only") => Some("investigator"),
+        ("general", "write") => Some("implementer"),
+        _ => None,
+    }
+}
+
+pub fn competency_sources(root: &Path) -> Res<BTreeMap<String, String>> {
+    let schema = parse(&read_text(&root.join("crates/cortex-engine/schema/tools.json"))?)?;
+    let tools = schema.req("tools")?.as_obj().ok_or("invalid tools schema")?;
+    let plan = tools
+        .iter()
+        .map(|(_, tool)| tool)
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("plan_submit"))
+        .ok_or("missing plan_submit schema")?;
+    let ids = plan
+        .req("inputSchema")?
+        .req("properties")?
+        .req("plan")?
+        .req("properties")?
+        .req("tasks")?
+        .req("items")?
+        .req("properties")?
+        .req("competencies")?
+        .req("items")?
+        .req("enum")?
+        .as_arr()
+        .ok_or("invalid competency schema")?;
+    ids.iter()
+        .map(|id| {
+            let id = id
+                .as_str()
+                .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_lowercase()))
+                .ok_or("invalid competency id")?;
+            let text = read_text(&root.join("agent-sources/competencies").join(format!("{id}.md")))?;
+            if py_strip(&text).is_empty() {
+                return Err(format!("empty competency source for {id}"));
+            }
+            Ok((id.to_owned(), py_strip(&text).to_owned()))
+        })
+        .collect()
 }
 
 fn sections(markdown: &str) -> Res<BTreeMap<String, String>> {
@@ -125,14 +181,23 @@ pub fn expected_skills(root: &Path) -> Res<BTreeMap<PathBuf, Vec<u8>>> {
         .as_arr()
         .ok_or("invalid profiles")?;
     let mut rendered = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     for profile in profiles {
         let pname = profile.get("name").and_then(Value::as_str).unwrap_or("?");
+        if !seen.insert(pname) {
+            return Err(format!("duplicate base profile {pname}"));
+        }
         let access_class = profile
             .get("access_class")
             .and_then(Value::as_str)
             .unwrap_or("");
         let verification =
             verification_source(access_class).ok_or(format!("invalid access class for {pname}"))?;
+        let base =
+            base_profile(pname, access_class).ok_or(format!("invalid base access for {pname}"))?;
+        if profile.get("base").and_then(Value::as_str) != Some(base) {
+            return Err(format!("invalid base profile for {pname}"));
+        }
         let source = profile.req("source")?.as_str().ok_or("invalid source")?;
         let report_template = profile
             .get("report_template")
@@ -141,7 +206,14 @@ pub fn expected_skills(root: &Path) -> Res<BTreeMap<PathBuf, Vec<u8>>> {
         if !REPORT_TEMPLATES.contains(&report_template) {
             return Err(format!("invalid report template for {pname}"));
         }
-        let values = sections(&read_text(&sources.join(source))?)?;
+        let mut values = sections(&read_text(&sources.join(source))?)?;
+        let base_body = read_text(&sources.join("base").join(format!("{base}.md")))?;
+        let base_body = py_strip(&base_body);
+        if base_body.is_empty() {
+            return Err(format!("empty base profile for {pname}"));
+        }
+        let responsibility = values.get_mut("Role and responsibility").unwrap();
+        responsibility.insert_str(0, &format!("{base_body}\n\n"));
         let stated = when_to_use(&values["When to use this profile"])?;
         for key in ["select_when", "avoid_when"] {
             if profile.get(key).and_then(Value::as_str) != stated.get(key).map(String::as_str) {
@@ -172,6 +244,9 @@ pub fn expected_skills(root: &Path) -> Res<BTreeMap<PathBuf, Vec<u8>>> {
             .and_then(|s| s.to_str())
             .unwrap_or(stem);
         let name = format!("worker-{stem}");
+        if stem.replace('-', "_") != pname {
+            return Err(format!("base profile {pname} has the wrong source name"));
+        }
         let description = format!(
             "Cortex delegated specialist only: {}",
             profile
@@ -188,6 +263,9 @@ pub fn expected_skills(root: &Path) -> Res<BTreeMap<PathBuf, Vec<u8>>> {
             root.join("skills").join(&name).join("SKILL.md"),
             text.into_bytes(),
         );
+    }
+    if seen != BASE_ROLES.iter().copied().collect() {
+        return Err("expected the five canonical worker profiles".into());
     }
     Ok(rendered)
 }
@@ -235,12 +313,6 @@ fn existing_generated(root: &Path) -> Res<(BTreeSet<PathBuf>, BTreeSet<PathBuf>)
 
 pub fn check(root: &Path) -> Res<()> {
     let skills = expected_skills(root)?;
-    if skills.len() != 23 {
-        return Err(format!(
-            "expected exactly 23 worker profiles, found {}",
-            skills.len()
-        ));
-    }
     let (found_skills, found_refs) = existing_generated(root)?;
     if found_skills != skills.keys().cloned().collect::<BTreeSet<_>>() {
         return Err("generated worker skill set differs from source catalogue".into());
@@ -273,7 +345,7 @@ pub fn run(root: &Path, do_write: bool) -> Res<()> {
     let result = if do_write { write(root) } else { check(root) };
     result.map_err(|e| format!("Agent profile generation failed: {e}"))?;
     println!(
-        "Worker skills {}: 23 compact prompts with shared references",
+        "Worker skills {}: five canonical profiles with shared references",
         if do_write { "write" } else { "check" }
     );
     Ok(())

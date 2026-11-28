@@ -112,23 +112,20 @@ fn remove_tree(path: &Path) -> std::io::Result<()> {
     fs::remove_dir_all(path)
 }
 
-fn count_tasks(project: &Path, channel: &str) -> Result<i64, String> {
-    let store = project
-        .join(if channel == "dev" {
-            ".cortex-dev"
-        } else {
-            ".cortex"
-        })
-        .join("cortex.sqlite3");
-    if !store.exists() {
-        return Ok(0);
-    }
-    let connection =
-        rusqlite::Connection::open_with_flags(&store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| format!("cannot open the task store read-only: {e}"))?;
-    connection
-        .query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))
-        .map_err(|e| format!("task count unavailable: {e}"))
+fn count_tasks(project: &Path, state_home: &Path, channel: &str) -> Result<i64, String> {
+    use cortex_core::{store::StoreRoot, OpenMode, Store, StoreChannel};
+    let (state, channel) = match channel {
+        "dev" => (workspace_protocol::channel::dev().state_dir(state_home).join("state"), StoreChannel::Dev),
+        "release" => (state_home.to_owned(), StoreChannel::Release),
+        _ => return Err("agent did not report a recognized project store channel".into()),
+    };
+    let key = StoreRoot::new(&state, channel)
+        .and_then(|root| root.project_key(project))
+        .map_err(|e| format!("task store location unavailable: {}", e.code()))?;
+    let store = Store::open(key, OpenMode::LiveReadOnly)
+        .map_err(|e| format!("cannot open the task store read-only: {}", e.code()))?;
+    store.read(|db| Ok(db.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))?))
+        .map_err(|e| format!("task count unavailable: {}", e.code()))
 }
 
 /// Seed one fake API-key connection and an exact eligible fake route policy below one config root.
@@ -389,8 +386,7 @@ fn smoke(
             status["result"]["stopReason"] == "end_turn",
             Some(status.clone()),
         );
-        let channel_name = if channel == "dev" { "dev" } else { "release" };
-        match count_tasks(project, channel_name) {
+        match count_tasks(project, &state_home, channel) {
             Ok(count) => report.record(
                 "cortex_status:no_task_created",
                 count == 0,

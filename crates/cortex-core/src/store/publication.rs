@@ -20,6 +20,27 @@ const SEPARATOR: &[u8] = b"\n\n---\n\n";
 /// this long before the check (a write inside one timestamp tick could otherwise go unseen).
 const RACY_WINDOW: Duration = Duration::from_millis(20);
 
+pub(super) fn checkpoint(_point: &str) {
+    #[cfg(test)]
+    if std::env::var("CORTEX_CORE_PUBLICATION_CRASH_POINT").as_deref() == Ok(_point) {
+        std::process::exit(98);
+    }
+}
+
+pub(super) fn scratch_name(name: &str) -> bool {
+    [
+        (".pending_", ".tmp"),
+        (".publication_staging_", ".tmp"),
+        (".backup_pipeline_", ".md"),
+    ]
+    .into_iter()
+    .any(|(prefix, suffix)| {
+        name.strip_prefix(prefix)
+            .and_then(|tail| tail.strip_suffix(suffix))
+            .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    })
+}
+
 /// What identifies one exact state of a regular file without reading it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Identity {
@@ -114,8 +135,7 @@ pub(crate) fn file_digest(path: &Path) -> CoreResult<String> {
         hash.update(&chunk[..n]);
     }
     let digest = format!("{:x}", hash.finalize());
-    if Identity::of(&f.metadata()?) == before && Identity::of(&path.symlink_metadata()?) == before
-    {
+    if Identity::of(&f.metadata()?) == before && Identity::of(&path.symlink_metadata()?) == before {
         remember(path, before, digest.clone(), None, false);
     }
     Ok(digest)
@@ -238,7 +258,9 @@ impl PublicationIntent {
         let staged = format!(".pending_{id}.tmp");
         // The previous file is kept by a hard link made at install time (no second copy).
         let backup = old.as_ref().map(|_| format!(".backup_pipeline_{id}.md"));
+        checkpoint("before_staging");
         let staged_identity = write_new(&directory.join(&staged), &parts)?;
+        checkpoint("after_staging");
         let intent = Self {
             report_id: report_id.into(),
             target: target.into(),
@@ -251,7 +273,11 @@ impl PublicationIntent {
             characters,
         };
         let journal = directory.join(format!(".publication_{id}.json"));
-        write_new(&journal, &[&serde_json::to_vec(&intent)?])?;
+        let temporary_journal = directory.join(format!(".publication_staging_{id}.tmp"));
+        write_new(&temporary_journal, &[&serde_json::to_vec(&intent)?])?;
+        checkpoint("after_intent_write");
+        std::fs::rename(&temporary_journal, &journal)?;
+        checkpoint("after_intent_rename");
         locks::sync_directory(directory)?;
         Ok((intent, journal))
     }
@@ -286,7 +312,9 @@ impl PublicationIntent {
                 write_new(&backup, &[&read(&target)?])?;
             }
         }
+        checkpoint("after_backup");
         std::fs::rename(&staged, &target)?;
+        checkpoint("after_replace");
         locks::sync_directory(directory)?;
         if let Ok(meta) = target.symlink_metadata() {
             remember(
@@ -304,6 +332,26 @@ impl PublicationIntent {
         directory: &Path,
         journal: &Path,
         db: &rusqlite::Connection,
+    ) -> CoreResult<()> {
+        Self::reconcile_with_cleanup(directory, journal, db, true)
+    }
+
+    /// A durable installation and its committed row require no additional fsync
+    /// for removing private scratch files. If cleanup survives only in part,
+    /// the retained intent or an orphan backup is cleaned up by the next read.
+    pub(super) fn reconcile_completed(
+        directory: &Path,
+        journal: &Path,
+        db: &rusqlite::Connection,
+    ) -> CoreResult<()> {
+        Self::reconcile_with_cleanup(directory, journal, db, false)
+    }
+
+    fn reconcile_with_cleanup(
+        directory: &Path,
+        journal: &Path,
+        db: &rusqlite::Connection,
+        sync_cleanup: bool,
     ) -> CoreResult<()> {
         if journal.parent() != Some(directory) {
             return refuse("unsafe_publication_path");
@@ -359,7 +407,11 @@ impl PublicationIntent {
                 std::fs::remove_file(path)?;
             }
         }
+        checkpoint("during_cleanup");
         std::fs::remove_file(journal)?;
-        locks::sync_directory(directory)
+        if sync_cleanup || !committed {
+            locks::sync_directory(directory)?;
+        }
+        Ok(())
     }
 }

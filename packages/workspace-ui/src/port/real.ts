@@ -4,9 +4,10 @@ import { capabilities as localCapabilities, decodeResponse, negotiate, PROTOCOL,
 import type { Answer as WireAnswer, Decision as WireDecision, Receipt as WireReceipt, Result as WireResult, Task as WireTask, HistoryRow, WireTypes } from "@cortex/workspace-contract";
 import { ACCESS_MODES, readRemoteStatus, readSudoPrompts, capabilityOf, checksPassed, coordinatorAllowed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapDecision, mapProjectSlice, orderedEfforts, parseLiveSprintGraph, readableCheckReason, routeIdOf, emptySession, overlayTask, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
 import { nativeDelta, nativeVersion } from "./native";
+import { followPage, type FollowHistory, type FollowPage, type HistoryFollowRequest } from "./history-follow";
 import { readOwnerActionReply, readOwnerActions, type OwnerActionRequests } from "@cortex/workspace-domain";
 import { applyNativeTaskDelta, weeklyUsage } from "@cortex/workspace-domain";
-import type { NativeTaskDelta, NativeTaskSnapshot } from "@cortex/workspace-domain";
+import type { NativeHistoryHead, NativeTaskDelta, NativeTaskSnapshot } from "@cortex/workspace-domain";
 import { conversationOf, ordinal, sequenceOrder, shownFold, type Dated } from "./history";
 import { firstWindowEntries, slowRead, type SessionReads } from "../first-view";
 import { CODE_LANGUAGE, CodeRefusal, type CodeEvent, type CodeFile, type LocalCodePort } from "../code-support";
@@ -26,8 +27,9 @@ export type TransportEvent = CodeEvent | { type: "connection"; state: "connectin
   /** The local machine's remote access changed (pairing, a device, the relay): only an open remote access page rereads it. */
   | { type: "remote_state" }
   /** One project's runtime started, stopped or settled a merge: that project is read again, nothing else. */
-  | { type: "project_state"; projectId: string };
+  | { type: "project_state"; projectId: string; movingHistory?: boolean };
 export type RealTransport = {
+  followHistory?: FollowHistory;
   request(operation: string, message: unknown): Promise<unknown>;
   subscribe(listener: (event: TransportEvent) => void): () => void;
 };
@@ -243,7 +245,7 @@ export function usableProduct<P extends { tasks?: unknown; sprints?: unknown }>(
   return { ...product, tasks: Object.fromEntries(kept), sprints };
 }
 type MachineRead = Partial<Machine> & { name: string };
-type ConfigRead = { config: MachineConfig; connections: EngineConnection[]; tokens: Record<string, unknown>; usage?: EngineWeeklyUsage[]; catalogueRefresh?: CatalogueState };
+type ConfigRead = { machineName?: string; config: MachineConfig; connections: EngineConnection[]; tokens: Record<string, unknown>; usage?: EngineWeeklyUsage[]; catalogueRefresh?: CatalogueState };
 class BoardPending extends Error {}
 /** Newer stream events made a background details read obsolete. That is neither success nor failure. */
 class DetailsSuperseded extends Error {}
@@ -314,6 +316,15 @@ function changesOf(repo: ProjectRepo | null, taskId?: string, overlay?: TaskOver
 export function createRealPort(options: RealPortOptions): WorkspacePort & LocalCodePort & FirstViewPort {
   const { transport, actorId } = options, projects = options.projects ?? [];
   const observers = new Set<(update: PortUpdate) => void>();
+  const movingHistory = new Set<string>();
+  const relocationEvents = new Map<string, number>();
+  let relocationEventRevision = 0;
+  let relocationReset = 0;
+  function publishProjectMigration(projectId: string, active: boolean) {
+    if (movingHistory.has(projectId) === active) return;
+    if (active) movingHistory.add(projectId); else movingHistory.delete(projectId);
+    for (const notify of observers) notify({ kind: "project_migration", projectId, active });
+  }
   const cachedBoards = new Map(readBoards(options.boardStorage,actorId).map(b => [b.project.projectId,b]));
   /** Projects whose tasks the service has confirmed since launch, and the reads waiting for that. */
   const confirmedProjects = new Set<string>(), confirmations = new Set<() => void>();
@@ -630,8 +641,19 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     for (const read of machineReads) read(observed);
     return facts;
   }
+  // Name reads from Settings and startup can cross a confirmed rename or each other.
+  let identitySequence = 0, identityInstalled = 0, machineName: string | undefined;
+  function confirmMachineName(sequence: number, name: string | undefined) {
+    if (!name || sequence < identityInstalled) return;
+    identityInstalled = sequence;
+    if (machineName === name) return;
+    machineName = name;
+    for (const notify of observers) notify({ kind: "machine", facts: { machineId: LOCAL_MACHINE_ID, patch: { name } } });
+  }
   async function readMachineFacts(): Promise<MachineFacts> {
+    const identityRead = ++identitySequence;
     const currentRead = await machine<ConfigRead>("config.read");
+    confirmMachineName(identityRead, currentRead.machineName);
     // First activation and background engine setup can create files without a UI command.
     configRead = currentRead;
     configTokens = currentRead.tokens;
@@ -654,8 +676,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
   /** Read when a screen that shows storage, retention, worktrees, the version or GitHub CLI opens. While one is on view
    *  (`watchOverview`), the machine poll keeps it current; with none on view it is not read again. */
   async function machineOverview(): Promise<MachineFacts> {
+    const identityRead = ++identitySequence;
     const { name, retentionDays, autoArchiveDays, automaticArchivePurge, unreferencedAttachmentRetentionDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics, ghAvailable, reclamationFailures } = await machine<MachineRead>("overview");
-    return { machineId: LOCAL_MACHINE_ID, patch: { ghAvailable, reclamationFailures, name, retentionDays, autoArchiveDays, automaticArchivePurge, unreferencedAttachmentRetentionDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics } };
+    confirmMachineName(identityRead, name);
+    return { machineId: LOCAL_MACHINE_ID, patch: { ghAvailable, reclamationFailures, retentionDays, autoArchiveDays, automaticArchivePurge, unreferencedAttachmentRetentionDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics } };
   }
 
   async function nativeRead(projectId: string, operation: string, payload: unknown) {
@@ -666,9 +690,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
   }
   const read = async <K extends keyof WireTypes>(type: K, operation: string, message: unknown): Promise<WireTypes[K]> => {
     const m = message as { projectId?: string; target?: string; cursor?: string; limit?: number };
-    if (serviceMethods.includes("native.query") && m.projectId && ["tasks.get", "history.page"].includes(operation)) {
-      const reply = await nativeRead(m.projectId, operation, operation === "tasks.get" ? { id: m.target } : { target: m.target, cursor: m.cursor ?? null, limit: m.limit ?? 100 });
-      if (reply.data.type !== (operation === "tasks.get" ? "task" : "history")) throw new Error("Native read type mismatch");
+    if (serviceMethods.includes("native.query") && m.projectId && operation === "tasks.get") {
+      const reply = await nativeRead(m.projectId, operation, { id: m.target });
+      if (reply.data.type !== "task") throw new Error("Native read type mismatch");
       return decodeResponse(type, reply.data.value).value;
     }
     return decodeResponse(type, await transport.request(operation, message)).value;
@@ -694,6 +718,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       machineOn = (service as { machine?: unknown }).machine === true;
       // Older services omit this field; only explicit support enables the feature.
       taskWorktrees = (service as { taskWorktrees?: unknown }).taskWorktrees === true;
+      const relocationSeen = relocationEventRevision;
       const registry = await transport.request("projects.list", {});
       if (!Array.isArray(registry)) throw new Error("Invalid project registry");
       const next: ProjectLocator[] = registry.map(p => {
@@ -705,6 +730,19 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       writeBoards(options.boardStorage,actorId,[...cachedBoards.values()]);
       recheckConfirmations();
       for (const notify of observers) notify({kind:"registry",projectIds:next.map(p => p.projectId)});
+      if (relocationReset <= relocationSeen) {
+        for (const project of registry) {
+          if ((relocationEvents.get(project.projectId) ?? 0) <= relocationSeen) {
+            publishProjectMigration(project.projectId, project.movingHistory === true);
+          }
+        }
+        for (const id of movingHistory) {
+          if (!next.some(project => project.projectId === id) && (relocationEvents.get(id) ?? 0) <= relocationSeen) {
+            publishProjectMigration(id, false);
+            relocationEvents.delete(id);
+          }
+        }
+      }
       for (const project of next) projectState(project, "registry", null);
     }
     const remote = await read("Capabilities", "capabilities.get", { protocol: { ...PROTOCOL }, requestId: "read-capabilities" });
@@ -809,7 +847,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     void work.finally(() => { if (decisionReads.get(key) === work) decisionReads.delete(key); }).catch(() => {});
     return work;
   }
-  async function projectDecisions(project: ProjectLocator, tasks: WireTask[]): Promise<WireDecision[]> {
+  async function projectDecisions(project: ProjectLocator, tasks: WireTask[], coverage?: HistoryCoverage): Promise<WireDecision[]> {
     if (!offered.includes("decisions.list")) return [];
     const items: WireDecision[] = [];
     // The tasks on screen first, chosen again before each read: their conversations wait for these questions, the board's
@@ -818,7 +856,13 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     const remaining = tasks.filter(t => t.executionId !== null);
     while (remaining.length) {
       const [task] = remaining.splice(Math.max(0, remaining.findIndex(shown)), 1);
-      items.push(...(await executionDecisions(project, task.executionId!)).items);
+      const held = historyReads.get(task.taskId);
+      const verified = orderedConversations && coverage && held?.executionId === task.executionId
+        && held.projectId === project.projectId && !held.reset && held.cards?.revision !== undefined
+        && !historyDue.has(task.taskId) && coversHistory(held.coverage, coverage);
+      // The history read already paired these same execution's cards with a
+      // native snapshot at or after the board position.
+      items.push(...(verified ? held.cards!.items : (await executionDecisions(project, task.executionId!)).items));
     }
     return items;
   }
@@ -839,7 +883,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
   // `earlier` is where the rows before the held ones are read (a backward cursor): absent or null, the held rows start at the
   // conversation's beginning.
   // `limit` is the page size its cursors were read with (absent: the service's default): every read from them asks for it.
-  const historyReads = new Map<string, { projectId: string; version: string; executionId: string; rows: HistoryRow[]; tail?: string | null; earlier?: string | null; limit?: number; reset?: boolean; cards?: DecisionSnapshot; pinnedCards?: ReadonlySet<string> }>();
+  type HistoryCoverage = { generation: string; highWatermark: string };
+  const coversHistory = (covered: HistoryCoverage | undefined, needed: HistoryCoverage) =>
+    covered?.generation === needed.generation && BigInt(covered.highWatermark) >= BigInt(needed.highWatermark);
+  const historyReads = new Map<string, { projectId: string; version: string; executionId: string; rows: HistoryRow[]; tail?: string | null; earlier?: string | null; limit?: number; reset?: boolean; cards?: DecisionSnapshot; pinnedCards?: ReadonlySet<string>; coverage?: HistoryCoverage; position?: string }>();
+  const historyDeltaDue = new Map<string, HistoryCoverage & { streaming?: boolean }>();
   // A change makes a held conversation due for a reread, never unread. A board read, which reads no conversation, keeps the
   // rows already confirmed until the details read that follows it replaces them: dropping them would empty a running task's
   // page on every event and redraw all of it a moment later. The mark is the change's turn, so a read already under way
@@ -854,6 +902,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
   let historyTurn = 0;
   const historyChanged = (taskId: string) => { historyDue.set(taskId, ++historyTurn); };
   const historyPositions = new Map<string, { watermark: string; cursor: string | null }>();
+  async function nativeHistory(projectId: string, operation: "history.page" | "history.earlier", taskId: string, cursor: string | null, limit: number) {
+    const reply = await nativeRead(projectId, operation, { target: taskId, cursor, limit });
+    if (reply.data.type !== "history") throw new Error("Native read type mismatch");
+    return {
+      page: decodeResponse("HistoryPage", reply.data.value).value as WireTypes["HistoryPage"] & { tailCursor?: unknown; prevCursor?: unknown },
+      coverage: { generation: reply.generation, highWatermark: reply.highWatermark },
+    };
+  }
   /** One task's retained conversation, page by page: all of it, or with `from` (a forward cursor) only the rows written
    *  after the ones already held. `tail` is the forward cursor of the last page, null from a service that offers none. A
    *  slow page is waited for. `limit` is the page size `from` was read with
@@ -861,11 +917,21 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
   async function readHistory(projectId: string, taskId: string, from: string | null = null, limit?: number) {
     const rows: HistoryRow[] = [];
     let cursor: string | null = from, tail: string | null = null, decisionRevision: string | undefined;
+    let coverage: HistoryCoverage | undefined, position: string | undefined;
     // A conversation has no page budget: a long task's history is read to its end. Only a service that stops moving
     // forward (the same cursor twice) fails the read.
     for (;;) {
       const asked = cursor;
-      const next: WireTypes["HistoryPage"] = await read("HistoryPage", "history.page", request(projectId, "history.page", {target:taskId,cursor,...(limit === undefined ? {} : {limit})}));
+      const response = serviceMethods.includes("native.query")
+        ? await nativeHistory(projectId, "history.page", taskId, cursor, limit ?? 100)
+        : { page: await read("HistoryPage", "history.page", request(projectId, "history.page", {target:taskId,cursor,...(limit === undefined ? {} : {limit})})), coverage: undefined };
+      const next = response.page;
+      // A forward cursor freezes the range selected by the first page. Later
+      // replies may observe newer commits without reading their rows.
+      if (!coverage) {
+        coverage = response.coverage;
+        position = nativeVersion(next.highWatermark) ? next.highWatermark : undefined;
+      }
       requireRevision(decisionRevision, next.decisionRevision);
       decisionRevision = next.decisionRevision;
       rows.push(...next.items); cursor = next.nextCursor;
@@ -874,7 +940,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       if (cursor === null) break;
       if (cursor === asked) throw new Error("The conversation read stopped moving forward");
     }
-    return { rows, tail, decisionRevision };
+    return { rows, tail, decisionRevision, coverage, position };
   }
   /** Whether conversations are read from their end (`history.earlier`): a native service that refuses the operation does not. */
   let readsBack = true;
@@ -884,12 +950,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
   async function readBackPage(projectId: string, taskId: string, cursor: string | null, seen: Set<string>, limit: number) {
     if (cursor !== null) seen.add(cursor);
     // No deadline: a slow page is waited for.
-    const reply = await nativeRead(projectId, "history.earlier", {target:taskId, cursor, limit});
-    if (reply.data.type !== "history") throw new Error("Native read type mismatch");
-    const next = decodeResponse("HistoryPage", reply.data.value).value as WireTypes["HistoryPage"] & { tailCursor?: unknown; prevCursor?: unknown };
+    const { page: next, coverage } = await nativeHistory(projectId, "history.earlier", taskId, cursor, limit);
     const earlier = typeof next.prevCursor === "string" ? next.prevCursor : null;
     if (earlier !== null && seen.has(earlier)) throw new Error("The conversation read stopped moving back");
-    return { rows: next.items, earlier, tail: typeof next.tailCursor === "string" ? next.tailCursor : null, decisionRevision: next.decisionRevision };
+    return { rows: next.items, earlier, tail: typeof next.tailCursor === "string" ? next.tailCursor : null, decisionRevision: next.decisionRevision, coverage, position: nativeVersion(next.highWatermark) ? next.highWatermark : undefined };
   }
   /** A conversation read afresh: its latest part from a service that reads backwards, else all of it. */
   /** The entries the conversation on screen would show for these rows: what one screen of it is measured in. */
@@ -898,7 +962,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     return conversationOf(rows, { description, partial: true, answers: [] }).filter(({ entry }) => entry.kind !== "fold" || !!shownFold(entry, false).text).length;
   };
   const firstWindow = () => Math.max(1, options.firstWindow?.() ?? firstWindowEntries());
-  async function readLatest(projectId: string, taskId: string): Promise<{ rows: HistoryRow[]; tail: string | null; earlier: string | null; limit?: number; decisionRevision?: string }> {
+  async function readLatest(projectId: string, taskId: string): Promise<{ rows: HistoryRow[]; tail: string | null; earlier: string | null; limit?: number; decisionRevision?: string; coverage?: HistoryCoverage; position?: string }> {
     if (backward()) {
       try {
         const rows: HistoryRow[] = [], seen = new Set<string>(), screen = firstWindow();
@@ -907,17 +971,18 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
         // size are read. The size never changes along the chain: the service refuses a cursor asked for with another.
         const limit = Math.min(HISTORY_PAGE_ROWS, screen), pages = Math.ceil(HISTORY_FIRST_ROWS / limit);
         let earlier: string | null = null, tail: string | null = null, decisionRevision: string | undefined;
+        let coverage: HistoryCoverage | undefined, position: string | undefined;
         for (let page = 0; page < pages; page++) {
           const next: Awaited<ReturnType<typeof readBackPage>> = await readBackPage(projectId, taskId, earlier, seen, limit);
           requireRevision(decisionRevision, next.decisionRevision);
           decisionRevision = next.decisionRevision;
           rows.unshift(...next.rows);
-          if (page === 0) tail = next.tail;
+          if (page === 0) { tail = next.tail; coverage = next.coverage; position = next.position; }
           earlier = next.earlier;
           // About one screen is enough to open on: the rest is read as the owner scrolls up to it.
           if (earlier === null || rows.length >= HISTORY_FIRST_ROWS || shownEntries(projectId, taskId, rows) >= screen) break;
         }
-        return { rows, tail, earlier, limit, decisionRevision };
+        return { rows, tail, earlier, limit, decisionRevision, coverage, position };
       }
       catch (error) {
         // An older service does not know the operation: it is read forward from the beginning, as before.
@@ -950,7 +1015,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
   }
   /** Whether a conversation is read in the background: its task is on view (`interest`). With no screen declaring what it
    *  shows (a headless store), every conversation is. Another conversation is read when it is opened, from where it was. */
-  const conversationShown = (projectId: string, taskId: string) => !interests.size || (shownTasks.get(projectId)?.get(taskId) ?? 0) > 0;
+  let explicitConversationViews = false;
+  const conversationShown = (projectId: string, taskId: string) =>
+    explicitConversationViews && transport.followHistory && serviceMethods.includes("native.history.follow")
+      ? followInterest.has(JSON.stringify([projectId, taskId]))
+      : !interests.size || (shownTasks.get(projectId)?.get(taskId) ?? 0) > 0;
   // With a native board, conversations are read per task, beside the board and its details and never inside their consistency
   // window: a running task moves the watermark every moment, and a whole-project read that had to finish without it moving
   // was discarded again and again, so no conversation was ever shown. Each task's read is published as soon as it completes,
@@ -959,15 +1028,148 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
   const historyFailures = new Map<string, number>();
   const historyRetries = new Map<string, ReturnType<typeof setTimeout>>();
   const historyWork = new Map<string, Promise<void>>();
+  const historyStreamStarted = new Map<string, number>();
+  const historyTrailing = new Map<string, ReturnType<typeof setTimeout>>();
   const historyAgain = new Set<string>();
+  // A stable running task's visible history can attest that the board's decisions are still current.
+  // Record this only while that history is due. A failed read or a view that closes restores the independent read.
+  const decisionsFollowingHistory = new Set<string>();
+  const boardDecisions = (projectId: string, executionId: string | null) =>
+    (wireDecisions.get(projectId) ?? []).filter(d => d.executionId === executionId);
   const perTaskHistory = () => serviceMethods.includes("native.board") && offered.includes("history.page");
   function historyStale(task: WireTask) {
     const held = historyReads.get(task.taskId);
-    return !held || held.executionId !== task.executionId || held.version !== task.version || historyDue.has(task.taskId)
+    return !held || held.executionId !== task.executionId || held.version !== task.version || historyDue.has(task.taskId) || historyDeltaDue.has(task.taskId)
       || (orderedConversations && held.cards?.revision === undefined);
+  }
+  // A follow belongs to the displayed conversation. Its socket has its own identity and is never reused for another view.
+  const followInterest = new Map<string, number>();
+  const refusedFollows = new Map<string, string>();
+  type Follow = {
+    request: HistoryFollowRequest; generation: string; cursor: string | null;
+    through?: string; pending: FollowPage[]; stop?: () => void; timer?: ReturnType<typeof setTimeout>;
+  };
+  const follows = new Map<string, Follow>();
+  const installedBoards = new Map<string, {generation: string; version: string}>();
+  function stopFollow(key: string) {
+    const watch = follows.get(key);
+    if (!watch) return;
+    follows.delete(key);
+    clearTimeout(watch.timer);
+    watch.stop?.();
+  }
+  function resetFollows(projectId?: string) {
+    for (const [key, watch] of follows) if (!projectId || watch.request.projectId === projectId) stopFollow(key);
+    for (const key of refusedFollows.keys()) if (!projectId || JSON.parse(key)[0] === projectId) refusedFollows.delete(key);
+    if (projectId) installedBoards.delete(projectId); else installedBoards.clear();
+  }
+  function acceptFollow(project: ProjectLocator, task: WireTask, watch: Follow, packet: FollowPage) {
+    const {page, decisions: pushed} = packet, prior = historyReads.get(task.taskId);
+    const held = prior?.projectId === project.projectId && prior.executionId === task.executionId
+      && prior.coverage?.generation === packet.generation && !prior.reset ? prior : undefined;
+    if (packet.fromCursor !== null && held?.tail !== packet.fromCursor) throw Error("Conversation cursor was superseded");
+    const cards = pushed ? {items: pushed.items, revision:pushed.decisionRevision}
+      : held?.cards && held.cards.revision === page.decisionRevision ? held.cards : undefined;
+    if (!cards) throw Error("Decision revision requires a paged read");
+    const continued = packet.fromCursor !== null ? held : undefined;
+    if (continued && ((continued.position !== undefined && BigInt(page.highWatermark) < BigInt(continued.position))
+      || (page.items.length && packet.fromCursor === page.tailCursor))) throw Error("Conversation tail did not advance");
+    if (continued && page.items.length) {
+      const ids = new Set(page.items.map(row => row.historyId));
+      if (continued.rows.some(row => ids.has(row.historyId))) throw Error("Replayed conversation page");
+    }
+    const rows = continued ? (page.items.length ? [...continued.rows, ...page.items] : continued.rows) : page.items;
+    const coverage = {generation:packet.generation, highWatermark:packet.throughSequence};
+    const pinnedCards = new Set(continued?.pinnedCards);
+    for (const card of cards.items) if (card.status === "pending") pinnedCards.add(card.decisionId);
+    const record = { projectId:project.projectId, executionId:watch.request.executionId, version:task.version,
+      rows, cards, pinnedCards, earlier:continued ? continued.earlier : page.prevCursor ?? null,
+      tail:page.tailCursor, limit:watch.request.limit, coverage, position:page.highWatermark };
+    // An older-page read keeps the same held object while prepending to it.
+    if (continued) Object.assign(continued, record); else historyReads.set(task.taskId, record);
+    historyIssues.delete(task.taskId);
+    historyFailures.delete(task.taskId);
+    historyDue.delete(task.taskId);
+    const due = historyDeltaDue.get(task.taskId);
+    if (due && coversHistory(coverage, due)) historyDeltaDue.delete(task.taskId);
+    // Install addressable decision identities before exposing buttons for the pushed revision.
+    const previous = boardDecisions(project.projectId, task.executionId);
+    if (!same(previous, cards.items)) {
+      const keep = (wireDecisions.get(project.projectId) ?? []).filter(d => d.executionId !== task.executionId);
+      wireDecisions.set(project.projectId, [...keep, ...cards.items]);
+      for (const decision of previous) decisions.delete(decision.decisionId);
+      for (const wire of cards.items) decisions.set(wire.decisionId, {projectId:project.projectId, wire});
+    }
+  }
+  function followTask(project: ProjectLocator, task: WireTask): boolean {
+    const projectId = project.projectId, key = JSON.stringify([projectId, task.taskId]);
+    const snapshot = nativeSnapshots.get(projectId), execution = task.executionId;
+    const open = transport.followHistory;
+    if (!open || !orderedConversations || !serviceMethods.includes("native.history.follow") || !execution || !snapshot
+      || !followInterest.has(key) || !observers.size || !boardTasks.get(projectId)?.has(task.taskId)) return false;
+    const identity = JSON.stringify([snapshot.generation, execution]);
+    let current = follows.get(key);
+    if (current && (current.generation !== snapshot.generation || current.request.executionId !== execution)) {
+      stopFollow(key); current = undefined;
+    }
+    if (refusedFollows.get(key) === identity) return false;
+    const held = historyReads.get(task.taskId);
+    const resume = held?.projectId === projectId && held.executionId === execution && !held.reset
+      && held.coverage?.generation === snapshot.generation && held.cards?.revision && held.tail ? held : undefined;
+    const request = { projectId, taskId:task.taskId, executionId:execution, generation:snapshot.generation,
+      cursor:resume?.tail ?? null, limit:resume?.limit ?? Math.min(HISTORY_PAGE_ROWS, firstWindow()) };
+    const watch: Follow = current ?? {request, generation:snapshot.generation, cursor:request.cursor, pending:[]};
+    const fail = () => {
+      if (follows.get(key) !== watch) return;
+      refusedFollows.set(key, identity);
+      stopFollow(key);
+      historyChanged(task.taskId);
+      queueMicrotask(() => { if (observers.size && followInterest.has(key)) queueHistories(project); });
+    };
+    const drain = () => {
+      const board = installedBoards.get(projectId), native = nativeSnapshots.get(projectId);
+      const latest = native?.items.find(item => item.taskId === task.taskId);
+      if (!board || native?.generation !== watch.generation || board.generation !== watch.generation
+        || board.version !== native.highWatermark || latest?.executionId !== execution) return;
+      let changed = false;
+      while (watch.pending.length && BigInt(watch.pending[0].throughSequence) <= BigInt(board.version)) {
+        acceptFollow(project, latest, watch, watch.pending.shift()!);
+        changed = true;
+      }
+      if (changed) void publishHistory(project, task.taskId).catch(fail);
+      if (!watch.pending.length && watch.through !== undefined) { clearTimeout(watch.timer); watch.timer = undefined; }
+    };
+    try {
+      if (current) { drain(); return follows.has(key); }
+      follows.set(key, watch);
+      const timeout = () => { if (!watch.timer) watch.timer = setTimeout(fail, HISTORY_RETRY_MS); };
+      timeout();
+      const stop = open(request, raw => {
+        if (follows.get(key) !== watch) return;
+        try {
+          const packet = followPage(raw, request);
+          if (packet.fromCursor !== watch.cursor || watch.pending.length >= 4
+            || (watch.through !== undefined && BigInt(packet.throughSequence) <= BigInt(watch.through)))
+            throw Error("Conversation subscription lost continuity");
+          watch.through = packet.throughSequence;
+          watch.cursor = packet.page.tailCursor;
+          watch.pending.push(packet);
+          timeout();
+          drain();
+        } catch { fail(); }
+      }, fail);
+      if (follows.get(key) === watch) watch.stop = stop; else stop();
+    } catch { fail(); }
+    return follows.has(key);
   }
   function queueHistories(project: ProjectLocator) {
     if (!perTaskHistory() || !observers.size) return;
+    const followed = new Set<string>();
+    const snapshot = nativeSnapshots.get(project.projectId);
+    for (const task of (followInterest.size && snapshot ? snapshot.items : [])) {
+      if (followTask(project, task)) followed.add(task.taskId);
+    }
+    for (const [key, watch] of follows) if (watch.request.projectId === project.projectId && !followed.has(watch.request.taskId)) stopFollow(key);
     if (historyWork.has(project.projectId)) { historyAgain.add(project.projectId); return; }
     const work = (async () => {
       do {
@@ -977,8 +1179,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
         // A conversation never read comes first, then the most recently active ones.
         const unread = (t: WireTask) => historyReads.get(t.taskId)?.executionId === t.executionId ? 1 : 0;
         const started = Date.now();
-        const wanted = snapshot.items.filter(t => t.executionId !== null && !historyRetries.has(t.taskId) && conversationShown(project.projectId, t.taskId) && historyStale(t))
+        const wanted = snapshot.items.filter(t => t.executionId !== null && !follows.has(JSON.stringify([project.projectId, t.taskId])) && !historyRetries.has(t.taskId) && conversationShown(project.projectId, t.taskId) && historyStale(t))
           .sort((a, b) => unread(a) - unread(b) || String(b.lastConfirmedAt ?? "").localeCompare(String(a.lastConfirmedAt ?? "")));
+        clearTimeout(historyTrailing.get(project.projectId));
+        historyTrailing.delete(project.projectId);
+        let trailingAt = Infinity;
         for (const task of wanted) {
           if (!observers.size) return;
           const stillCurrent = () => {
@@ -987,6 +1192,15 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
           };
           if (!stillCurrent()) continue;
           const due = historyDue.get(task.taskId), epoch = commandEpoch;
+          if (due === undefined && historyDeltaDue.get(task.taskId)?.streaming) {
+            const time = Date.now();
+            const next = (historyStreamStarted.get(task.taskId) ?? -Infinity) + HISTORY_AGAIN_MS;
+            if (next > time) {
+              trailingAt = Math.min(trailingAt, next);
+              continue;
+            }
+            historyStreamStarted.set(task.taskId, time);
+          }
           try {
             const cached = historyReads.get(task.taskId);
             const before = cached?.executionId === task.executionId ? cached : undefined;
@@ -997,12 +1211,13 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
               !confirmed && offered.includes("decisions.list") ? readCards() : undefined]);
             if (page.status === "rejected") throw page.reason;
             if (firstCards.status === "rejected") throw firstCards.reason;
-            const { rows: readRows, tail, earlier, limit, continued, decisionRevision } = page.value;
+            const { rows: readRows, tail, earlier, limit, continued, decisionRevision, coverage, position } = page.value;
             const read = firstCards.value ?? (orderedConversations && confirmed && confirmed.revision === decisionRevision ? confirmed
               : offered.includes("decisions.list") ? await readCards() : { items: [] });
             const cards = confirmed && same(read, confirmed) ? confirmed : read;
             requireRevision(decisionRevision, cards.revision);
             if (!stillCurrent() || !observers.size) continue;
+            if (follows.has(JSON.stringify([project.projectId, task.taskId]))) continue;
             if (epoch !== commandEpoch) { historyAgain.add(project.projectId); continue; }
             const current = historyReads.get(task.taskId);
             // A reply in flight when an earlier cursor was refused must not restore the position that was dropped.
@@ -1015,12 +1230,25 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
               if (newlyPinned.length) pinnedCards = new Set([...(pinnedCards ?? []), ...newlyPinned.map(d => d.decisionId)]);
             }
             // Keep the older boundary through a forward read. A fresh position doesn't inherit the previous failure.
-            if (continued) Object.assign(continued, {version:task.version, rows, tail, cards, pinnedCards});
+            const now = nativeSnapshots.get(project.projectId)!;
+            const latest = now.items.find(t => t.taskId === task.taskId)!;
+            const version = coversHistory(coverage, now) ? latest.version : task.version;
+            if (continued) Object.assign(continued, {version, rows, tail, cards, pinnedCards, coverage, position});
             else {
               if ((current?.earlier !== earlier || current?.executionId !== task.executionId) && earlierReads.get(task.taskId)?.state === "failed") earlierReads.delete(task.taskId);
-              historyReads.set(task.taskId, {projectId:project.projectId, version:task.version, executionId:task.executionId!, rows, tail, earlier, limit, cards, pinnedCards});
+              historyReads.set(task.taskId, {projectId:project.projectId, version, executionId:task.executionId!, rows, tail, earlier, limit, cards, pinnedCards, coverage, position});
             }
+            const deltaDue = historyDeltaDue.get(task.taskId);
+            if (deltaDue && (deltaDue.generation !== now.generation || coversHistory(coverage, deltaDue))) historyDeltaDue.delete(task.taskId);
+            const currentTurn = historyDue.get(task.taskId) === due && !historyDeltaDue.has(task.taskId);
             if (historyDue.get(task.taskId) === due) historyDue.delete(task.taskId);
+            if (decisionsFollowingHistory.has(task.taskId)) {
+              if (!same(boardDecisions(project.projectId, task.executionId), cards.items)) {
+                decisionsFollowingHistory.delete(task.taskId);
+                // Start the board's independent read when history shows that its cards no longer agree.
+                queueEnrichment(project);
+              } else if (currentTurn) decisionsFollowingHistory.delete(task.taskId);
+            }
             const failed = historyIssues.delete(task.taskId); historyFailures.delete(task.taskId);
             // Nothing new on a forward read (a worker's rows, a hidden update): the page on screen stays as it is.
             if (continued && rows === rowsBefore && cards === confirmed && !failed) continue;
@@ -1034,10 +1262,17 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
             if (!slow && !crossing) historyIssues.set(task.taskId, {executionId:task.executionId!, reason:readCause(error)});
             const delay = crossing ? HISTORY_AGAIN_MS : Math.min(HISTORY_RETRY_MS * 2 ** Math.max(0, failures - 1), 30_000);
             historyRetries.set(task.taskId, setTimeout(() => { historyRetries.delete(task.taskId); queueHistories(project); }, delay));
+            if (decisionsFollowingHistory.delete(task.taskId)) queueEnrichment(project);
             if (crossing) continue;
           }
           if (!observers.size) return;
-          await publishHistory(project);
+          await publishHistory(project, task.taskId);
+        }
+        if (Number.isFinite(trailingAt) && observers.size) {
+          historyTrailing.set(project.projectId, setTimeout(() => {
+            historyTrailing.delete(project.projectId);
+            queueHistories(project);
+          }, Math.max(0, trailingAt - Date.now())));
         }
         // Changes that arrived during this round are read right after it, and never sooner than `HISTORY_AGAIN_MS` after it
         // began: one read in flight per project, the events of a streaming task collapsing into the next one.
@@ -1057,11 +1292,77 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     }
     for (const notify of observers) notify({ kind: "enrichment", update });
   }
-  /** What the conversation on screen now holds, published as an update of its project. */
-  async function publishHistory(project: ProjectLocator) {
+  function historyStamp(rows: HistoryRow[]): number | undefined {
+    let stamp = historyStamps.get(rows);
+    if (stamp === undefined) {
+      stamp = -Infinity;
+      for (const row of rows) {
+        const at = typeof row.recordedAt === "string" ? Date.parse(row.recordedAt) : NaN;
+        if (Number.isFinite(at)) stamp = Math.max(stamp, at);
+      }
+      historyStamps.set(rows, stamp);
+    }
+    return Number.isFinite(stamp) ? stamp : undefined;
+  }
+  function renderConversation(projectId: string, task: WireTask, asked: WireDecision[], session: ReturnType<typeof emptySession>) {
+    const cached = historyReads.get(task.taskId);
+    const held = cached?.executionId === task.executionId && cached.projectId === projectId
+      && (!orderedConversations || cached.cards?.revision !== undefined) ? cached : undefined;
+    const issue = historyIssues.get(task.taskId);
+    if (issue?.executionId === task.executionId) session.historyRead = {state:"failed", reason:issue.reason};
+    const reads: SessionReads = { conversationRead: {state:"ready"}, orderedConversation: orderedConversations };
+    Object.assign(session, reads);
+    if (task.executionId !== null && offered.includes("history.page") && !held) {
+      // The board may already know there is a question, but its read cannot supply feed entries.
+      session.historyRead ??= {state:"loading"};
+      Object.assign(session, { conversationRead: session.historyRead } satisfies SessionReads);
+      session.timeline = [];
+      return;
+    }
+    const own = held?.cards?.items ?? asked.filter(d => d.executionId === task.executionId);
+    const partial = typeof held?.earlier === "string";
+    const cachedView = held && conversationViews.get(held);
+    const view = cachedView && cachedView.rows === held?.rows && cachedView.cards === held.cards
+      && cachedView.pinnedCards === held.pinnedCards && cachedView.description === task.description
+      && cachedView.partial === partial && cachedView.ordered === orderedConversations ? cachedView : undefined;
+    const projected = view ?? (() => {
+      const rows = held?.rows ?? [];
+      const { dated, since } = projectedConversation(rows, task.description, own, partial, orderedConversations, held?.pinnedCards);
+      const timeline = dated.map(d => d.entry), decisions = held?.cards ? own.map(mapDecision) : session.decisions;
+      if (held?.cards) conversationViews.set(held, {rows, cards:held.cards, pinnedCards:held.pinnedCards, description:task.description,
+        partial, ordered:orderedConversations, timeline, since, decisions});
+      return {timeline, since, decisions};
+    })();
+    session.timeline = projected.timeline;
+    session.decisions = projected.decisions;
+    if (partial) session.historyEarlier = {...(earlierReads.get(task.taskId) ?? {state:"available" as const}), since:projected.since};
+  }
+
+  /** Publish only the visible execution when the matching board is already confirmed. */
+  async function publishHistory(project: ProjectLocator, taskId: string) {
+    const id = project.projectId;
+    const base = nativeSnapshots.get(id);
+    const task = base?.items.find(t => t.taskId === taskId);
+    const previous = slices.get(id)?.tasks.find(t => t.id === taskId);
+    const saved = sent.get(id);
+    const planning = task?.planningSprintId || saved?.overlays[taskId]?.planning || saved?.sprints.some(s => s.planningTaskId === taskId);
+    if (orderedConversations && base && task?.executionId && previous?.executionId === task.executionId
+      && !planning && (!machineOn || boardTasks.get(id)?.has(taskId))) {
+      const asked = boardDecisions(id, task.executionId);
+      const session = emptySession(taskId) as ReturnType<typeof emptySession> & SessionReads;
+      session.decisions = asked.map(mapDecision);
+      renderConversation(id, task, asked, session);
+      const { timeline, decisions, historyRead, historyEarlier, conversationRead, orderedConversation } = session;
+      const history = historyReads.get(taskId);
+      const confirmedAt = history?.executionId === task.executionId && history.projectId === id ? historyStamp(history.rows) : undefined;
+      for (const notify of observers) notify({ kind:"conversation", projectId:id, executionId:task.executionId, version:base.highWatermark,
+        confirmedAt, conversation:{taskId, timeline, decisions, historyRead, historyEarlier, conversationRead, orderedConversation} });
+      return;
+    }
     const update = await snapshotOf(project, new Set()).catch(() => null);
     if (update) publishEnrichment(update);
   }
+
   /** One earlier read per conversation. Keep the starting cursor until the whole prepend can be published. */
   const earlierReads = new Map<string, { state: "loading" } | { state: "failed"; reason: string }>();
   function loadEarlierHistory(taskId: string, showAllTools = () => false) {
@@ -1076,7 +1377,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
         task?.executionId === held.executionId ? task : undefined;
     };
     void (async () => {
-      await publishHistory(project);
+      await publishHistory(project, taskId);
       try {
         const batches: HistoryRow[][] = [], cursors = new Set<string>();
         let cursor: string | null = from, revision: string | undefined;
@@ -1113,7 +1414,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
         }
       } finally {
         if (earlierReads.get(taskId) === active) earlierReads.delete(taskId);
-        if (observers.size) await publishHistory(project);
+        if (observers.size) await publishHistory(project, taskId);
       }
     })();
   }
@@ -1121,6 +1422,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     clearTimeout(historyRetries.get(taskId)); historyRetries.delete(taskId);
     const projectId = projectOfTask(taskId), project = projects.find(p => p.projectId === projectId);
     if (!project) return;
+    const key = JSON.stringify([project.projectId, taskId]), watch = follows.get(key);
+    if (watch) { refusedFollows.set(key, JSON.stringify([watch.generation, watch.request.executionId])); stopFollow(key); }
     historyChanged(taskId);
     if (perTaskHistory()) queueHistories(project);
     else for (const notify of observers) notify({kind:"refresh",projectId:project.projectId});
@@ -1153,13 +1456,17 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     }
     historyPositions.set(project.projectId, {watermark, cursor:eventCursor});
     const selected = changed ? items.filter(t => changed.has(t.taskId)) : items;
-    const freshAsked = boardOnly ? wireDecisions.get(project.projectId) ?? [] : project.activated === false || away ? [] : await projectDecisions(project, selected), freshResults = boardOnly ? wireResults.get(project.projectId) ?? [] : away ? [] : await projectResults(project, selected);
+    const native = nativeSnapshots.get(project.projectId);
+    const coverage = native?.highWatermark === watermark ? native : undefined;
+    const freshAsked = boardOnly ? wireDecisions.get(project.projectId) ?? [] : project.activated === false || away ? [] : await projectDecisions(project, selected, coverage), freshResults = boardOnly ? wireResults.get(project.projectId) ?? [] : away ? [] : await projectResults(project, selected);
     const unchangedExecutions = new Set(items.filter(t => changed && !changed.has(t.taskId)).map(t => t.executionId));
     const asked = [...(!boardOnly && changed ? (wireDecisions.get(project.projectId) ?? []).filter(d => unchangedExecutions.has(d.executionId)) : []), ...freshAsked];
     const results = [...(!boardOnly && changed ? (wireResults.get(project.projectId) ?? []).filter(r => unchangedExecutions.has(r.executionId)) : []), ...freshResults];
 
     const histories = new Map<string, HistoryRow[]>();
-    for (const [id, held] of historyReads) if (held.projectId === project.projectId && !items.some(t => t.taskId === id && t.executionId !== null)) { historyReads.delete(id); historyDue.delete(id); historyIssues.delete(id); earlierReads.delete(id); }
+    for (const [id, held] of historyReads) if (held.projectId === project.projectId && !items.some(t => t.taskId === id && t.executionId !== null)) {
+      historyReads.delete(id); historyDue.delete(id); historyDeltaDue.delete(id); historyStreamStarted.delete(id); historyIssues.delete(id); earlierReads.delete(id); decisionsFollowingHistory.delete(id);
+    }
     for (const task of items) { const held = historyReads.get(task.taskId); if (held?.executionId === task.executionId) histories.set(task.taskId, held.rows); }
     // With a native board each conversation is read on its own (`queueHistories`); here it is only what was confirmed.
     if (!boardOnly && !perTaskHistory() && offered.includes("history.page")) for (const task of items.filter(t => t.executionId !== null)) {
@@ -1196,55 +1503,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     };
     for (const task of items) observe(task.lastConfirmedAt);
     for (const decision of asked) observe(decision.createdAt);
-    for (const rows of histories.values()) {
-      let stamp = historyStamps.get(rows);
-      if (stamp === undefined) {
-        stamp = -Infinity;
-        for (const row of rows) {
-          const at = typeof row.recordedAt === "string" ? Date.parse(row.recordedAt) : NaN;
-          if (Number.isFinite(at)) stamp = Math.max(stamp, at);
-        }
-        historyStamps.set(rows, stamp);
-      }
-      latest = Math.max(latest, stamp);
-    }
+    for (const rows of histories.values()) latest = Math.max(latest, historyStamp(rows) ?? -Infinity);
     const at = Number.isFinite(latest) ? latest : undefined;
     const slice = mapProjectSlice({ id, machineId: LOCAL_MACHINE_ID, name, repository, openBranch, defaultBranch, activated:project.activated, confirmedAt:at }, items, asked, results);
     const sessions = new Map(slice.sessions.map(session => [session.taskId, session]));
     for (const task of items) {
       let session = sessions.get(task.taskId);
       if (!session) { session = emptySession(task.taskId); slice.sessions.push(session); }
-      const cached = historyReads.get(task.taskId);
-      const held = cached?.executionId === task.executionId && cached.projectId === project.projectId
-        && (!orderedConversations || cached.cards?.revision !== undefined) ? cached : undefined;
-      const issue = historyIssues.get(task.taskId);
-      if (issue?.executionId === task.executionId) session.historyRead = {state:"failed", reason:issue.reason};
-      const reads: SessionReads = { conversationRead: {state:"ready"}, orderedConversation: orderedConversations };
-      Object.assign(session, reads);
-      if (task.executionId !== null && offered.includes("history.page") && !held) {
-        // The board may already know there is a question, but its read cannot supply feed entries.
-        session.historyRead ??= {state:"loading"};
-        Object.assign(session, { conversationRead: session.historyRead } satisfies SessionReads);
-        session.timeline = [];
-        continue;
-      }
-      const own = held?.cards?.items ?? asked.filter(d => d.executionId === task.executionId);
-      const partial = typeof held?.earlier === "string";
-      const cachedView = held && conversationViews.get(held);
-      const view = cachedView && cachedView.rows === held?.rows && cachedView.cards === held.cards
-        && cachedView.pinnedCards === held.pinnedCards && cachedView.description === task.description
-        && cachedView.partial === partial && cachedView.ordered === orderedConversations ? cachedView : undefined;
-      const projected = view ?? (() => {
-        const rows = held?.rows ?? [];
-        const { dated, since } = projectedConversation(rows, task.description, own, partial, orderedConversations, held?.pinnedCards);
-        const timeline = dated.map(d => d.entry), decisions = held?.cards ? own.map(mapDecision) : session.decisions;
-        if (held?.cards) conversationViews.set(held, {rows, cards:held.cards, pinnedCards:held.pinnedCards, description:task.description,
-          partial, ordered:orderedConversations, timeline, since, decisions});
-        return {timeline, since, decisions};
-      })();
-      session.timeline = projected.timeline;
-      session.decisions = projected.decisions;
-      if (partial) session.historyEarlier = {...(earlierReads.get(task.taskId) ?? {state:"available" as const}), since:projected.since};
+      renderConversation(project.projectId, task, asked, session);
     }
     slices.set(project.projectId, slice);
     return { kind: "projection", version, scope: "project", slice, ...(project.activated === false || away ? { standIn: true as const } : {}) };
@@ -1266,6 +1532,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
    *  read again, and nothing else. Its activation is a registry fact: when that changed, everything is read again. */
   async function projectChanged(projectId: string, listener: (update: PortUpdate) => void) {
     const project = projects.find(p => p.projectId === projectId);
+    resetFollows(projectId);
     const registry = await transport.request("projects.list", {}).catch(() => null);
     const listed = Array.isArray(registry) ? (registry as { projectId?: unknown; activation?: unknown }[]).find(p => p?.projectId === projectId) : undefined;
     nativeEpoch.set(projectId, (nativeEpoch.get(projectId) ?? 0) + 1);
@@ -1393,14 +1660,29 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       // that began before this board read still replaces it.
       readOrder:previous?.readOrder ?? 0};
   }
-  function queueEnrichment(project: ProjectLocator) {
+  function queueEnrichment(project: ProjectLocator, changed?: ReadonlySet<string>) {
     const base = nativeSnapshots.get(project.projectId), confirmed = boardTasks.get(project.projectId);
     if (machineOn && base?.items.some(t => !confirmed?.has(t.taskId))) return;
+    // Any visible non-result execution with a confirmed decision revision can
+    // check its decisions through its own history read, including while waiting
+    // for the owner. Results and tasks missing that evidence need the full read.
+    const byHistory = changed?.size && orderedConversations && perTaskHistory() && [...changed].every(id => {
+      const task = base?.items.find(t => t.taskId === id), held = historyReads.get(id);
+      if (task && task.phase !== "result" && follows.has(JSON.stringify([project.projectId, id]))
+        && !(wireResults.get(project.projectId) ?? []).some(result => result.taskId === id)) return true;
+      return task && task.phase !== "result" && held?.executionId === task.executionId && held.projectId === project.projectId
+        && !held.reset && !(wireResults.get(project.projectId) ?? []).some(result => result.taskId === id)
+        && held.cards?.revision !== undefined && !historyRetries.has(id) && conversationShown(project.projectId, id)
+        && same(boardDecisions(project.projectId, task.executionId), held.cards.items);
+    });
+    if (byHistory) for (const task of base?.items ?? []) {
+      if (changed!.has(task.taskId) && historyStale(task)) decisionsFollowingHistory.add(task.taskId);
+    }
     queueHistories(project);
     // Git and machine facts follow on their own throttle (`streamFacts`); the details never wait for them, and a details read
     // already in flight does not hold back the facts of a task whose state just moved.
     if (machineOn) streamFacts(project);
-    if (enrichments.has(project.projectId)) return;
+    if (byHistory || enrichments.has(project.projectId)) return;
     const epoch = commandEpoch;
     // A running task moves the watermark continuously. Requests made while this read
     // was in flight were not queued, so an obsolete read rereads the newer snapshot.
@@ -1596,8 +1878,13 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
             let next = applyNativeTaskDelta(snapshot, first);
             if (next === snapshot) continue;
             const changed = new Set<string>();
+            const heads = new Map<string, NativeHistoryHead>();
             const mark = (batch: NativeTaskDelta) => {
-              for (const change of batch.batch.changes) if (change.kind === "task") changed.add(change.id);
+              for (const change of batch.batch.changes) if (change.kind === "task") {
+                changed.add(change.id);
+                heads.delete(change.id);
+              }
+              for (const head of batch.historyHeads ?? []) heads.set(head.taskId, head);
             };
             mark(first);
             while (serviceMethods.includes("native.board") && i < batches.length && sameRunningState(next, batches[i])) {
@@ -1612,18 +1899,43 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
               }
             }
             nativeSnapshots.set(id, next);
-            for (const taskId of changed) historyChanged(taskId);
+            const stableRunning = heads.size > 0 && sameRunningState(snapshot, first);
+            let leadHistory = false;
+            for (const taskId of changed) {
+              const held = historyReads.get(taskId), task = next.items.find(t => t.taskId === taskId);
+              const head = heads.get(taskId);
+              const bound = held && task && held.executionId === task.executionId && !held.reset;
+              // An ordered page proves what was read. The marker proves the bound
+              // append-only source still ends there and has no decisions.
+              const comparable = bound && orderedConversations && held.coverage?.generation === next.generation
+                && head?.executionId === held.executionId && held.position !== undefined;
+              const empty = comparable && head.questionsEmpty && held.cards?.revision !== undefined
+                && !held.cards.items.length && !boardDecisions(id, task.executionId).length;
+              const advanced = comparable && BigInt(head.position) > BigInt(held.position!);
+              const streaming = advanced && stableRunning && empty;
+              if (bound && (coversHistory(held.coverage, next) || (empty && held.position === head.position))) {
+                held.version = task.version;
+                historyDeltaDue.delete(taskId);
+              } else {
+                historyDeltaDue.set(taskId, { generation: next.generation, highWatermark: next.highWatermark, streaming });
+                leadHistory ||= advanced === true;
+              }
+            }
             const confirmed = boardTasks.get(id);
             if (machineOn && serviceMethods.includes("native.board") && next.items.some(t => !confirmed?.has(t.taskId))) {
               // A stream insertion has no saved membership. Pair its board with a saved read before publishing it.
               refresh();
               continue;
             }
+            // Start the visible tail read before projecting the board. Its publication
+            // still checks the execution and project version that the board installs.
+            if (leadHistory) queueHistories(project);
             const update = await snapshotOf(project, changed);
             if (!current()) return;
             if (update.scope === "project") boardTasks.set(id, new Set(update.slice.tasks.map(t => t.id)));
             listener({ kind:"delta", update });
-            if (serviceMethods.includes("native.board")) queueEnrichment(project);
+            installedBoards.set(id, {generation:next.generation, version:update.version});
+            if (serviceMethods.includes("native.board")) queueEnrichment(project, changed);
           }
         }
       } catch {
@@ -1905,7 +2217,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
           deletedTaskIds:reply.taskIds,keptPaths:reply.keptPaths};
       }
       case "merge_sprint": { const reply = await machine<{merged?:boolean;ownerIntegration?:boolean;reason?:string}>("product.integrate", await projectOfSprint(command.sprintId), {method:"sprint_merge",sprintId:command.sprintId,confirmed:command.confirmed}); if (!reply.merged) throw new Refusal("sprint_merge_declined", reply.reason ?? "The sprint branch was not merged."); return ok(); }
-      case "close_sprint": await machine("product.sprint", await projectOfSprint(command.sprintId), {action:"close",sprintId:command.sprintId,confirmed:command.confirmed}); return ok();
+      case "close_sprint": await machine("product.sprint", command.projectId ?? await projectOfSprint(command.sprintId), {action:"close",sprintId:command.sprintId,confirmed:command.confirmed}); return ok();
       case "rename_task": {
         const reply = await machine<{version?:string}>("product.task", task(command.taskId), {action:"rename",taskId:command.taskId,title:command.title});
         const current = tasks.get(command.taskId);
@@ -1945,6 +2257,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       }
       case "purge_many": for (const id of command.taskIds) await taskCall(task(id), { action: "purge", taskId: id, confirmed: command.confirmed }); return ok();
       case "close_task": {
+        if (command.choice === "external" && command.executionId) {
+          await taskCall(task(command.taskId), { action: "close_paused_external", taskId: command.taskId,
+            executionId: command.executionId, expectedVersion: command.expectedVersion, requestId, confirmed: command.confirmed });
+          return ok();
+        }
         if (command.choice === "remove_worktree") {
           if (!taskWorktrees) throw new Refusal("capability_unavailable", "Task worktree cleanup is not supported by this service.");
           const reply = await taskCall(task(command.taskId), { action: "close_remove_worktree", taskId: command.taskId, confirmed: command.confirmed });
@@ -1990,12 +2307,26 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
         }
         if (!result?.sourceVersion || result.digest !== digest || (command.sourceVersion !== undefined && command.sourceVersion !== result.sourceVersion) ||
             (command.automaticFinish && !command.sourceVersion)) throw new Refusal("stale_result", "This result changed. Review it again.");
-        await taskCall(task(command.taskId), {
-          action: "accept", taskId: command.taskId, digest,
-          version: result.sourceVersion,
-          acknowledgeOpenChecks: command.openChecks === true,
-          ...(command.automaticFinish ? { automaticFinish: command.automaticFinish } : {}),
-        });
+        const projectId = task(command.taskId);
+        try {
+          await taskCall(projectId, {
+            action: "accept", taskId: command.taskId, digest,
+            version: result.sourceVersion,
+            acknowledgeOpenChecks: command.openChecks === true,
+            ...(command.automaticFinish ? { automaticFinish: command.automaticFinish } : {}),
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          // A lost reply can follow a committed decision. Only the machine's fresh, exact manual
+          // acceptance can confirm it. An Automatic finish also needs evidence of a separate consent.
+          if (command.automaticFinish || !/^service_disconnected(?::|$)/.test(reason)) throw error;
+          const facts = await machine<{ product: Product }>("product.facts", projectId, { taskIds: [command.taskId] }).catch(() => null);
+          const saved = facts?.product?.tasks?.[command.taskId];
+          if (!saved?.acceptance || saved.acceptance.automatic === true ||
+              (saved.status !== "ready_to_merge" && saved.status !== "done") ||
+              saved.result?.sourceVersion !== result.sourceVersion || saved.result.version !== result.version ||
+              saved.result.digest !== digest || saved.acceptance.digest !== digest || saved.acceptance.version !== result.version) throw error;
+        }
         return ok();
       }
       case "integrate": { const reply = await machine("product.integrate", task(command.taskId), { taskId: command.taskId, method: command.method, confirmed: command.confirmed, digest: command.digest, targetBranch: command.targetBranch, message: command.method === "pr" ? command.title ?? "" : command.message ?? "", body: command.message ?? "", draft: command.draft, deleteWorktree: command.deleteWorktree }); return withCleanup(ok(), reply, "Integration recorded."); }
@@ -2017,7 +2348,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       case "create_branch": await machine("git", command.projectId, { requestId, action: "branch", name: command.name, at: command.at }); return ok();
       case "revert_commit": return git(command.checkoutId, { action: "revert_commit", sha: command.sha, confirmed: command.confirmed });
       case "delete_worktree": return git(command.checkoutId, { action: "delete_worktree", confirmed: command.confirmed, discard: command.discard });
-      case "rename_machine": return local({ name: command.name });
+      case "rename_machine": {
+        const receipt = await local({ name: command.name });
+        confirmMachineName(++identitySequence, command.name);
+        return receipt;
+      }
       case "set_retention": return local({ retentionDays: command.days });
       case "save_storage": return local({
         retentionDays: command.retentionDays, autoArchiveDays: command.autoArchiveDays,
@@ -2345,7 +2680,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
           if (epoch === commandEpoch) presentationFacts.set(p.projectId, facts);
         }
         if (serviceMethods.includes("native.board")) {
-          if (update.scope === "project") boardTasks.set(p.projectId,new Set(update.slice.tasks.map(t => t.id)));
+          if (update.scope === "project") {
+            boardTasks.set(p.projectId,new Set(update.slice.tasks.map(t => t.id)));
+            const native = nativeSnapshots.get(p.projectId);
+            if (native && native.highWatermark === update.version) installedBoards.set(p.projectId,{generation:native.generation,version:update.version});
+          }
           queueEnrichment(p);
         }
         return update;
@@ -2365,6 +2704,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       // A title job only starts here and changes nothing yet: reads under way stay current. Its end rereads the project.
       if (envelope.payload.type === "generate_title" || envelope.payload.type === "generate_sprint_title") return runCommand(envelope);
       commandEpoch++;
+      for (const key of [...follows.keys()]) stopFollow(key);
       presentationFacts.clear();
       factReads.clear();
       commandsRunning++;
@@ -2468,7 +2808,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     readsConversation: true,
     scopesFacts: () => negotiated ? machineOn : null,
     retryFirstView: retryHistory,
-    interest(projectId, kind, taskId) {
+    interest(projectId, kind, taskId, conversation) {
+      if (conversation !== undefined) explicitConversationViews = true;
+      const viewKey = JSON.stringify([projectId, taskId]);
+      if (conversation && taskId) followInterest.set(viewKey, (followInterest.get(viewKey) ?? 0) + 1);
       const key = `${projectId}|${kind}`;
       interests.set(key, (interests.get(key) ?? 0) + 1);
       if (taskId) { const shown = shownTasks.get(projectId) ?? new Map<string, number>(); shownTasks.set(projectId, shown.set(taskId, (shown.get(taskId) ?? 0) + 1)); }
@@ -2487,6 +2830,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
           const n = (shown.get(taskId) ?? 1) - 1;
           if (n > 0) shown.set(taskId, n); else shown.delete(taskId);
           if (!shown.size) shownTasks.delete(projectId);
+        }
+        if (conversation && taskId) {
+          const n = (followInterest.get(viewKey) ?? 1) - 1;
+          if (n > 0) followInterest.set(viewKey, n);
+          else { followInterest.delete(viewKey); stopFollow(viewKey); refusedFollows.delete(viewKey); }
+        }
+        if (opened && taskId && !conversationShown(projectId, taskId) && decisionsFollowingHistory.delete(taskId) && observers.size) {
+          queueEnrichment(opened);
         }
         if (kind === "git") for (const plan of gitShown) plan();
       };
@@ -2602,8 +2953,12 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
         acquire: (file: CodeFile) => codeCall("CodeLeaseAcquireResult", "repo.file.lease.acquire", projectOfCheckout(file.checkoutId), fileParams(file)),
         renew: (file: CodeFile, leaseToken: string) => codeCall("CodeLeaseRenewResult", "repo.file.lease.renew", projectOfCheckout(file.checkoutId), { ...fileParams(file), leaseToken }),
         release: (file: CodeFile, leaseToken: string) => codeCall("CodeLeaseReleaseResult", "repo.file.lease.release", projectOfCheckout(file.checkoutId), { ...fileParams(file), leaseToken }),
-        save: (file: CodeFile, text: string, revision: string | null, leaseToken: string) =>
-          codeCall("CodeSaveResult", "repo.file.save", projectOfCheckout(file.checkoutId), { ...fileParams(file), text, revision, leaseToken }),
+        save: async (file: CodeFile, text: string, revision: string | null, leaseToken: string) => {
+          const project = projectOfCheckout(file.checkoutId);
+          const result = await codeCall("CodeSaveResult", "repo.file.save", project, { ...fileParams(file), text, revision, leaseToken });
+          if (result.outcome === "saved" && wantsGit(project)) void repositoryFacts(project, true, true);
+          return result;
+        },
       },
       codeLanguage: {
         open: (project, params) => codeCall("CodeLspOpenResult", "repo.lsp.open", project, params),
@@ -2616,6 +2971,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
     } satisfies LocalCodePort : {}),
     subscribe(listener: (update: PortUpdate) => void) {
       observers.add(listener);
+      if (machineName) listener({ kind: "machine", facts: { machineId: LOCAL_MACHINE_ID, patch: { name: machineName } } });
       for (const cached of cachedBoards.values()) {
         const p = cached.project;
         const slice = mapProjectSlice({id:p.projectId,machineId:LOCAL_MACHINE_ID,name:p.name,repository:p.repository,
@@ -2692,8 +3048,16 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
       // The startup read usually came first: line up with what it showed.
       if (lastObserved) machineRead(lastObserved); else planMachine();
       const stop = transport.subscribe(event => {
-        if (event.type === "connection") { listener({ kind: "connection", connection: { state: event.state, reason: event.reason ?? null, at: Date.now() } }); return; }
-        if (event.type === "refresh") { for (const id of nativeWork.keys()) nativeEpoch.set(id, (nativeEpoch.get(id) ?? 0) + 1); nativeSnapshots.clear(); listener({ kind: "refresh" }); return; }
+        if (event.type === "connection") {
+          if (event.state !== "connected") {
+            resetFollows();
+            relocationReset = ++relocationEventRevision;
+            relocationEvents.clear();
+            for (const projectId of movingHistory) publishProjectMigration(projectId, false);
+          }
+          listener({ kind: "connection", connection: { state: event.state, reason: event.reason ?? null, at: Date.now() } }); return;
+        }
+        if (event.type === "refresh") { resetFollows(); for (const id of nativeWork.keys()) nativeEpoch.set(id, (nativeEpoch.get(id) ?? 0) + 1); nativeSnapshots.clear(); listener({ kind: "refresh" }); return; }
         if (event.type === "native_delta") {
           const checked = nativeDelta(event), project = projects.find(p => p.projectId === event.projectId);
           if (!checked || !project) return;
@@ -2701,13 +3065,20 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
           return;
         }
         if (event.type === "native_resync") {
+          resetFollows(event.projectId);
           nativeEpoch.set(event.projectId, (nativeEpoch.get(event.projectId) ?? 0) + 1);
           nativeSnapshots.delete(event.projectId);
           invalidated.add(event.projectId);
           listener({ kind: "refresh", projectId: event.projectId }); return;
         }
         if (event.type === "remote_state") return;
-        if (event.type === "project_state") { void projectChanged(event.projectId, listener); return; }
+        if (event.type === "project_state") {
+          if (typeof event.movingHistory === "boolean") {
+            relocationEvents.set(event.projectId, ++relocationEventRevision);
+            publishProjectMigration(event.projectId, event.movingHistory);
+          } else void projectChanged(event.projectId, listener);
+          return;
+        }
         if (event.type === "code_lsp" || event.type === "code_lsp_resync") return;
         if (event.type === "invalidated" && event.source === "runtime" && nativeSnapshots.has(event.projectId)) return;
         const project = projects.find(p => p.projectId === event.projectId);
@@ -2718,7 +3089,26 @@ export function createRealPort(options: RealPortOptions): WorkspacePort & LocalC
         invalidated.add(project.projectId);
         listener({ kind: "refresh", projectId: project.projectId });
       });
-      return () => { observers.delete(listener); if (!observers.size) { for (const retry of [...projectRetries.values(), ...historyRetries.values()]) clearTimeout(retry); projectRetries.clear(); historyRetries.clear(); } active = false; clearTimeout(gitTimer); gitShown.delete(planGit); clearTimeout(machineTimer); machineReads.delete(machineRead); page?.removeEventListener("visibilitychange", back); screen?.removeEventListener("focus", back); screen?.removeEventListener("blur", away); stop(); };
+      return () => {
+        active = false;
+        observers.delete(listener);
+        if (!observers.size) {
+          for (const retry of [...projectRetries.values(), ...historyRetries.values(), ...historyTrailing.values()]) clearTimeout(retry);
+          projectRetries.clear();
+          historyRetries.clear();
+          historyTrailing.clear();
+          historyStreamStarted.clear();
+          resetFollows();
+          nativeWork.clear();
+          decisionsFollowingHistory.clear();
+        }
+        clearTimeout(gitTimer); gitShown.delete(planGit);
+        clearTimeout(machineTimer); machineReads.delete(machineRead);
+        page?.removeEventListener("visibilitychange", back);
+        screen?.removeEventListener("focus", back);
+        screen?.removeEventListener("blur", away);
+        stop();
+      };
     },
   };
 }

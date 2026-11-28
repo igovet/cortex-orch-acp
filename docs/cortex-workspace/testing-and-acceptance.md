@@ -6,7 +6,7 @@ Gate D passed on 2026-11-05 for the clickable browser prototype, recorded in [de
 
 Use test-first development for domain and lifecycle rules, sprint dependencies and queue, archive retention and purge, workspace and merge guards, runtime-to-Workspace mapping and mock-adapter contracts. Cover positive and negative acceptance cases, unknown and stale states, races and injected-time boundaries. Use real Git only in isolated disposable fixtures. Visual design is not adequately established by TDD: use rendered walkthroughs, accessibility checks and owner review. Current installed-package acceptance is text-only, without screenshots. The rendered layout geometry gate (`packages/workspace-ui/test/layout-fit.mjs`) proves box geometry in WebKitGTK on fake data at the owner's widths and the window minimum; it gives no visual verdict and exercises no pointer or keyboard input. The scroll gate (`packages/workspace-ui/test/scroll-perf.mjs`) scrolls every long surface of the same fake data in WebKitGTK with compositing on, by scrollbar drag and the real wheel, and fails on dropped or long frames, scroll-time script and DOM changes; its limits and known shortfalls are in [Scrolling, recorded](performance.md#scrolling-recorded), and it is software rendering, not the owner's GPU. Mock evidence is not production qualification.
 
-The packaged owner-scale walkthrough (`tests/workspace_support/run_owner_walkthrough.py` with its `--clipboard` option) was a Python harness and was removed on 2026-11-16 without replacement; the observations below were recorded with it and are history. It ran in a disposable no-network container with empty HOME, a real release store alongside dev data, long descriptions and questions, six dependent sprint tasks, eight execution workers with long histories, and a real Git conflict. Sixty client-clock minutes are simulated; the host and service clocks are unchanged. It measures idle/hover mutations, geometry, visible ages, owner-action cues and double-submit feedback without screenshots. Add `--clipboard` for physical text dragging and Ctrl+C with native clipboard readback on Home, result prose and Settings. This was measured native-window evidence, not a subjective visual verdict or a real-engine workload.
+The former owner-scale walkthrough is historical. The supported installed-package input gate is documented below and in [verification](../project/verification.md#installed-desktop-real-input-gate).
 
 For the local slice, the no-paid checks use fake engines and the scripted protocol peer. A browser run does not qualify the WebKitGTK window. Native checks run in the container build ([platforms](platforms.md)); a native check that cannot run is recorded as blocked rather than passed. Rendered Ubuntu observations are recorded as structured text outcomes, without screenshots.
 
@@ -61,6 +61,20 @@ an absent, inactive or unwritable recorder cannot fall back to a browser.
 `drive` requires a private authenticated Xvfb and never uses the owner's display: it refuses `--real-display`, a missing Xvfb or a missing `xauth` before any archive handling or driver dispatch. The launcher creates a per-run mode-0600 X authority cookie, starts Xvfb with it and with TCP disabled, and checks that the display belongs to the run's own Xvfb process and differs from the inherited `DISPLAY`. Before every click, capture or driver dispatch it checks that the target window belongs to the extracted desktop process. `smoke --xvfb` applies the same checks; only plain `smoke` may use another display. `bash scripts/test-qualify-dev-display.sh` exercises these refusals without paid calls.
 Compare each scenario record with the independently read GitHub URL. This proves
 the address handoff, not browser navigation, PR creation or a rendered click by itself.
+
+## Result acceptance when workspace observation fails
+
+Manual acceptance, owner-approved Automatic finish, and unattended acceptance
+retry a detected scan race once when the initial scan failed promptly. The
+retry keeps the same observation rules and checks the native result again
+after capturing the workspace. When sandboxed Git selection is unavailable,
+a complete bounded tree scan can still establish the workspace witness.
+If that also fails, the result stays pending acceptance with a reason and a
+retry action. The runtime records the observation reason and any Git fallback
+classification without paths, output, or environment values. The queue keeps
+the completed result and waits for workspace observation before continuing.
+When the native observer reports that its sandbox could not start, the
+acceptance refusal asks the owner to restore local sandbox support and retry.
 
 ## Desktop and Android release qualification
 

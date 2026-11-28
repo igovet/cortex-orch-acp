@@ -2,12 +2,9 @@
 //!
 //! `uninstall` is reversible-by-default: with no `--remove-*` flag it only prints
 //! exactly what it would remove. Real deletion needs a specific `--remove-*` flag
-//! AND `--i-confirm-removal`. It deletes only the channel's owner config and state
-//! roots (`<config>/cortex`, `<state>/cortex`) and, only with `--project PATH`, that
-//! one project's own store directory; each root is re-verified as an owner-private,
-//! non-symlinked directory immediately before it is removed. It never touches an
-//! engine's own install or account directories, shell or editor configuration, or
-//! SSH/Git credentials.
+//! AND `--i-confirm-removal`. User-scope cleanup preserves the channel's live
+//! project store tree. `--project PATH` can remove a legacy project-local store.
+//! Relocated stores use the fenced `cortex-acp project-stores` owner commands.
 //!
 //! `clone-dev-settings` copies only non-secret settings files into the Dev channel
 //! config directory. It never reads or copies account or state files, drops every
@@ -44,36 +41,73 @@ fn directory_state(path: &Path) -> &'static str {
     }
 }
 
-fn tree_bytes(path: &Path) -> u64 {
+fn tree_bytes(path: &Path, preserved: Option<&Path>) -> u64 {
+    if preserved.is_some_and(|p| path.starts_with(p)) {
+        return 0;
+    }
     let Ok(entries) = fs::read_dir(path) else {
         return 0;
     };
     entries
         .flatten()
         .map(|entry| match entry.file_type() {
-            Ok(kind) if kind.is_dir() => tree_bytes(&entry.path()),
+            Ok(kind) if kind.is_dir() => tree_bytes(&entry.path(), preserved),
             Ok(kind) if kind.is_symlink() => 0,
             _ => entry.metadata().map_or(0, |m| m.len()),
         })
         .sum()
 }
 
-fn project_store(project: &Path) -> Result<PathBuf, String> {
+fn validate_project(project: &Path) -> Result<(), String> {
     let canonical = project
         .canonicalize()
         .map_err(|_| "project must be an existing directory".to_string())?;
     if !project.is_absolute() || canonical != project || !canonical.is_dir() {
         return Err("project must be an absolute, canonical directory".into());
     }
-    Ok(canonical.join(cortex_acp::startup::project_store_name()))
+    Ok(())
 }
 
-fn plan(project: Option<&Path>) -> Result<Vec<Value>, String> {
+fn owner_store_root(state: &Path) -> Result<cortex_core::store::StoreRoot, String> {
+    let channel = if workspace_protocol::channel::current().is_dev() {
+        cortex_core::StoreChannel::Dev
+    } else {
+        cortex_core::StoreChannel::Release
+    };
+    cortex_core::store::StoreRoot::new(
+        state.parent().ok_or("the owner storage roots are unavailable")?,
+        channel,
+    )
+    .map_err(|e| e.code().to_owned())
+}
+
+fn legacy_project_store(project: &Path, environment: &Environment) -> Result<PathBuf, String> {
+    validate_project(project)?;
+    let (_, state) = owner_roots(environment).ok_or("the owner storage roots are unavailable")?;
+    let root = owner_store_root(&state)?;
+    let key = root.project_key(project).map_err(|e| e.code().to_owned())?;
+    let legacy = key.anchor_directory();
+    let logical = key.root().to_owned();
+    let selected = key.resolve_existing().map_err(|e| format!(
+        "store location cannot be verified ({}). Run cortex-acp project-stores list.",
+        e.code()
+    ))?;
+    if selected.directory() != legacy {
+        return Err("use cortex-acp project-stores list and delete STORE_ID --confirm for a relocated store".into());
+    }
+    if logical != project {
+        return Err("use the logical project root instead of a linked worktree".into());
+    }
+    Ok(legacy)
+}
+
+fn plan(project: Option<&Path>, environment: &Environment) -> Result<Vec<Value>, String> {
     let mut entries: Vec<(&str, Result<PathBuf, String>)> = Vec::new();
-    match owner_roots(&Environment::from_process()) {
+    let roots = owner_roots(environment);
+    match &roots {
         Some((config, state)) => {
-            entries.push(("user_config", Ok(config)));
-            entries.push(("user_state", Ok(state)));
+            entries.push(("user_config", Ok(config.clone())));
+            entries.push(("user_state", Ok(state.clone())));
         }
         None => {
             entries.push(("user_config_error", Err("storage_root_unavailable".into())));
@@ -81,20 +115,25 @@ fn plan(project: Option<&Path>) -> Result<Vec<Value>, String> {
         }
     }
     if let Some(project) = project {
-        entries.push(("project_cortex_store", Ok(project_store(project)?)));
+        validate_project(project)?;
+        entries.push(("project_cortex_store", legacy_project_store(project, environment)));
     }
+    let store_root = roots.as_ref().and_then(|(_, state)| owner_store_root(state).ok());
+    let preserved = store_root.as_ref().map(|root| root.path());
     Ok(entries
         .into_iter()
         .map(|(scope, path)| match path {
             Err(code) => json!({"scope": scope, "path": null, "status": code, "bytes": 0}),
             Ok(path) => {
                 let status = directory_state(&path);
+                let real = path.canonicalize().unwrap_or_else(|_| path.clone());
                 let bytes = if status == "owner_private" {
-                    tree_bytes(&path)
+                    tree_bytes(&real, preserved)
                 } else {
                     0
                 };
-                json!({"scope": scope, "path": path, "status": status, "bytes": bytes})
+                json!({"scope": scope, "path": path, "status": status, "bytes": bytes,
+                    "preserves": preserved.filter(|p| p.starts_with(&real) || real.starts_with(*p))})
             }
         })
         .collect())
@@ -113,7 +152,69 @@ fn remove_verified(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
+fn remove_user_scope(path: &Path, preserved: &Path, removed: &mut Vec<String>) -> Result<(), String> {
+    if path.starts_with(preserved) {
+        return Ok(());
+    }
+    match directory_state(path) {
+        "absent" => return Ok(()),
+        "unsafe" => return Err(format!("refusing to remove {}", path.display())),
+        _ => {}
+    }
+    if !preserved.starts_with(path) {
+        removed.extend(remove_verified(path)?);
+        return Ok(());
+    }
+    let remove_error = |e| format!("cannot remove {}: {e}", path.display());
+    for entry in fs::read_dir(path).map_err(remove_error)? {
+        let entry = entry.map_err(remove_error)?;
+        let child = entry.path();
+        if child == preserved {
+            continue;
+        }
+        if entry.file_type().map_err(remove_error)?.is_dir() {
+            remove_user_scope(&child, preserved, removed)?;
+        } else {
+            fs::remove_file(&child).map_err(remove_error)?;
+            removed.push(child.display().to_string());
+        }
+    }
+    // Never recurse through the protected path, even if another process just
+    // created it. A directory that still contains anything stays in place.
+    match fs::remove_dir(path) {
+        Ok(()) => removed.push(path.display().to_string()),
+        Err(error) if error.raw_os_error() == Some(libc::ENOTEMPTY) => {}
+        Err(error) => return Err(remove_error(error)),
+    }
+    Ok(())
+}
+
+fn remove_user_roots(config: &Path, state: &Path) -> Result<Vec<String>, String> {
+    let store_root = owner_store_root(state)?;
+    let preserved = store_root.path();
+    let normalize = |path: &Path| match directory_state(path) {
+        "owner_private" => fs::canonicalize(path).map(Some)
+            .map_err(|e| format!("cannot inspect {}: {e}", path.display())),
+        "absent" => Ok(None),
+        _ => Err(format!("refusing to remove {}: not an owner-private real directory", path.display())),
+    };
+    let config = normalize(config)?;
+    let state = normalize(state)?;
+    let mut removed = Vec::new();
+    if let Some(config) = config.as_deref().filter(|config| Some(*config) != state.as_deref()) {
+        remove_user_scope(config, preserved, &mut removed)?;
+    }
+    if let Some(state) = state {
+        remove_user_scope(&state, preserved, &mut removed)?;
+    }
+    Ok(removed)
+}
+
 pub fn uninstall(argv: &[String]) -> (String, i32) {
+    uninstall_in_environment(argv, &Environment::from_process())
+}
+
+fn uninstall_in_environment(argv: &[String], environment: &Environment) -> (String, i32) {
     let (mut project, mut user, mut store, mut confirm) = (None::<PathBuf>, false, false, false);
     let mut it = argv.iter();
     while let Some(arg) = it.next() {
@@ -141,7 +242,7 @@ pub fn uninstall(argv: &[String]) -> (String, i32) {
         )
     };
     if !user && !store {
-        return match plan(project.as_deref()) {
+        return match plan(project.as_deref(), environment) {
             Ok(report) => (pretty(&json!({"dry_run": true, "would_remove": report})), 0),
             Err(error) => {
                 eprintln!("error: {error}");
@@ -161,17 +262,18 @@ pub fn uninstall(argv: &[String]) -> (String, i32) {
     }
     let mut removed = serde_json::Map::new();
     let outcome = (|| -> Result<(), String> {
+        let legacy = if store {
+            Some(legacy_project_store(project.as_deref().unwrap(), environment)?)
+        } else {
+            None
+        };
         if user {
-            let (config, state) = owner_roots(&Environment::from_process())
+            let (config, state) = owner_roots(environment)
                 .ok_or("the owner storage roots are unavailable")?;
-            let mut gone = Vec::new();
-            for root in [config, state] {
-                gone.extend(remove_verified(&root)?);
-            }
+            let gone = remove_user_roots(&config, &state)?;
             removed.insert("user_scope".into(), json!(gone));
         }
-        if store {
-            let directory = project_store(project.as_deref().unwrap_or(Path::new("")))?;
+        if let Some(directory) = legacy {
             removed.insert("project_store".into(), json!(remove_verified(&directory)?));
         }
         Ok(())
@@ -539,6 +641,16 @@ mod tests {
         dir
     }
 
+    fn fixture_environment(base: &Path) -> Environment {
+        Environment {
+            home: Some(base.display().to_string()),
+            config_home: None,
+            state_home: None,
+            routing: None,
+            runtime_root: None,
+        }
+    }
+
     #[test]
     fn dev_clone_keeps_only_safe_native_settings() {
         let base = scratch("clone");
@@ -606,26 +718,35 @@ mod tests {
 
     #[test]
     fn uninstall_is_a_dry_run_unless_confirmed_and_scoped() {
-        let (text, code) = uninstall(&[]);
+        let base = scratch("uninstall-dry-run");
+        let env = fixture_environment(&base);
+        let (text, code) = uninstall_in_environment(&[], &env);
         assert_eq!(code, 0);
         assert!(text.contains("\"dry_run\": true"));
-        assert_eq!(uninstall(&["--remove-user-scope".into()]).1, 2);
         assert_eq!(
-            uninstall(&[
-                "--remove-project-store".into(),
-                "--i-confirm-removal".into()
-            ])
-            .1,
+            uninstall_in_environment(&["--remove-user-scope".into()], &env).1,
             2
         );
+        assert_eq!(
+            uninstall_in_environment(
+                &["--remove-project-store".into(), "--i-confirm-removal".into()],
+                &env,
+            ).1,
+            2
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
     fn project_store_removal_checks_the_directory_before_deleting() {
         let base = scratch("uninstall").canonicalize().unwrap();
-        let store = base.join(cortex_acp::startup::project_store_name());
-        fs::create_dir_all(&store).unwrap();
-        fs::write(store.join("cortex.sqlite3"), "x").unwrap();
+        let env = fixture_environment(&base);
+        let (_, state) = owner_roots(&env).unwrap();
+        let home = owner_store_root(&state).unwrap();
+        let channel = home.project_key(&base).unwrap().channel();
+        let key = cortex_core::ProjectKey::new(&base, channel).unwrap();
+        let store = key.directory();
+        drop(cortex_core::Store::open(key, cortex_core::OpenMode::Initialize).unwrap());
         fs::write(base.join("keep.txt"), "k").unwrap();
         let project = base.display().to_string();
         let args = |extra: &[&str]| -> Vec<String> {
@@ -635,19 +756,68 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect()
         };
-        let (planned, code) = uninstall(&args(&[]));
+        let (planned, code) = uninstall_in_environment(&args(&[]), &env);
         assert!(code == 0 && planned.contains("project_cortex_store") && store.exists());
-        let (removed, code) = uninstall(&args(&["--remove-project-store", "--i-confirm-removal"]));
+        let remove = args(&["--remove-project-store", "--i-confirm-removal"]);
+        let (removed, code) = uninstall_in_environment(&remove, &env);
         assert_eq!(code, 0, "{removed}");
         assert!(!store.exists() && base.join("keep.txt").exists());
         // A symlinked store is never followed or removed.
         std::os::unix::fs::symlink(&base, &store).unwrap();
         assert_eq!(
-            uninstall(&args(&["--remove-project-store", "--i-confirm-removal"])).1,
+            uninstall_in_environment(&remove, &env).1,
             1
         );
         assert!(base.join("keep.txt").exists());
         fs::remove_file(&store).unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn uninstall_preserves_home_stores_for_explicit_administration() {
+        use cortex_core::store::administration::{self, Removal};
+        use cortex_core::{OpenMode, Store};
+
+        let base = scratch("uninstall-home-store").canonicalize().unwrap();
+        let env = fixture_environment(&base);
+        let (config, state) = owner_roots(&env).unwrap();
+        let root = owner_store_root(&state).unwrap();
+        let project = base.join("project");
+        let other = base.join("other");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&other).unwrap();
+        let store = Store::open(root.project_key(&project).unwrap(), OpenMode::Initialize).unwrap();
+        let database = store.key().database();
+        let marker = store.key().anchor_directory().join("cortex.sqlite3");
+        let other_store = Store::open(root.project_key(&other).unwrap(), OpenMode::Initialize).unwrap();
+        let other_database = other_store.key().database();
+        drop((store, other_store));
+        fs::create_dir_all(&config).unwrap();
+        fs::write(config.join("defaults.json"), "{}").unwrap();
+        fs::write(state.join("engine-cache"), "cache").unwrap();
+
+        let args = |values: &[&str]| values.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let combined = args(&[
+            "--project", project.to_str().unwrap(), "--remove-user-scope",
+            "--remove-project-store", "--i-confirm-removal",
+        ]);
+        assert_eq!(uninstall_in_environment(&combined, &env).1, 1);
+        assert!(config.join("defaults.json").exists());
+        assert!(database.exists() && marker.exists());
+
+        let user_only = args(&["--remove-user-scope", "--i-confirm-removal"]);
+        assert_eq!(uninstall_in_environment(&user_only, &env).1, 0);
+        assert!(!config.exists());
+        assert!(!state.join("engine-cache").exists());
+        assert!(database.exists() && other_database.exists() && marker.exists());
+
+        let records = administration::list(&root).unwrap();
+        let record = records.iter().find(|item| item.project_root == project).unwrap();
+        assert!(administration::remove(&root, &record.store_id, Removal::Database, false).is_err());
+        assert!(database.exists() && marker.exists());
+        administration::remove(&root, &record.store_id, Removal::Database, true).unwrap();
+        assert!(!database.exists() && !marker.exists());
+        assert!(other_database.exists());
         fs::remove_dir_all(base).unwrap();
     }
 }

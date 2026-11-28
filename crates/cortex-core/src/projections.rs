@@ -155,6 +155,7 @@ pub(crate) fn task_with_disposition(
     let mut warnings = Vec::new();
     let mut route = None;
     let mut automatic_continuation = None;
+    let mut draft_binding = None;
     if let Some(execution) = field(&t, "execution_id") {
         phase = "unknown";
         state = "unknown";
@@ -185,6 +186,15 @@ pub(crate) fn task_with_disposition(
                 field(s, "project_root") == Some(root) && field(s, "task_id") == Some(runtime)
             });
             let epoch = owner.as_ref().map(|o| number(o, "epoch")).unwrap_or(0);
+            if valid_binding && epoch > 0 && epoch == number(&e, "owner_epoch") {
+                if let Some(session_id) = field(&e, "acp_session_id") {
+                    draft_binding = Some(workspace_protocol::read::DraftBinding {
+                        runtime_task_id: runtime.to_owned(),
+                        session_id: session_id.to_owned(),
+                        owner_epoch: ver(epoch)?,
+                    });
+                }
+            }
             if let Some(r) = &r {
                 let raw = field(r, "state").unwrap_or("");
                 let mapped = lifecycle(raw);
@@ -217,6 +227,12 @@ pub(crate) fn task_with_disposition(
                     if raw=="CANCELLED" && (matches!(field(r, "blocker"), Some("owner_resolved_without_certification" | "user_force_finished"))
                         || crate::workspace::control::owner_resolution_current(db, runtime)?) {
                         warnings.push("owner_resolved_without_certification".into());
+                        if row(db, "SELECT 1 FROM runtime_events v WHERE v.task_id=? AND v.type='OWNER_TASK_RESOLVED'
+                            AND json_extract(v.payload_json,'$.disposition')='external'
+                            AND v.id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=v.task_id
+                                AND type='TASK_REOPENED'),0) LIMIT 1", [runtime])?.is_some() {
+                            warnings.push("owner_completed_externally".into());
+                        }
                     }
                 } else {
                     warnings.push("contradictory_evidence".into());
@@ -252,6 +268,12 @@ pub(crate) fn task_with_disposition(
                                     }
                                 }
                             }
+                        }
+                    }
+                    if raw == "PAUSED" {
+                        if let Some((role, reference)) = crate::workspace::control::external_close_blocker(db, runtime)? {
+                            warnings.push("external_close_waiting_for_exit".into());
+                            reason = Some(reference.map_or(role.clone(), |reference| format!("{role} ({reference})")));
                         }
                     }
                     // A step queued behind a writer or the owner's Code edit
@@ -344,6 +366,7 @@ pub(crate) fn task_with_disposition(
         title_availability: "not_connected".into(),
         version: ver(number(&t, "version"))?,
         execution_id: field(&t, "execution_id").map(str::to_owned),
+        draft_binding,
         phase: phase.into(),
         runtime_state,
         execution_state: state.into(),
@@ -373,7 +396,7 @@ pub fn owner_closed(
     db: &Connection,
     project: &str,
     root: &str,
-) -> CoreResult<Vec<(String, Option<i64>)>> {
+) -> CoreResult<Vec<(String, Option<i64>, bool)>> {
     let mut query = db.prepare(
         "SELECT t.task_id FROM workspace_tasks t
          JOIN workspace_executions e ON e.execution_id=t.execution_id AND e.task_id=t.task_id
@@ -403,7 +426,7 @@ pub fn owner_closed(
                 .as_deref()
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .map(|d| d.timestamp_millis());
-            out.push((id, at));
+            out.push((id, at, t.warnings.iter().any(|warning| warning == "owner_completed_externally")));
         }
     }
     Ok(out)
@@ -823,6 +846,7 @@ struct Model {
     stream: EventStream,
     versions: BTreeMap<String, Version>,
     project_version: Version,
+    history_heads: Vec<workspace_protocol::read::HistoryHead>,
 }
 pub struct ProjectionReader {
     store: Store,
@@ -830,7 +854,72 @@ pub struct ProjectionReader {
     actor: String,
     model: Mutex<Model>,
 }
+
+pub struct HistoryFollowRead {
+    pub generation: String,
+    pub through: Version,
+    pub page: workspace_protocol::read::ReadPage<workspace_protocol::read::HistoryRow>,
+    pub decisions: Option<Value>,
+}
 impl ProjectionReader {
+    pub fn stream_position(&self) -> CoreResult<(String, Version)> {
+        let model = self.model.lock().map_err(|_| CoreError::Refused("storage_unavailable"))?;
+        Ok((model.stream.generation().into(), model.stream.high_watermark()))
+    }
+
+    pub fn follow_history(
+        &self,
+        request: &workspace_protocol::read::HistoryFollowRequest,
+        previous_decision: Option<&str>,
+    ) -> CoreResult<HistoryFollowRead> {
+        request.validate().map_err(CoreError::Refused)?;
+        if request.project_id != self.project {
+            return refuse("invalid_project");
+        }
+        let (generation, published) = self.stream_position()?;
+        if request.generation.as_ref().is_some_and(|expected| expected != &generation) {
+            return refuse("history_reset");
+        }
+        let root = self.store.key().root().to_string_lossy();
+        self.store.read_transaction(|db| {
+            project_row(db, &self.project, &self.actor, &root)?;
+            let (through, floor) = position(db, &self.project)?;
+            if published < floor || published > through {
+                return refuse("history_reset");
+            }
+            let exact = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_tasks
+                  WHERE project_id=? AND task_id=? AND execution_id=?)",
+                (&self.project, &request.task_id, &request.execution_id),
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exact {
+                return refuse("native_execution_binding_invalid");
+            }
+            let selector = workspace_protocol::core::Page {
+                target: request.task_id.clone(),
+                cursor: request.cursor.clone(),
+                limit: request.limit,
+            };
+            let mut page = if selector.cursor.is_some() {
+                history::page(db, &self.project, &selector)?
+            } else {
+                history::earlier(db, &self.project, &selector)?
+            };
+            if page.next_cursor.is_some() || page.tail_cursor.is_none() {
+                return refuse("history_follow_backlog");
+            }
+            let (revision, decisions) = crate::workspace::control::history_follow_decisions(
+                db, &root, &self.project, &self.actor, &request.task_id, &request.execution_id,
+                through, previous_decision,
+            )?;
+            page.decision_revision = Some(revision);
+            let value = serde_json::to_value(&page)?;
+            workspace_protocol::validate("HistoryPage", &value)
+                .map_err(|_| CoreError::Refused("invalid_history_page"))?;
+            Ok(HistoryFollowRead { generation, through, page, decisions })
+        })
+    }
     pub fn new(store: Store, project: String, actor: String) -> CoreResult<Self> {
         let (high, versions) = store.read(|db| {
             project_row(
@@ -864,6 +953,7 @@ impl ProjectionReader {
                 ),
                 versions,
                 project_version: ver(0)?,
+                history_heads: Vec::new(),
             }),
         })
     }
@@ -945,16 +1035,27 @@ impl ProjectionReader {
             .map_err(|_| CoreError::Refused("storage_unavailable"))?;
         self.poll_model(&mut model)
     }
+    /// Only the latest batch can carry the optional metadata captured in its
+    /// own SQLite snapshot. A queued older batch falls back to ordinary reads.
+    pub fn history_heads(
+        &self,
+        generation: &str,
+        through: Version,
+    ) -> Vec<workspace_protocol::read::HistoryHead> {
+        self.model.lock().ok().filter(|model| {
+            model.stream.generation() == generation && model.stream.high_watermark() == through
+        }).map(|model| model.history_heads.clone()).unwrap_or_default()
+    }
     fn poll_model(&self, model: &mut Model) -> CoreResult<()> {
         let after = model.stream.high_watermark();
         #[cfg(feature = "test-observations")]
         let mut timings = crate::test_observations::observing(Some(self.store.key().root()))
             .then(Vec::new);
-        let (high,changes)=self.store.read(|db| {
+        let (high,changes,history_heads)=self.store.read(|db| {
             project_row(db,&self.project,&self.actor,self.store.key().root().to_str().unwrap_or(""))?;
             let (high,floor)=position(db,&self.project)?;
             if after<floor || after>high {return refuse("resync_required");}
-            if high==after {return Ok((high,Vec::new()));}
+            if high==after {return Ok((high,Vec::new(),Vec::new()));}
             let entries=db.prepare("SELECT sequence,entity_id,kind FROM workspace_outbox WHERE project_id=? AND sequence>? ORDER BY sequence LIMIT 10001")?
                 .query_map(rusqlite::params![self.project,after.get()],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
                 .collect::<Result<Vec<_>,_>>()?;
@@ -986,7 +1087,16 @@ impl ProjectionReader {
                     timings.push(started.elapsed());
                 }
             }
-            Ok((high,changes))
+            let head_ids = changes.iter().filter_map(|change| match &change.operation {
+                DeltaOperation::Upsert(PublicEntity::TaskProjection(task))
+                    if task.execution_id.is_some() && task.phase != "unknown" => Some(change.id.as_str()),
+                _ => None,
+            }).take(workspace_protocol::read::HISTORY_HEAD_LIMIT + 1).collect::<Vec<_>>();
+            // A missing optimization hint never prevents the durable delta
+            // or changes what it authorizes.
+            let history_heads = history::heads(db, &self.project, self.store.key().root().to_str().unwrap_or(""), &head_ids)
+                .unwrap_or_default();
+            Ok((high,changes,history_heads))
         })?;
         if high == after {
             return Ok(());
@@ -1001,6 +1111,7 @@ impl ProjectionReader {
             changes,
         };
         model.stream.publish(batch.clone())?;
+        model.history_heads = history_heads;
         #[cfg(feature = "test-observations")]
         if let Some(timings) = timings {
             use crate::test_observations::{record, Batch, Change, Observation};

@@ -121,6 +121,7 @@ pub(super) async fn run(
     project: &str,
     params: &Value,
     git: &mut Git,
+    observe_relocation: Option<impl Fn(bool) + Send + Sync + 'static>,
 ) -> Result<Value> {
     let (wanted, checkout) = context::file_checkout(root, project, params, git).await?;
     let name = string(params, "file")?;
@@ -159,7 +160,10 @@ pub(super) async fn run(
     let store = if op == "repo.file.lease.acquire" {
         // Explicit Edit, not a passive Code read, can establish the channel's
         // store for a registered folder that has never run a task.
-        let key = context::key(root)?;
+        let mut key = context::key(root)?;
+        if let Some(observe) = observe_relocation {
+            key = key.observe_relocation(observe);
+        }
         crate::project_guard::activate(key.root())?;
         let store = open_for_acquire(key).map_err(lease_error)?;
         authority.prepare(&store).map_err(lease_error)?;

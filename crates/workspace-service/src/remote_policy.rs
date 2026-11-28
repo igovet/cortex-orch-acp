@@ -381,6 +381,7 @@ mod tests {
     #[test]
     fn a_phone_subscribes_to_owner_moments_only() {
         assert!(allowed("notifications.subscribe", &json!({})));
+        assert!(!allowed("native.history.follow", &json!({})));
         for params in [json!({"projectId":"p"}), json!(null), json!([]), json!("x")] {
             assert!(!allowed("notifications.subscribe", &params), "{params}");
         }

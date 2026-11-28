@@ -1,9 +1,10 @@
 import { LoadingBar } from "./skeleton";
 import { currentModelId, plainChoice, classifiedPlanningFailure, stoppedPlanningComposerText } from "./selectors";
-import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, useContext, type Accessor, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, untrack, useContext, type Accessor, type JSX } from "solid-js";
 import { capabilityOf, FEATURES, machineDefaults, machineEffort, orderedEfforts, resolveEffort, type Attachment, type AttachmentInput, type AttachmentRef, type Message, type SessionOptions, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { attachmentFile, attachmentName, attachmentPreview, attachmentRef, keepBytes, readAttachments, wireAttachments } from "./attachments";
 import { autoGrow } from "./autogrow";
+import { workspaceCopy } from "./copy";
 import { useWs } from "./ctx";
 import { setDragPreview } from "./drag-preview";
 import { REQUESTING, RequestStatus } from "./request-feedback";
@@ -12,14 +13,14 @@ import { createLocalDictation } from "./voice";
 import { voiceLanguageName } from "./voice-client";
 import { I, MenuItem, Pop } from "./kit";
 import { Action, Whole } from "./layout";
+import { createLocalInput, taskDraftScope } from "./local-drafts";
 import { createSuggest, SUGGEST_HINT, SuggestList, type SlashCommand, type SuggestOptions } from "./suggest";
 import { MarkdownMirror } from "./markdown-field";
 import { duration, REWORK_LABEL, reworkBinding, resumeState, stopLabel, taskSettings, workingNow, type ComposerMode, type SessionModel } from "./session-model";
 import { PlanningPlace, usePlanningSprint, useTaskRoutes } from "./task-place";
 
 /** Attached files are uploaded once, as they are added; the draft holds their references until an explicit send or queue action. */
-export function createAttachments() {
-  const ws = useWs();
+function createAttachmentStage(ws: ReturnType<typeof useWs>) {
   const [files, setFiles] = createSignal<AttachmentInput[]>([]);
   const [error, setError] = createSignal(""), [busy, setBusy] = createSignal(false);
   let pending = Promise.resolve(), reading = 0;
@@ -50,9 +51,44 @@ export function createAttachments() {
       } catch (e) { setError(e instanceof Error ? e.message : "Clipboard is unavailable."); }
     }).finally(() => { reading--; setBusy(reading > 0); });
   };
-  return { files, error, busy, ingest, pasteNative, refuse: setError, set: setFiles, add, remove: (item: AttachmentInput) => { setFiles(files().filter(f => f !== item)); setError(""); }, clear: () => { setFiles([]); setError(""); } };
+  const clearSubmitted = () => {
+    const submitted = files();
+    return () => { if (files() === submitted) setFiles([]); };
+  };
+  return { files, error, busy, ingest, pasteNative, clearSubmitted, refuse: (message: string) => setError(message), set: (items: AttachmentInput[]) => setFiles(items), add, remove: (item: AttachmentInput) => { setFiles(files().filter(f => f !== item)); setError(""); }, clear: () => { setFiles([]); setError(""); } };
 }
-export type Attachments = ReturnType<typeof createAttachments>;
+export type Attachments = ReturnType<typeof createAttachmentStage>;
+const staged = new WeakMap<ReturnType<typeof useWs>, Map<string, Attachments>>();
+
+/** A read or upload belongs to the editor where it began, even after navigation. */
+export function createAttachments(scope?: Accessor<readonly (string | null)[] | undefined>) {
+  const ws = useWs();
+  const fallback = createAttachmentStage(ws);
+  if (!scope) return fallback;
+  const stages = staged.get(ws) ?? new Map<string, Attachments>();
+  staged.set(ws, stages);
+  const active = createMemo(() => {
+    const parts = scope();
+    if (!parts) return fallback;
+    const id = JSON.stringify(parts);
+    const existing = stages.get(id);
+    if (existing) return existing;
+    const stage = createAttachmentStage(ws);
+    stages.set(id, stage);
+    return stage;
+  });
+  return {
+    files: () => active().files(), error: () => active().error(), busy: () => active().busy(),
+    ingest: (items: File[]) => active().ingest(items),
+    pasteNative: (drop?: boolean, how?: { refused?: string; report?: boolean }) => active().pasteNative(drop, how),
+    refuse: (message: string) => active().refuse(message),
+    set: (items: AttachmentInput[]) => active().set(items),
+    add: (items: AttachmentInput[]) => active().add(items),
+    remove: (item: AttachmentInput) => active().remove(item),
+    clear: () => active().clear(),
+    clearSubmitted: () => active().clearSubmitted(),
+  };
+}
 export function attachmentEvents(a: Attachments, enabled: () => boolean = () => true) {
   const ws = useWs();
   const can = () => enabled() && ws.can(FEATURES.attachments);
@@ -91,6 +127,9 @@ export function AttachButton(props: { a: Attachments; disabled?: string; describ
 }
 function AttachChip(props: { file: AttachmentInput; onRemove?: (name: AttachmentInput) => void; open?: boolean }) {
   const ws = useWs();
+  const active = useContext(ScreenActive);
+  let mounted = true;
+  onCleanup(() => { mounted = false; });
   const name = () => attachmentName(props.file);
   const preview = () => attachmentPreview(props.file);
   const face = () => <>
@@ -101,10 +140,13 @@ function AttachChip(props: { file: AttachmentInput; onRemove?: (name: Attachment
   const openable = () => props.open ? attachmentFile(props.file) ?? attachmentRef(props.file) : null;
   const [opening, setOpening] = createSignal(false), [openError, setOpenError] = createSignal("");
   const open = async (file: Attachment | AttachmentRef) => {
-    if (!("sha256" in file)) { ws.open({ kind: "attachment", file }); return; }
+    // A previous click on this mounted chip may already have fetched the body.
+    const cached = attachmentFile(file);
+    if (cached) { ws.open({ kind: "attachment", file: cached }); return; }
+    if (!("sha256" in file)) return;
     if (opening()) return;
     setOpening(true); setOpenError("");
-    try { const read = await ws.store.readAttachment(file); keepBytes(file, read.data); ws.open({ kind: "attachment", file: read }); }
+    try { const read = await ws.store.readAttachment(file); keepBytes(file, read.data); if (mounted && active() && attachmentRef(props.file)?.sha256 === file.sha256) ws.open({ kind: "attachment", file: read }); }
     catch (e) { setOpenError(e instanceof Error ? e.message : "This file could not be opened."); }
     finally { setOpening(false); }
   };
@@ -132,6 +174,7 @@ export function TaskAttachments(props: { taskId: string }) {
   let asked = 0;
   const read = () => {
     const at = ++asked;
+    setFiles([]);
     setFailed(false);
     ws.store.readTaskAttachments(props.taskId).then(list => { if (at === asked) setFiles(list); }, () => { if (at === asked) setFailed(true); });
   };
@@ -323,6 +366,8 @@ export type MessageComposerProps = {
   mic: Dictation;
   /** Who receives the draft, or what sending changes, said before anything is sent. */
   effect?: JSX.Element;
+  /** Local, unsent text only. Discarding it leaves attachments and choices alone. */
+  draft?: { shown: boolean; discard: () => void; warning?: string | null; label?: string };
   /** Why nothing can be written here now. The draft and its tools stay in place. */
   off?: string;
   attachOff?: string;
@@ -373,6 +418,7 @@ export function MessageComposer(props: MessageComposerProps) {
   const suggest = createSuggest({ options: () => off() ? undefined : props.suggest, text: () => props.text, setText: v => props.onText(v), field: () => field });
   const onKey = (e: KeyboardEvent) => {
     // An open list takes the keys it uses, so Enter picks an option instead of sending.
+    if (e.isComposing || composing() || e.keyCode === 229) return;
     if (suggest.key(e)) return;
     if (e.key === "Escape" && props.onEscape) { e.stopPropagation(); props.onEscape(); return; }
     if (e.key !== "Enter" || e.isComposing || !props.send || props.send.run) return;
@@ -383,6 +429,7 @@ export function MessageComposer(props: MessageComposerProps) {
   const insertAndSend = () => props.send?.insertAndSend && !off() ? (spoken: string) => props.send!.insertAndSend!(props.text.trim() ? `${props.text.trimEnd()} ${spoken}` : spoken) : undefined;
   return <div class={`composer mc${props.class ? ` ${props.class}` : ""}`} style={props.style} role={props.group ? "group" : undefined} aria-label={props.group} {...attachmentEvents(props.files, () => !off() && !props.attachOff)}>
     <Show when={props.effect}><div class="mc-effect">{props.effect}</div></Show>
+    <Show when={props.draft?.warning}>{warning => <div class="mc-effect st-warn" role="status">{warning()}</div>}</Show>
     <AttachmentStatus a={props.files} />
     <MicBar mic={props.mic} onInsert={append} onInsertAndSend={insertAndSend()} />
     <AttachChips files={props.files.files()} onRemove={props.files.remove} />
@@ -404,6 +451,10 @@ export function MessageComposer(props: MessageComposerProps) {
       <div class="c-end">
         {props.delivery}
         {props.extra}
+        <Show when={props.draft?.shown}>
+          <button class="ib" type="button" aria-label={props.draft?.label ?? workspaceCopy("discardTextDraft")} data-tooltip={props.draft?.label ?? workspaceCopy("discardTextDraft")}
+            onClick={() => { props.draft?.discard(); if (!off()) field?.focus(); }}><I n="trash" /></button>
+        </Show>
         <Show when={props.send}>{s => <SendButton label={s().label} why={sendWhy()} needs={s().needs} onClick={submit} describedBy={s().run ? undefined : said()} icon={s().run?.icon} shortcut={s().run ? undefined : props.sendKey === "mod-enter" ? "Ctrl/Cmd+Enter" : "Enter"} />}</Show>
       </div>
     </CBar>
@@ -481,10 +532,53 @@ export function Composer(props: { model: Accessor<SessionModel | null>; team?: J
   const [nextTurn, setNextTurn] = createSignal(false);
   createEffect(on(() => props.model()?.view.id, () => setNextTurn(false), { defer: true }));
   const draftKey = () => { const s = planning(); return s ? `sprint:${s.id}` : id(); };
-  const [text, setText] = createSignal(ws.drafts.get(draftKey()) ?? "");
-  const write = (value: string) => { setText(value); ws.drafts.set(draftKey(), value); };
+  // Before the first planner is linked the sprint itself owns the input. Bind that
+  // one staged edit when the matching planner row arrives, in either read order.
+  let waiting: { source: string; planner?: string } | undefined;
+  const scope = createMemo(() => {
+    const s = planning(), v = props.model()?.view;
+    if (!s) return v ? [...taskDraftScope(v.task, v.machine.id), "coordinator"] : undefined;
+    const provisional = [ws.machine().id, s.projectId, null, null, null, null, null, "planner", s.id];
+    const source = JSON.stringify(provisional);
+    if (!s.planningTaskId) {
+      waiting = { source };
+      return provisional;
+    }
+    if (waiting?.source === source) {
+      waiting.planner ??= s.planningTaskId;
+      if (waiting.planner !== s.planningTaskId) waiting = undefined;
+    }
+    if (!v || v.id !== s.planningTaskId) return waiting?.source === source ? provisional : undefined;
+    const bound = [...taskDraftScope(v.task, v.machine.id), "planner", s.id];
+    if (waiting?.source === source) {
+      waiting = undefined;
+      untrack(() => {
+        const store = ws.localDrafts;
+        if (store) {
+          const from = store.key(provisional), to = store.key(bound), draft = store.read(from);
+          if (draft && !store.read(to)) {
+            store.set(to, draft.text);
+            store.confirmed(from, draft.version);
+          }
+        }
+        const stages = staged.get(ws), files = stages?.get(source), target = JSON.stringify(bound);
+        if (stages && files && !stages.has(target)) {
+          stages.set(target, files);
+          stages.delete(source);
+        }
+      });
+    }
+    return bound;
+  });
+  const local = createLocalInput(ws.localDrafts, scope);
+  const [ephemeral, setText] = createSignal(ws.localDrafts ? "" : ws.drafts.get(draftKey()) ?? "");
+  const text = () => local.enabled() ? local.text() : ephemeral();
+  const write = (value: string) => {
+    if (local.enabled()) local.set(value);
+    else { setText(value); if (!ws.localDrafts) ws.drafts.set(draftKey(), value); }
+  };
   const mic = createDictation();
-  const files = createAttachments();
+  const files = createAttachments(scope);
   const unsent = () => !!text().trim() || files.files().length > 0;
   createUnsent(unsent);
   createEffect(() => props.onUnsent?.(unsent()));
@@ -531,8 +625,14 @@ export function Composer(props: { model: Accessor<SessionModel | null>; team?: J
         }
         setReworkError("");
         setReworkPending(true);
+        if (local.enabled() && value !== text()) local.set(value);
+        const draft = local.snapshot(), clearSubmitted = files.clearSubmitted();
         void ws.run({ type: "rework_task", taskId, ...target, text: value, attachments }).then(receipt => {
-          if (receipt.ok) { if (text() === value && files.files() === attachments) done(); setRework(false); }
+          if (receipt.ok) {
+            if (draft) { draft.confirm(); clearSubmitted(); }
+            else if (text() === value && files.files() === attachments) done();
+            setRework(false);
+          }
           else setReworkError(receipt.message);
         }).finally(() => {
           setReworkPending(false);
@@ -552,7 +652,12 @@ export function Composer(props: { model: Accessor<SessionModel | null>; team?: J
     const command: WorkspaceCommand = sprint ? { type: "plan_message", sprintId: sprint.id, text: value, attachments, now: now() }
       : mode() === "review" ? { type: "request_changes", taskId: id(), text: value, attachments, now: now() }
       : { type: "send_message", taskId: id(), text: value, mode: mode() === "live" ? delivery() : "send_now", resume: mode() === "paused", now: now(), attachments };
-    done();
+    if (local.enabled()) {
+      if (value !== text()) local.set(value); // Dictation Insert and send.
+      const draft = local.snapshot();
+      if (draft) ws.store.sends.trackDraft(command, draft);
+      files.clear();
+    } else done();
     void ws.run(command);
   };
   const queuePlace = () => ({ kind: "queue" as const, taskId: id() });
@@ -564,7 +669,7 @@ export function Composer(props: { model: Accessor<SessionModel | null>; team?: J
       ?? (props.model() ? ws.store.sends.returned({ kind: "task", taskId: id() }) ?? ws.store.sends.returned(queuePlace()) : null);
     if (!back) return;
     ws.store.sends.take();
-    write(text().trim() ? `${text().trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
+    write(text().trim() && text() !== back.text ? `${text().trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
     queueMicrotask(() => input?.focus());
   });
   const readOnly = () => planning() ? planningOff()
@@ -685,6 +790,7 @@ export function Composer(props: { model: Accessor<SessionModel | null>; team?: J
       <MessageComposer group="Task composer" label={planning() ? "Message the planner" : "Message"} inputId={planning() ? "ws-plan-input" : undefined} placeholder={placeholder()} text={text()} onText={write} files={files} mic={mic}
         suggest={{ projectId: planning()?.projectId ?? m().view.project.id, taskId: props.model()?.view.id, commands: props.model() ? commands : undefined, skills: true }}
         effect={effect()} off={readOnly()} attachOff={mode() === "stopping" ? STOPPING : undefined} voiceOff={mode() === "stopping" ? STOPPING : undefined}
+        draft={{ shown: local.hasDraft(), warning: local.warning() ? ws.t("textDraftStorageUnavailable") : undefined, discard: () => local.set("") }}
         inputRef={el => { input = el; }}
         route={<Show when={planning()} fallback={<RouteBar id="task" up needs="set_task_settings" settings={taskSettings(m())} hint={nextTurn() && mode() === "live" ? "Applies from the next turn" : undefined} disabled={readOnly() || mode() === "stopping" ? "Unavailable for this task now" : undefined}
           onChange={settings => { setNextTurn(true); void ws.run({ type: "set_task_settings", taskId: id(), settings: { ...taskSettings(m()), ...settings } }); }} />}>{s =>

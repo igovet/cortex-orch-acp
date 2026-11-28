@@ -5,7 +5,8 @@ import { workspaceOutput } from "../../packages/workspace-ui/build-chunks.ts";
 const at = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 export default defineConfig({
   plugins: [solid()],
-  base: "./",
+  // Tauri serves the embedded frontend from the origin root, including on a deep-link reload.
+  base: "/",
   resolve: {
     alias: [
       { find: /^@cortex\/workspace-contract$/, replacement: at("../../packages/workspace-contract/index.js") },

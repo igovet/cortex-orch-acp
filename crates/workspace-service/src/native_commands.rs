@@ -251,18 +251,43 @@ pub(super) fn defer_json_over(
     if bytes.len() <= inline {
         return Ok(value);
     }
+    retain_json(store, i, &bytes, i.assignment.as_deref().unwrap_or("coordinator"), false)
+}
+
+/// Skill batch readback stays with the exact channel and reuses an identical body.
+pub(super) fn defer_skill(store: &Store, i: &Identity, channel: &str, value: Value) -> CoreResult<Value> {
+    let bytes = serde_json::to_vec(&value)?;
+    retain_json(store, i, &bytes, channel, true)
+}
+
+fn retain_json(store: &Store, i: &Identity, bytes: &[u8], scope: &str, skill: bool) -> CoreResult<Value> {
+    let hash = digest(bytes);
+    let result = |id| json!({"deferred":true,"large_output_id":id,"byte_count":bytes.len(),
+        "encoding":"utf-8","complete":false,"reason":"response_exceeds_inline_budget"});
+    if skill {
+        let existing: Option<String> = store.read(|db| Ok(db.query_row(
+            "SELECT id FROM large_outputs WHERE task_id=? AND owner_scope=? AND source_ref=?
+             AND byte_count=? AND filename GLOB 'skill-*' AND source_kind='tool_result'
+             ORDER BY id LIMIT 1",
+            (&i.task, scope, &hash, bytes.len() as i64), |r| r.get(0),
+        ).optional()?))?;
+        if let Some(id) = existing {
+            return Ok(result(id));
+        }
+    }
     let dir = store.key().directory().join(&i.task).join(".native-output");
     cortex_core::store::locks::private_directory(&store.key().directory().join(&i.task), true)?;
     cortex_core::store::locks::private_directory(&dir, true)?;
-    let id = format!("lo_{}", &crate::native_effects::identity()?[..12]);
-    let filename = format!("{id}.bin");
+    let prefix = if skill { "lo_s_" } else { "lo_" };
+    let id = format!("{prefix}{}", &crate::native_effects::identity()?[..12]);
+    let filename = if skill { format!("skill-{id}.bin") } else { format!("{id}.bin") };
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(dir.join(&filename))?;
-    file.write_all(&bytes)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     File::open(&dir)?.sync_all()?;
     store.write(|db| {
@@ -271,8 +296,8 @@ pub(super) fn defer_json_over(
             rusqlite::params![
                 id,
                 i.task,
-                i.assignment.as_deref().unwrap_or("coordinator"),
-                digest(&bytes),
+                scope,
+                hash,
                 filename,
                 bytes.len() as i64,
                 0,
@@ -281,10 +306,7 @@ pub(super) fn defer_json_over(
         )?;
         Ok(())
     })?;
-    Ok(
-        json!({"deferred":true,"large_output_id":id,"byte_count":bytes.len(),"encoding":"utf-8","complete":false,
-        "reason":"response_exceeds_inline_budget"}),
-    )
+    Ok(result(id))
 }
 pub(super) fn read_output(
     store: &Store,
@@ -298,9 +320,10 @@ pub(super) fn read_output(
     let scope = i.assignment.as_deref().unwrap_or("coordinator");
     let (file,count,hash,kind,truncated,code,signal,failure):(String,i64,Option<String>,String,bool,Option<i64>,Option<String>,Option<String>)=store.read(|db|Ok(db.query_row(
         "SELECT filename,byte_count,source_ref,source_kind,truncated,exit_code,signal,failure FROM large_outputs l WHERE task_id=? AND id=?
+        AND (filename NOT GLOB 'skill-*' OR owner_scope=?)
         AND (owner_scope=? OR owner_scope=? OR EXISTS(SELECT 1 FROM trusted_channels old WHERE old.task_id=l.task_id
             AND old.channel_id=l.owner_scope AND ((?='coordinator' AND old.role='coordinator') OR old.assignment_id=?)))",
-        rusqlite::params![i.task,id,c.channel_id,scope,scope,i.assignment],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)))?))?;
+        rusqlite::params![i.task,id,c.channel_id,c.channel_id,scope,scope,i.assignment],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)))?))?;
     if file.contains('/') || file.contains("..") {
         return Err(CoreError::Refused("invalid_output"));
     }
@@ -327,15 +350,32 @@ pub(super) fn read_output(
         ),
         Err(e) => return Err(e),
     };
-    let (actual, size) = fingerprint(&mut f)?;
-    if size as i64 != count || native && hash.as_deref() != Some(&actual) {
-        return Err(CoreError::Refused("output_integrity_mismatch"));
-    }
     let offset = args["offset"].as_u64().unwrap_or(0);
     let limit = args["limit"].as_u64().unwrap_or(65536);
-    f.seek(SeekFrom::Start(offset))?;
-    let mut b = Vec::new();
-    f.take(limit).read_to_end(&mut b)?;
+    let b = if file.starts_with("skill-") {
+        // The digest covers the same buffer from which the returned page is taken.
+        // JSON escaping may expand the bounded UTF-8 skill body up to sixfold.
+        const LIMIT: u64 = crate::native_skills::MAX_SKILL_BYTES * 6 + 4096;
+        let mut bytes = Vec::new();
+        f.take(LIMIT + 1).read_to_end(&mut bytes)?;
+        if !native || bytes.len() as u64 > LIMIT || bytes.len() as i64 != count
+            || hash.as_deref() != Some(digest(&bytes).as_str())
+        {
+            return Err(CoreError::Refused("output_integrity_mismatch"));
+        }
+        let start = offset.min(bytes.len() as u64) as usize;
+        let end = offset.saturating_add(limit).min(bytes.len() as u64) as usize;
+        bytes[start..end].to_vec()
+    } else {
+        let (actual, size) = fingerprint(&mut f)?;
+        if size as i64 != count || native && hash.as_deref() != Some(&actual) {
+            return Err(CoreError::Refused("output_integrity_mismatch"));
+        }
+        f.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new();
+        f.take(limit).read_to_end(&mut bytes)?;
+        bytes
+    };
     use base64::Engine;
     let (chunk, encoding) = match std::str::from_utf8(&b) {
         Ok(s) => (s.to_owned(), "utf-8"),
@@ -504,9 +544,15 @@ pub(super) async fn outside_capture(
         let scratch = ScratchDir::create()?;
         let mut writes = crate::native_sandbox::devices();
         writes.push(scratch.0.clone());
+        let mut hidden = crate::native_sandbox::live_stores(&project_root);
+        hidden.extend(crate::native_sandbox::store_backups(&hidden));
+        hidden.extend(
+            crate::native_store_policy::roots(&std::env::vars_os().collect())
+                .map_err(|_| CoreError::Refused("native_command_sandbox_unavailable"))?,
+        );
         let rules = crate::native_sandbox::Sandbox::host(&crate::native_sandbox::HostPolicy {
             writes,
-            hidden: crate::native_sandbox::live_stores(&project_root),
+            hidden,
             ..Default::default()
         })
         .map_err(|_| CoreError::Refused("native_command_sandbox_unavailable"))?;
@@ -1154,7 +1200,7 @@ pub(super) fn scoped_authority(
     i: &Identity,
     root: &std::path::Path,
 ) -> CoreResult<Vec<String>> {
-    if crate::native_project::task_root(db, &i.task)? != root {
+    if crate::native_project::identity_root(db, i)? != root {
         return Err(CoreError::Refused("project_context_conflict"));
     }
     let assignment = i
@@ -1222,7 +1268,7 @@ pub(super) async fn execute(
             }
             let raw:Option<String>=db.query_row("SELECT scope_json FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",(&i.task,&i.assignment),|r|r.get(0)).optional()?;
             let scopes=policy::effective_scope_tx(db,&i.task,i.assignment.as_deref(),raw.as_deref().unwrap_or("[]"))?;
-            if n=="command_run"&&!policy::read_only(i.profile.as_deref().unwrap_or(""),i.stage.as_deref().unwrap_or("")){
+            if n=="command_run"&&!crate::native_engine_policy::read_only(&i){
                 writable(db,&i,None)?;
             }
             Ok(scopes)
@@ -1253,11 +1299,7 @@ pub(super) async fn execute(
         }
         return Ok(crate::native_sources::reply(v));
     }
-    let readonly = i.role != "worker"
-        || policy::read_only(
-            i.profile.as_deref().unwrap_or(""),
-            i.stage.as_deref().unwrap_or(""),
-        );
+    let readonly = crate::native_engine_policy::read_only(&i);
     let mut argv: Vec<String> = if name == "project_git" {
         project_git_argv(&args)?
     } else {
@@ -1410,9 +1452,9 @@ pub(super) async fn execute(
             return Err(CoreError::Refused("deletion_not_confirmed"));
         }
     }
-    // Auto (deletions were confirmed by the owner above): no sandbox for any role or stage. The command runs directly on the host as
-    // the owner through the outside_command route (Auto answers its consent itself).
-    if name == "command_run" && mode == "auto" && !scoped {
+    // Auto takes the owner-authorized host route for ordinary unscoped
+    // commands. A plan node declared read-only keeps its sandbox.
+    if name == "command_run" && mode == "auto" && !scoped && !i.read_only {
         let (outside, note) = reroute_request(&args, &argv, &cwd, "auto_host", None)?;
         return reroute(
             executor, credential, root, permissions, protected_roots, running, outside, note,
@@ -1444,10 +1486,9 @@ pub(super) async fn execute(
     } else {
         "development"
     };
-    // Managed commands have no checkout write grant. The scratch snapshot
-    // cannot establish the same evidence as a real-checkout verification.
-    let checks_work = !scoped
-        && name == "command_run"
+    // The managed and linked read-only profiles execute at the real checkout
+    // with private output directories, so their project inputs can be bound.
+    let checks_work = name == "command_run"
         && !cortex_core::lifecycle::completion::trivial_command(&argv);
     let writes = if !linked && !scoped && !readonly && name == "command_run" {
         vec![root.clone()]
@@ -1520,22 +1561,6 @@ pub(super) async fn execute(
     if name == "command_run" || linked {
         drop(out);
         let (args_copy, argv_copy) = (args.clone(), argv.clone());
-        // The work set's digest before launch (`native_work_set`); its end is observed
-        // once the process ended and the receipt settled.
-        // It runs beside the launch: one that ended after the payload was released
-        // holds only when the checkout was untouched since (`native_change_set::Launch`).
-        let launch = crate::native_change_set::Launch::default();
-        let start = work_set.clone().map(|set| {
-            let (launch, root) = (launch.clone(), root.clone());
-            tokio::spawn(async move {
-                let start = crate::native_work_set::observe(root.clone(), set).await?;
-                match launch.touched(root).await {
-                    Some(touched) if !touched.quiet() => None,
-                    _ => Some(start),
-                }
-            })
-        });
-        let observer = (executor.clone(), running.clone(), i.clone(), root.clone());
         let mut protected = output_dir
             .parent()
             .and_then(|p| p.parent())
@@ -1569,29 +1594,9 @@ pub(super) async fn execute(
             command_authority,
             name.clone(),
             checkout.clone(),
-            launch,
+            work_set,
         )
         .await;
-        let start = match start {
-            Some(observing) => observing.await.ok().flatten(),
-            None => None,
-        };
-        if let (Ok(_), Some(set), Some(start)) = (&reply, work_set, start) {
-            let (executor, running, i, root) = observer;
-            if let Some(assignment) = i.assignment {
-                crate::native_work_set::finish(
-                    executor,
-                    running,
-                    i.task,
-                    assignment,
-                    reference.clone(),
-                    root,
-                    set,
-                    start,
-                    checkout,
-                );
-            }
-        }
         // Never inspect a command reply's output or exit status for routing.
         // The private supervisor handshake and a durably settled receipt must
         // both prove a launcher failure before the payload could run.

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { emptyConfig } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { createRealPort } from "../src/port/real";
 import { folderName, folderNameProblem, matchesPath, moveActive, pickerPaths, shortenPath } from "../src/project-picker-model";
@@ -96,10 +97,13 @@ describe("entry points", () => {
   });
 
   it("names the machine it searches, and offers the system chooser only for this machine", async () => {
-    await mount(machine());
+    await mount(machine({
+      "service.capabilities": () => ({ methods: METHODS, machine: true }),
+      "machine.call": () => ({ ok: true, result: { machineName: "Studio", config: emptyConfig(), connections: [], tokens: {} } }),
+    }));
     await open();
     expect(dialog()!.textContent).toContain("Add project");
-    expect(dialog()!.textContent).toContain("This machine");
+    expect(dialog()!.textContent).toContain("Studio");
     expect(titles()).toEqual(["Search for folder", "Clone from GitHub", "Browse", "New folder"]);
   });
 

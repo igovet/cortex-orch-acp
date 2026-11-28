@@ -1,9 +1,29 @@
 import { validate } from "@cortex/workspace-contract";
-import type { NativeTaskDelta } from "@cortex/workspace-domain";
+import type { NativeHistoryHead, NativeTaskDelta } from "@cortex/workspace-domain";
 
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 export function nativeVersion(v: unknown): v is string {
   return typeof v === "string" && /^(0|[1-9][0-9]*)$/.test(v) && v.length <= 19 && BigInt(v) <= 9223372036854775807n;
+}
+function historyHeads(raw: unknown, changes: NativeTaskDelta["batch"]["changes"]) {
+  if (!Array.isArray(raw) || raw.length > 64) return undefined;
+  const bound = new Map<string, string>();
+  for (const change of changes) {
+    if (change.kind === "task" && change.operation.type === "upsert") {
+      const executionId = change.operation.data.data.executionId;
+      if (executionId) bound.set(change.id, executionId);
+      else bound.delete(change.id);
+    } else bound.delete(change.id);
+  }
+  const seen = new Set<string>(), result: NativeHistoryHead[] = [];
+  for (const head of raw) {
+    if (!record(head) || typeof head.taskId !== "string" || typeof head.executionId !== "string"
+      || bound.get(head.taskId) !== head.executionId || seen.has(head.taskId)
+      || !nativeVersion(head.position) || typeof head.questionsEmpty !== "boolean") return undefined;
+    seen.add(head.taskId);
+    result.push({ taskId: head.taskId, executionId: head.executionId, position: head.position, questionsEmpty: head.questionsEmpty });
+  }
+  return result;
 }
 /** The Rust bridge and JS transport independently check selected DTOs; raw runtime events are never accepted. */
 export function nativeDelta(raw: unknown): NativeTaskDelta | null {
@@ -25,6 +45,8 @@ export function nativeDelta(raw: unknown): NativeTaskDelta | null {
         if (task.taskId !== c.id || task.version !== c.newVersion) return null;
       } else if (!["remove", "invalidate"].includes(String(c.operation.type))) return null;
     }
-    return raw as unknown as NativeTaskDelta;
+    const batch = b as unknown as NativeTaskDelta["batch"];
+    const heads = historyHeads(raw.historyHeads, batch.changes);
+    return heads ? { projectId: raw.projectId, batch, historyHeads: heads } : { projectId: raw.projectId, batch };
   } catch { return null; }
 }

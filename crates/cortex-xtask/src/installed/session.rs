@@ -43,7 +43,7 @@ pub fn require_startup_health(nodes: &[Node]) -> Res<()> {
 
 fn require_full_worker(input: &Input) -> Res<()> {
     require(
-        input.has("backend-dev activity", &["landmark"])?,
+        input.has("general activity", &["landmark"])?,
         "worker activity pane missing",
     )?;
     // The worker stream has no search or Follow strip: following resumes at the end on its own.
@@ -268,6 +268,8 @@ pub fn run(channel: &Channel, backend: &str, phase: &str, close_cycles: u32) -> 
                 vec![("backend", s(backend)), ("phase", s(phase))],
             );
         }
+        let renamed = matches!(phase, "large-board" | "cached-board");
+        let machine_label = if renamed { "Local Connected" } else { "This machine Connected" };
         let startup_samples = std::cell::Cell::new(0i64);
         let startup_ready = |window_only: bool| -> Res<bool> {
             let nodes = input.nodes()?;
@@ -279,7 +281,7 @@ pub fn run(channel: &Channel, backend: &str, phase: &str, close_cycles: u32) -> 
                 if window_only {
                     n.name == "Sidebar"
                 } else {
-                    n.both().contains("This machine Connected")
+                    n.name == machine_label
                 }
             }))
         };
@@ -302,6 +304,9 @@ pub fn run(channel: &Channel, backend: &str, phase: &str, close_cycles: u32) -> 
         }
         sleep_ms(1000);
         wait("healthy connected machine", || startup_ready(false))?;
+        if renamed {
+            emit("saved_machine_name_visible_on_startup", vec![("backend", s(backend)), ("phase", s(phase))]);
+        }
         wait("maximized native frame", || {
             Ok(input
                 .nodes()?
@@ -444,7 +449,7 @@ pub fn run(channel: &Channel, backend: &str, phase: &str, close_cycles: u32) -> 
             run_inherit(&["gio", "launch", &desktop_entry], Duration::from_secs(120))?;
             wait_secs("reopened desktop window", 60, || input.has("Sidebar", &[]))?;
             wait("reopened connected machine", || {
-                input.seen("This machine Connected")
+                input.has(machine_label, &[])
             })?;
             if backend == "wayland" {
                 // Establish global hit-test geometry again: Wayland exposes no window position.
@@ -734,6 +739,7 @@ fn journey_phase(
     // The native coordinator plans one backend worker; after verification it asks the owner how to
     // finish (the no-paid peer's `reconcile-question` scenario). Choosing an option only selects it.
     let root = Path::new(JOURNEY);
+    let home = Path::new("/home/acceptance");
     // Start is the task composer's action button; the title band has no Start.
     input.click_in(super::input::TASK_COMPOSER, "Start")?;
     wait("response to Start", || input.seen("How should we finish?"))?;
@@ -748,7 +754,7 @@ fn journey_phase(
     );
     let answers = |root: &Path| -> Res<i64> {
         native::count(
-            &channel.store_db(root),
+            &channel.store_db(home, root)?,
             "SELECT count(*) FROM runtime_events WHERE type='USER_ANSWER_RECEIVED'",
         )
     };
@@ -763,7 +769,7 @@ fn journey_phase(
     // runtime node with a delegation provisioning record of the task's current execution
     // (`owner_read` in crates/workspace-service/src/native_owner_controls.rs).
     let recorded = native::count(
-        &channel.store_db(root),
+        &channel.store_db(home, root)?,
         "SELECT count(*) FROM runtime_nodes n JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref \
          WHERE n.task_id=(SELECT e.runtime_task_id FROM workspace_tasks t JOIN workspace_executions e ON e.execution_id=t.execution_id ORDER BY t.rowid DESC LIMIT 1)",
     )?;
@@ -804,25 +810,25 @@ fn journey_phase(
     })?;
     wait_secs("answer delivered", 60, || Ok(answers(root)? >= 1))?;
     emit("fixture_worker_ready", vec![("backend", s(backend))]);
-    click("Work details", "backend-dev", &["link"], true)?;
+    click("Work details", "general", &["link"], true)?;
     input.click("Coordinator", &["page tab"], true)?;
     // The coordinator feed is selected first; the worker's full activity stream follows.
     wait("coordinator feed selected", || {
         input.has("Coordinator activity", &["landmark"])
     })?;
-    click("backend-dev", "backend-dev activity", &["page tab"], true)?;
+    click("general", "general activity", &["page tab"], true)?;
     require_full_worker(input)?;
     input.click("Conversation", &["link"], false)?;
     // Stop/Resume exactness and runtime-certified completion are asserted by the native journey
     // (second task); this task runs to its certified result.
     wait_secs("runtime result", 90, || {
         Ok(
-            native::state(root, channel)?.as_deref() == Some("COMPLETED")
+            native::state(home, root, channel)?.as_deref() == Some("COMPLETED")
                 && input.seen("Owner decision explained.")?,
         )
     })?;
     let mut pairs = vec![("backend", s(backend))];
-    pairs.extend(native::evidence(root, channel, false)?);
+    pairs.extend(native::evidence(home, root, channel, false)?);
     emit("journey_native_task", pairs);
     click("Review changes", "Changes", &["link"], false)?;
     wait("review content rendered", || {

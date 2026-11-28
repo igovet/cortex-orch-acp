@@ -2,6 +2,7 @@ import { render } from "solid-js/web";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { emptyWorkspace, mapProjectSlice, type QueryResults, type WorkspaceState } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
+import type { PhoneFrame } from "../src/ctx";
 import { buildIndex } from "../src/selectors";
 import { closeBlocked, sessionModel } from "../src/session-model";
 import { flush, projection, scriptedPort, wireTask, withTask } from "./support";
@@ -23,7 +24,7 @@ function world(phase: "unknown" | "execution" | "paused" | "recovery" = "unknown
   return { ...s, tasks: slice.tasks, sessions: slice.sessions };
 }
 const model = (s: WorkspaceState) => sessionModel(buildIndex(s, 0), "t")!;
-async function mount(path = "/m/local/t/t", phase: Parameters<typeof world>[0] = "unknown") {
+async function mount(path = "/m/local/t/t", phase: Parameters<typeof world>[0] = "unknown", shell?: PhoneFrame) {
   const p = scriptedPort({ capabilities: { everything: true, operations: [] } });
   let answer = world(phase), fail = false, reads = 0;
   if (path.includes("/workers")) answer.workers = [{ id: "w", taskId: "t", executionId: "e", role: "debugger", status: "working", lane: "execution", goal: "Inspect the defect", now: null, waitsFor: null, scope: [], route: null, attempt: null, elapsedMs: null, runningSince: null, context: null, usage: null, result: null, activity: [] }];
@@ -33,12 +34,12 @@ async function mount(path = "/m/local/t/t", phase: Parameters<typeof world>[0] =
   };
   history.replaceState(null, "", path);
   const root = document.createElement("div"); document.body.append(root);
-  dispose = render(() => <Workspace port={p.port} />, root);
+  dispose = render(() => <Workspace port={p.port} shell={shell} />, root);
   await settle();
   return { ...p, reads: () => reads, answer: (s: WorkspaceState) => { answer = s; }, fail: () => { fail = true; } };
 }
 const strip = () => document.querySelector(".l-task .l-strip")!;
-const recheck = () => [...strip().querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Re-check state")!;
+const recheck = () => [...document.querySelectorAll<HTMLButtonElement>(".conversation-actions button")].find(b => b.textContent === "Re-check state")!;
 
 it("distinguishes an unconfirmed task from a disconnected machine without promoting its state", () => {
   const s = world();
@@ -80,6 +81,22 @@ it("re-check installs even an equal-version confirmed snapshot and restores cont
   expect(document.querySelector(".l-task .l-strip")).toBeNull();
   expect(document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!.disabled).toBe(false);
   expect(p.commands).toHaveLength(0); // A read, never Resume or Stop.
+});
+
+it("rechecks from the conversation on the phone and restores messaging after confirmation", async () => {
+  const shell: PhoneFrame = {
+    kind: "phone", machine: () => ({name:"Desk", state:"connected", path:"direct", lastConnectedAt:null}),
+    openMachines() {}, openSettings() {}, retry() {}, attach() {},
+  };
+  const p = await mount("/m/local/t/t", "unknown", shell);
+  expect(document.querySelector(".ws-phonebar")).toBeTruthy();
+  const input = () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!;
+  expect(input().disabled).toBe(true);
+  p.answer(world("execution"));
+  recheck().click(); await settle();
+  expect(input().disabled).toBe(false);
+  expect(recheck()).toBeUndefined();
+  expect(p.commands).toHaveLength(0);
 });
 
 it("opens an interrupted turn ready for a message without a manual refresh", async () => {

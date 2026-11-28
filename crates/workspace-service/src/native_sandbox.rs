@@ -13,10 +13,10 @@
 //! read-only entry therefore cannot carry a hierarchical grant of its own: its
 //! existing children are granted one by one and the directory keeps only the
 //! rights that cannot reach the protected entry (listing, execution, creating
-//! entries). Entry names below such a directory stay listable. A hidden entry or
-//! a Cortex store path inside an open write tree (a writer's checkout) is not
-//! protected at all (see [`Sandbox::host`]); an explicit read-only entry there
-//! (an owner write denial) is, with that cost for its parent directories. Landlock does not restrict chmod/chown,
+//! entries). Entry names below such a directory stay listable. An ordinary
+//! hidden path inside an open write tree follows the checkout grant. Explicit
+//! owner write denials and strict hidden paths split that grant along the
+//! path's ancestry (see [`Sandbox::host`]). Landlock does not restrict chmod/chown,
 //! already open descriptors, Unix sockets or signals; it is a write and secret
 //! boundary for trusted local work, not hostile-code isolation.
 use std::{
@@ -95,13 +95,15 @@ pub(crate) struct HostPolicy {
     /// Trees the process may change: create, write, truncate, remove and rename in.
     /// Hidden and read-only entries inside them stay protected.
     pub writes: Vec<PathBuf>,
-    /// Trees the process may change as a whole (a writer's checkout): hidden and
-    /// read-only entries inside them are not protected by Landlock.
+    /// Trees the process may change as a whole (a writer's checkout), subject
+    /// to strict hidden paths and explicit owner write denials.
     pub open_writes: Vec<PathBuf>,
     /// Trees that stay unchangeable even inside `writes` (they remain readable).
     pub read_only: Vec<PathBuf>,
     /// Trees the process may neither read, list below, execute nor change.
     pub hidden: Vec<PathBuf>,
+    /// Private paths that stay hidden even inside an open write tree.
+    pub strict_hidden: Vec<PathBuf>,
 }
 
 #[repr(C)]
@@ -145,11 +147,13 @@ impl Sandbox {
         // Landlock is allow-list only: an entry inside an open write tree could be
         // protected only by withholding the tree's own grant, which would make every
         // file created directly in it (the checkout root next to `.cortex` or
-        // `.env`) unusable. Such entries are not protected here; the callers' other
-        // guards (the live-store argv seal, deletion consent) still apply.
+        // `.env`) unusable. Ordinary hidden entries follow that grant. Retained
+        // originals must stay hidden, so they take the narrower rules below.
         let inside = |p: &PathBuf| open.iter().any(|w| p.starts_with(w));
         let mut hidden = canonical(&policy.hidden);
         hidden.retain(|p| !inside(p));
+        let strict_hidden = canonical(&policy.strict_hidden);
+        hidden.extend(strict_hidden.iter().cloned());
         // Explicit read-only entries (owner write denials) stay protected even inside
         // an open tree, at the cost described in the module documentation for their
         // parent directories; Cortex store paths there are left to the argv seal.
@@ -164,7 +168,8 @@ impl Sandbox {
             .into_iter()
             .filter(|p| !inside(p) || !in_store(p))
             .collect();
-        let narrowed: Vec<PathBuf> = read_only.iter().filter(|p| inside(p)).cloned().collect();
+        let mut narrowed: Vec<PathBuf> = read_only.iter().filter(|p| inside(p)).cloned().collect();
+        narrowed.extend(strict_hidden);
         // An open write tree inside a hidden one stays hidden.
         let open: Vec<PathBuf> = open
             .iter()
@@ -313,8 +318,13 @@ impl Sandbox {
     ) -> io::Result<Self> {
         #[cfg(test)]
         WALKS.with(|w| w.set(w.get() + 1));
-        let mut hidden = secrets(Some(home), &std::env::vars_os().collect());
-        hidden.extend(live_stores(root));
+        let environment = std::env::vars_os().collect();
+        let mut hidden = secrets(Some(home), &environment);
+        hidden.extend(crate::native_store_policy::roots(&environment)
+            .map_err(|_| unavailable("invalid_control_path"))?);
+        let store_paths = live_stores(root);
+        hidden.extend(store_backups(&store_paths));
+        hidden.extend(store_paths);
         hidden.extend(indexed_project_secrets(root)?);
         // The server's private runtime directory may sit inside a hidden store
         // directory: hide that directory's other entries instead, so the grant is usable.
@@ -460,6 +470,21 @@ pub(crate) fn live_stores(root: &Path) -> Vec<PathBuf> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Retained format and relocation backups in the checkout or its Git common
+/// root. A broad checkout grant must never expose these original stores.
+pub(crate) fn store_backups(store_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let known = crate::native_store_policy::known_anchor_directories();
+    store_paths
+        .iter()
+        .chain(&known)
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name == ".cortex" || name == ".cortex-dev")
+        })
+        .map(|directory| directory.join(".migration-backups"))
+        .collect()
 }
 
 /// A secret file by name: `.env` and `.env.*` (except example, sample and

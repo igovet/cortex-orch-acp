@@ -189,11 +189,11 @@ describe("the task page", () => {
     expect(p.commands.map(c => c.payload.type)).not.toContain("continue_task");
   });
 
-  it("a held interruption waits for you: Continue in the title band and the menu, the strip names it, no Resume", async () => {
+  it("a held interruption waits for you: Continue at the end of the conversation and in the menu, the strip names it, no Resume", async () => {
     const p = await mount(world("interrupted"));
     expect(strip()).toContain("waits for you");
     expect(strip()).toContain("or use Continue");
-    expect(band()).toContain("Continue");
+    expect(buttons($(".conversation-actions")!).some(b => b.textContent?.trim() === "Continue")).toBe(true);
     expect(composerAction().getAttribute("aria-label")).not.toBe("Resume");
     const items = await menuItems();
     expect(menuItem(items, "Continue")!.getAttribute("aria-disabled")).toBeNull();
@@ -201,7 +201,7 @@ describe("the task page", () => {
     expect(menuItem(items, "Resume")?.dataset.why).toBeTruthy();
     // The inspector names the same action the band offers.
     expect(inspectorState()).toContain("Continue lets the coordinator decide the next step");
-    buttons($(".tb-actions")!).find(b => b.textContent?.trim() === "Continue")!.click(); await settle();
+    buttons($(".conversation-actions")!).find(b => b.textContent?.trim() === "Continue")!.click(); await settle();
     expect(p.commands.map(c => c.payload.type)).toEqual(["retry_task"]);
   });
 
@@ -341,10 +341,11 @@ describe("returning a closed task for rework", () => {
     const s = closed();
     Object.assign(s.tasks[0], { status: "closed_unverified", closedAs: "unconfirmed", process: "unknown" });
     const p = await mount(s);
-    expect(titleAction()).toBeDefined();
+    const chatAction = () => buttons($(".conversation-actions")!).find(b => b.textContent?.trim() === "Return for rework");
+    expect(chatAction()).toBeDefined();
     p.emit(projection("2", { ...s, tasks: [{ ...s.tasks[0], status: "done", closedAs: "as_is", process: "stopped", archive: { at: 1 } as NonNullable<WorkspaceState["tasks"][number]["archive"]> }] }));
     await settle();
-    expect(titleAction()).toBeUndefined();
+    expect(chatAction()).toBeUndefined();
     expect(menuItem(await menuItems(), "Return for rework")).toBeUndefined();
     expect(field().placeholder).toContain("Restore the task first.");
   });

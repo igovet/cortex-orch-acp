@@ -1,20 +1,21 @@
 import { createComputed, createEffect, createMemo, createSignal, For, Index, Match, on, onCleanup, Show, Switch, untrack, type Accessor, type Setter } from "solid-js";
 import { createOpenState, DiffBox, Fold, OutputBox, StepRow, type OpenState } from "./feed";
-import { FEATURES, type Activity, type Check, type Message, type Worker } from "@cortex/workspace-domain";
+import { FEATURES, type Activity, type Check, type Message, type Worker, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { AttachChips, createAttachments, createDictation, MessageComposer } from "./composer";
 import { useWs } from "./ctx";
 import { createTicker, createUnsent } from "./freshness";
 import { A, Count, createFollow, I, MenuItem, Modal, Pop } from "./kit";
 import { ActionBar } from "./layout";
+import { createLocalInput, taskDraftScope } from "./local-drafts";
 import type { Route } from "./router";
-import { clock, refusalLine, refusalReason } from "./selectors";
+import { clock, refusalReason } from "./selectors";
 import { displayStep, feedOf, hasRecordedDetail, isHiddenActivity, oneRowPerCall, stepFailed, viewOfActivity, type FeedItem, type FeedRun } from "./tool-names";
 import { contextLine, duration, elapsedOf, isFinished, recordedCoordinatorRoute, reviewLine, tokens, verificationFace, workerModel, workerState, type SessionModel } from "./session-model";
 
 import { ResultText } from "./result-text";
 import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
-import { useTaskRoutes } from "./task-place";
+import { usePlanningSprint, useTaskRoutes } from "./task-place";
 import type { FollowPosition } from "./follow";
 import { createFirstView, firstWindowEntries, slowRead } from "./first-view";
 import { EdgeStrip, ReserveSkeleton, FirstViewNotice, LoadingStrip, Skeleton, unreachable } from "./skeleton";
@@ -189,10 +190,19 @@ function Row(props: { item: Activity; w: Worker; message: (id: string) => Messag
 function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker; onSend?: () => void; onStop?: () => void }) {
   const ws = useWs();
   const key = () => `${props.model().view.id}/${props.w.id}`;
-  const [text, setText] = createSignal(ws.drafts.get(key()) ?? "");
-  const write = (v: string) => { setText(v); ws.drafts.set(key(), v); };
+  const scope = () => {
+    const v = props.model().view, w = props.w;
+    return [...taskDraftScope(v.task, v.machine.id), "worker", w.id, w.executionId, w.attempt?.n.toString() ?? null];
+  };
+  const local = createLocalInput(ws.localDrafts, scope);
+  const [ephemeral, setText] = createSignal(ws.drafts.get(key()) ?? "");
+  const text = () => local.enabled() ? local.text() : ephemeral();
+  const write = (v: string) => {
+    if (local.enabled()) local.set(v);
+    else { setText(v); ws.drafts.set(key(), v); }
+  };
   const mic = createDictation();
-  const files = createAttachments();
+  const files = createAttachments(scope);
   createUnsent(() => !!text().trim() || files.files().length > 0);
   const idBase = () => "live";
   const closed = () => props.model().mode === "offline" ? "The machine is disconnected. Use Re-check state above before messaging."
@@ -207,6 +217,21 @@ function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker; onSen
     // A direct message reads in this feed from the press, and leaves the field then; one that did not arrive keeps its text
     // and files on its line, with Retry and Edit. Through the coordinator it reads in the task's conversation, so the field
     // keeps it until the machine has it.
+    if (local.enabled()) {
+      if (value !== text()) local.set(value);
+      const worker = direct(), attachments = files.files(), draft = local.snapshot();
+      const clearSubmitted = files.clearSubmitted();
+      const command: WorkspaceCommand = { type: "send_message", taskId, ...(worker ? { workerId: props.w.id } : {}),
+        text: worker ? value : `For ${props.w.role}: ${value}`, mode: "send_now", now, attachments };
+      if (draft) ws.store.sends.trackDraft(command, worker ? draft : {
+        park: () => undefined,
+        confirm: () => { draft.confirm(); clearSubmitted(); },
+      });
+      if (worker) files.clear();
+      void ws.run(command);
+      if (!worker) props.onSend?.();
+      return;
+    }
     if (direct()) { const attachments = files.files(); write(""); files.clear(); void ws.run({ type: "send_message", taskId, workerId: props.w.id, text: value, mode: "send_now", now, attachments }); return; }
     ws.ok({ type: "send_message", taskId, text: `For ${props.w.role}: ${value}`, mode: "send_now", now, attachments:files.files() }, () => { write(""); files.clear(); });
     // Sent from this feed, it brings this feed's end back as a direct message does, though it reads in the conversation.
@@ -216,7 +241,8 @@ function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker; onSen
     const back = ws.store.sends.returned({ kind: "worker", taskId: props.model().view.id, workerId: props.w.id });
     if (!back) return;
     ws.store.sends.take();
-    write(untrack(text).trim() ? `${untrack(text).trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
+    const current = untrack(text);
+    write(current.trim() && current !== back.text ? `${current.trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
   });
   createEffect(() => { if (closed()) mic.stop(); });
   // The worker's recorded model and effort: read-only, because a message never changes a worker's route.
@@ -226,6 +252,7 @@ function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker; onSen
   const stopEffect = () => props.w.status === "working" ? `Stop ends only ${props.w.role}; the task keeps running. Write a message to send it instead.`
     : `Stop ends only ${props.w.role}; the task keeps running.`;
   return <MessageComposer group="Worker composer" label={`Message ${props.w.role}`} placeholder={direct() ? `Message ${props.w.role} directly, tag @files…` : `Message ${props.w.role}, tag @files…`} text={text()} onText={write} files={files} mic={mic} off={closed()}
+    draft={{ shown: local.hasDraft(), warning: local.warning() ? ws.t("textDraftStorageUnavailable") : undefined, discard: () => local.set("") }}
     suggest={{ projectId: props.model().view.project.id, taskId: props.model().view.id }}
     attachOff={direct() && !ws.can(FEATURES.workerAttachments) ? "Files can't be sent to one worker. Attach them to a message about the task instead." : undefined}
     effect={stop() ? stopEffect() : direct() ? `To ${props.w.role}, this attempt only. It does not widen scope or access.` : `To the coordinator about ${props.w.role}. It decides how to pass it on and does not widen scope or access.`}
@@ -476,7 +503,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   return <>
     <div class="stream" ref={scroller} onScroll={() => { follow.onScroll(); nearStart(true); }}><div class="stream-in">
       {rows()}
-      <Show when={isFinished(props.w) && !props.readOnly}><Finished w={props.w} onAsk={props.onAsk} /></Show>
+      <Show when={!props.readOnly && (isFinished(props.w) || props.w.resultRefusals)}><WorkerOutcome w={props.w} model={props.model} onAsk={isFinished(props.w) ? props.onAsk : undefined} /></Show>
     </div></div>
     <div class="dock-w"><Pill follow={follow} /><Show when={!isFinished(props.w) && !props.readOnly}><WorkerComposer model={props.model} w={props.w} onSend={() => follow.jump()} onStop={props.onStop} /></Show></div>
     <StopCommand target={command()} onClose={() => setCommand(null)} />
@@ -523,10 +550,60 @@ function ReviewDetails(props: { w: Worker }) {
   </div></Show>;
 }
 
-function Finished(props: { w: Worker; onAsk?: () => void }) {
+function SubmissionHistory(props: { w: Worker }) {
+  const refusals = () => props.w.resultRefusals!;
+  const receipts = () => props.w.activity.filter(a => a.refusal);
+  return <details class="res-sec ws-submission-history"><summary>Submission history ({refusals().count} {refusals().count === 1 ? "refusal" : "refusals"})</summary>
+    <div class="cap">Latest reason: {refusalReason(refusals().code)}.</div>
+    <For each={refusals().codes?.filter(code => code !== refusals().code)}>{code => <div class="cap muted">Earlier reason: {refusalReason(code)}.</div>}</For>
+    <Show when={refusals().missing?.length}><ul class="cap"><For each={refusals().missing}>{item => <li>{item}</li>}</For></ul></Show>
+    <For each={receipts()}>{a => <div class="cap muted">Recorded step {a.sequence}{a.toolCallRef ? <code> · {a.toolCallRef}</code> : ""} · {refusalReason(a.refusal!)}</div>}</For>
+  </details>;
+}
+
+function WorkerOutcome(props: { w: Worker; model: Accessor<SessionModel>; onAsk?: () => void }) {
   const ws = useWs();
   const r = () => props.w.result;
   const face = () => workerState(props.w);
+  const historical = () => props.w.superseded || props.w.replacedIn !== undefined;
+  const title = () => {
+    if (r()?.objectiveStatus === "partial") return historical() ? "Earlier attempt · Partially delivered" : "Partially delivered";
+    if (!props.w.resultRefusals) return r()?.outcome === "failed" ? "Reported failure" : "Worker result";
+    if (historical()) return "Earlier attempt";
+    if (r()?.outcome === "failed") return "Assignment reported failed";
+    if (props.w.status === "completed" && r()) return "Result accepted";
+    return isFinished(props.w) ? "Attempt ended without an accepted result" : "No accepted result recorded";
+  };
+  const confirmed = () => {
+    const { view } = props.model();
+    return view.machine.connection === "connected" && !view.unknown && view.task.executionId === props.w.executionId;
+  };
+  const taskState = () => {
+    if (!confirmed()) return "";
+    const { view, session } = props.model();
+    if (view.task.status === "paused") return "Task paused.";
+    if (view.liveDecision) return view.liveDecision.kind === "permission" ? "Waiting for your permission." : "Waiting for your answer.";
+    if (view.task.status === "working" && view.task.observedPhase === "planning" && session.plan?.revision)
+      return "The coordinator is revising the plan.";
+    return "";
+  };
+  const currentWorkers = createMemo(() => {
+    const m = props.model(), task = m.view.task;
+    if (!confirmed() || !["working", "needs_you"].includes(task.status)) return [];
+    return m.workers.filter(w => w.taskId === task.id && w.executionId === task.executionId &&
+      !w.stale && !w.superseded && w.replacedIn === undefined);
+  });
+  const actor = (w: Worker) => w.node ? w.role + " (" + w.node + ")" : w.role;
+  const acting = () => currentWorkers().filter(w => w.status === "working");
+  const waiting = () => currentWorkers().filter(w => w.status === "waiting_you");
+  const checksLine = () => {
+    const checks = r()?.checks;
+    if (!checks?.length) return "";
+    return (["passed", "failed", "not_run", "unverified"] as const).flatMap(outcome => {
+      const count = checks.filter(c => c.outcome === outcome).length;
+      return count ? [count + " " + outcome.replace("_", " ")] : [];
+    }).join(" · ");
+  };
   const [reportOpen, setReportOpen] = createSignal(false);
   const [page, setPage] = createSignal<import("@cortex/workspace-contract").ReportPage | null>(null);
   const [error, setError] = createSignal(""), [loading, setLoading] = createSignal(false);
@@ -570,10 +647,19 @@ function Finished(props: { w: Worker; onAsk?: () => void }) {
       </div>
     </Modal>
     <div class="rcard ws-worker-result">
-      <div class="rcard-h"><I n={face().icon} s={14} class={face().tone === "st-idle" ? "faint" : face().tone} />{r()?.outcome === "failed" ? "Reported failure" : "Worker result"}<Show when={r()?.reportId}><span class="r"><button class="btn btn-line btn-sm" onClick={() => void read()}>Open report</button></span></Show><Show when={r()?.summary}>{summary => <CopySource text={summary()} label="Copy the worker result as Markdown" />}</Show></div>
-      <div class="rcard-b"><ResultText text={r()?.summary ?? noResult(props.w.endedReason)} />
-        <Show when={props.w.resultRefusals}>{x => { const line = () => refusalLine(x(), props.w.status === "completed" && !!r() && r()!.outcome !== "failed"); return <div class={`cap ${line().tone} ws-mt4`} role="note">{line().text}</div>; }}</Show></div>
-      <div class="res-sec"><div class="res-h">Checks</div>
+      <div class="rcard-h"><I n={face().icon} s={14} class={face().tone === "st-idle" ? "faint" : face().tone} />{title()}<Show when={r()?.reportId}><span class="r"><button class="btn btn-line btn-sm" onClick={() => void read()}>Open report</button></span></Show><Show when={r()?.summary}>{summary => <CopySource text={summary()} label="Copy the worker result as Markdown" />}</Show></div>
+      <div class="rcard-b"><ResultText text={r()?.summary || (r() ? "No summary recorded." : isFinished(props.w) ? noResult(props.w.endedReason) : "This attempt has no recorded result summary yet.")} />
+        <Show when={r()?.blockerDetail}>{detail => <div>Blocker: {detail()}</div>}</Show>
+        <Show when={r()?.remaining?.length}><div class="res-h">Remaining work</div><ul><For each={r()?.remaining}>{item => <li>{item}</li>}</For></ul></Show>
+        <Show when={props.w.resultRefusals || r()?.objectiveStatus === "partial"}>
+          <Show when={taskState()}>{state => <div class="cap">{state()}</div>}</Show>
+          <Show when={!taskState() && !acting().length && !waiting().length}><div class="cap muted">No worker is confirmed working on this execution.</div></Show>
+          <Show when={acting().length}>
+            <div class="cap">Working on this execution: {acting().map(actor).join(", ")}.</div>
+          </Show>
+          <Show when={waiting().length}><div class="cap">Waiting for you: {waiting().map(actor).join(", ")}.</div></Show>
+        </Show></div>
+      <div class="res-sec"><div class="res-h">Checks<Show when={(props.w.resultRefusals || r()?.objectiveStatus === "partial") && checksLine()}> · {checksLine()}</Show></div>
         <Show when={(r()?.checks.length ?? 0) > 0} fallback={<div class="cap muted">No checks reported.</div>}>
           <For each={r()!.checks}>{c => <div class="chk"><I n={CHECK_ICON[c.outcome].icon} s={14} class={CHECK_ICON[c.outcome].tone} /><span>{c.name}<Show when={c.outcome === "not_run" || c.outcome === "unverified" || c.outcome === "failed"}> <span class="faint">{c.detail}</span></Show></span><span class="src">{checkSource(c, ws.t("unsourcedCheck"))}</span></div>}</For>
         </Show></div>
@@ -582,6 +668,7 @@ function Finished(props: { w: Worker; onAsk?: () => void }) {
           <For each={r()!.edits}>{e => <div class="chk"><I n="pencil" s={14} class="faint" /><code>{e.path}</code><span class="src tnum"><span class="add">+{e.add}</span> <span class="del">−{e.del}</span></span></div>}</For>
           <div class="cap faint ws-mt4">Edits this worker recorded. Side effects of its commands may not appear. The full task diff is in Changes.</div></div>
       </Show>
+      <Show when={props.w.resultRefusals}><SubmissionHistory w={props.w} /></Show>
       <Show when={r()?.attempts?.length}>
         <div class="res-sec"><div class="res-h">Attempts</div>
           <For each={r()!.attempts}>{a => <div class="chk"><I n={a.ok ? "check-circle" : "x-circle"} s={14} class={a.ok ? "st-ok" : "st-bad"} /><span>Attempt {a.n} <span class="faint">{a.detail}</span></span><span class="src">{a.at === null ? "" : clock(a.at)}</span></div>}</For></div>
@@ -652,8 +739,14 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
   const worker = () => m().workers.find(w => w.id === props.pick) ?? null;
   // The coordinator is messaged from its conversation: the task's page, or the sprint's for the task planning a sprint.
   const routes = useTaskRoutes(() => ({ machine: m().view.machine.id, id: m().view.id }));
+  const planning = usePlanningSprint();
   const ask = (w: Worker) => {
-    ws.drafts.set(m().view.id, `About ${w.role}: `);
+    const v = m().view, sprint = planning();
+    if (ws.localDrafts) {
+      const scope = taskDraftScope(v.task, v.machine.id);
+      const key = ws.localDrafts.key(sprint ? [...scope, "planner", sprint.id] : [...scope, "coordinator"]);
+      if (!ws.localDrafts.read(key)) ws.localDrafts.set(key, `About ${w.role}: `);
+    } else ws.drafts.set(v.id, `About ${w.role}: `);
     ws.go(routes.conversation());
   };
   const session = () => m().session;

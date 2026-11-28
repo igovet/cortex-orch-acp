@@ -141,8 +141,11 @@ describe("native port", () => {
     event({type:"refresh"});
     event({type:"remote_state"});
     event({type:"project_state",projectId:"p"});
+    event({type:"project_state",projectId:"p",movingHistory:true});
+    event({type:"project_state",projectId:"p",movingHistory:false});
     event({type:"project_state"});
-    expect(updates).toEqual([{type:"refresh"},{type:"remote_state"},{type:"project_state",projectId:"p"}]);
+    expect(updates).toEqual([{type:"refresh"},{type:"remote_state"},{type:"project_state",projectId:"p"},
+      {type:"project_state",projectId:"p",movingHistory:true},{type:"project_state",projectId:"p",movingHistory:false}]);
     native.dispose();
   });
   it("validates native event shape and releases an asynchronously installed listener", async () => {
@@ -173,7 +176,7 @@ it("ships no remote capabilities, generic plugin or network escape", () => {
   const cap = JSON.parse(readFileSync(new URL("capabilities/main.json", root), "utf8"));
   expect(cap.windows).toEqual(["main"]);
   expect(cap.remote).toBeUndefined();
-  expect(cap.permissions).toEqual(["allow-workspace-request","allow-workspace-notify","allow-workspace-open-result-target","allow-workspace-close","core:event:allow-listen","core:event:allow-unlisten",
+  expect(cap.permissions).toEqual(["allow-workspace-request","allow-workspace-history-open","allow-workspace-history-next","allow-workspace-history-close","allow-workspace-notify","allow-workspace-open-result-target","allow-workspace-close","core:event:allow-listen","core:event:allow-unlisten",
     "core:window:allow-minimize","core:window:allow-toggle-maximize","core:window:allow-is-maximized","core:window:allow-close","core:window:allow-start-dragging"]);
   const cfg = JSON.parse(readFileSync(new URL("tauri.conf.json", root), "utf8"));
   expect(cfg.build.devUrl).toBeUndefined();
@@ -189,4 +192,31 @@ it("bundles the design faces as files the closed CSP can load", async () => {
   const css = result.output.find((o: any) => String(o.fileName).endsWith(".css")).source as string;
   expect(css).not.toMatch(/url\(["']?data:font|data:application\/font/);
   expect(readFileSync(new URL("../public/licenses/fonts.html", import.meta.url), "utf8")).toContain("SIL OPEN FONT LICENSE");
+});
+
+it("binds each outstanding conversation read to its listener across switches and disposal", async () => {
+  const reads: ((value: unknown) => void)[] = [];
+  const close = vi.fn(async () => {});
+  const native = createDesktopTransport({invoke: vi.fn(), listen: async () => () => {},
+    historyOpen: async () => {}, historyNext: () => new Promise(resolve => reads.push(resolve)), historyClose: close});
+  const scope = {projectId:"p",taskId:"a",executionId:"ea",generation:null,cursor:null,limit:32};
+  const old = vi.fn(), current = vi.fn(), ended = vi.fn(), global = vi.fn();
+  native.transport.subscribe(global);
+  native.transport.followHistory!(scope, old, ended);
+  await vi.waitFor(() => expect(reads).toHaveLength(1));
+  native.transport.followHistory!({...scope,taskId:"b",executionId:"eb"}, current, ended);
+  await vi.waitFor(() => expect(reads).toHaveLength(2));
+  reads[0]({type:"native_history_page",body:"old"});
+  reads[1]({type:"native_history_page",body:"current"});
+  await Promise.resolve();
+  expect(old).not.toHaveBeenCalled();
+  expect(current).toHaveBeenCalledWith({type:"native_history_page",body:"current"});
+  expect(global).not.toHaveBeenCalled();
+  expect(reads).toHaveLength(3);
+  native.dispose();
+  reads[2]({type:"native_history_page"});
+  await Promise.resolve();
+  expect(current).toHaveBeenCalledTimes(1);
+  expect(close).toHaveBeenCalledTimes(2);
+  expect(ended).not.toHaveBeenCalled();
 });

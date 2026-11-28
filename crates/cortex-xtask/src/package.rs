@@ -279,8 +279,9 @@ pub fn validate(root: &Path) -> Res<String> {
         .iter()
         .filter_map(|p| p.get("name").and_then(Value::as_str))
         .collect();
-    if profile_list.len() != 23 || skill_count != 23 || names.len() != 23 {
-        return Err("profile count".into());
+    let canonical: BTreeSet<_> = crate::profiles::BASE_ROLES.iter().copied().collect();
+    if profile_list.len() != canonical.len() || skill_count != canonical.len() || names != canonical {
+        return Err("expected the five canonical worker profiles".into());
     }
     for profile in profile_list {
         let source = profile.req("source")?.as_str().ok_or("invalid source")?;

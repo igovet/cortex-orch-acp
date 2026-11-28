@@ -1,10 +1,11 @@
 use super::locks::regular;
-use crate::{error::refuse, CoreResult};
+use crate::{CoreResult, error::refuse};
 use std::{
     fs,
     io::ErrorKind,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StoreChannel {
@@ -19,10 +20,52 @@ impl StoreChannel {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone)]
 pub struct ProjectKey {
     root: PathBuf,
     channel: StoreChannel,
+    store_root: Option<super::StoreRoot>,
+    directory: Option<PathBuf>,
+    relocation: Option<RelocationObserver>,
+}
+
+#[derive(Clone)]
+struct RelocationObserver {
+    update: Arc<dyn Fn(bool) + Send + Sync>,
+}
+
+impl std::fmt::Debug for RelocationObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RelocationObserver")
+    }
+}
+
+pub(super) struct MovingHistory<'a>(&'a RelocationObserver);
+
+impl Drop for MovingHistory<'_> {
+    fn drop(&mut self) {
+        (self.0.update)(false);
+    }
+}
+impl PartialEq for ProjectKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+impl Eq for ProjectKey {}
+impl PartialOrd for ProjectKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ProjectKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (&self.root, self.channel, &self.store_root).cmp(&(
+            &other.root,
+            other.channel,
+            &other.store_root,
+        ))
+    }
 }
 fn short(path: &Path) -> CoreResult<String> {
     // Git metadata need be owned/single-linked but need not be private mode 0600.
@@ -90,16 +133,62 @@ impl ProjectKey {
         Ok(Self {
             root: logical,
             channel,
+            store_root: None,
+            directory: None,
+            relocation: None,
         })
     }
     pub fn root(&self) -> &Path {
         &self.root
     }
+    /// Stable path identity for the canonical logical project, shared across
+    /// checkout aliases and scoped separately by its consumer.
+    pub fn identity(&self) -> String {
+        crate::digest(self.root.as_os_str().as_encoded_bytes())[..32].to_owned()
+    }
     pub fn channel(&self) -> StoreChannel {
         self.channel
     }
     pub fn directory(&self) -> PathBuf {
+        self.directory
+            .clone()
+            .unwrap_or_else(|| self.anchor_directory())
+    }
+    pub fn anchor_directory(&self) -> PathBuf {
         self.root.join(self.channel.directory())
+    }
+    pub fn home_directory(&self) -> Option<PathBuf> {
+        self.store_root.as_ref().map(|root| root.directory(self))
+    }
+    pub fn store_root(&self) -> Option<&super::StoreRoot> {
+        self.store_root.as_ref()
+    }
+    pub fn resolve_existing(self) -> CoreResult<Self> {
+        super::location::resolve(
+            self,
+            super::OpenMode::LiveReadOnly,
+            std::time::Duration::from_secs(2),
+        )
+    }
+    /// Observe actual, fenced history relocation on an initializing open.
+    /// A successful or failed relocation clears its active status on exit.
+    pub fn observe_relocation(mut self, observe: impl Fn(bool) + Send + Sync + 'static) -> Self {
+        self.relocation = Some(RelocationObserver { update: Arc::new(observe) });
+        self
+    }
+    pub(super) fn relocation_started(&self) -> Option<MovingHistory<'_>> {
+        self.relocation.as_ref().map(|observer| {
+            (observer.update)(true);
+            MovingHistory(observer)
+        })
+    }
+    pub(crate) fn at_directory(mut self, directory: PathBuf) -> Self {
+        self.directory = Some(directory);
+        self
+    }
+    pub(crate) fn with_store_root(mut self, root: super::StoreRoot) -> Self {
+        self.store_root = Some(root);
+        self
     }
     pub fn database(&self) -> PathBuf {
         self.directory().join("cortex.sqlite3")

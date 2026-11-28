@@ -1,15 +1,17 @@
 # Senior consultation
 
-Consultation is escalation-only. Never plan a consultant task: a plan that names
-the senior consultant is refused. When specialist judgment would resolve a
-material uncertainty that this attempt cannot, call `escalation_request` with the
-problem, the one decision to make and the published reports that bear on it,
-as its live schema describes. The runtime builds the consultation packet from
-the request and the retained reports, runs the read-only consultant before
-the new plan, and hands its report to every task of that plan. The consultant
-supplies analysis; the runtime retains control of execution, review and
-completion.
+Request independent advice for one unresolved question when the answer would
+change a concrete decision and the available evidence cannot resolve it. Name
+the alternatives or decision, what the evidence establishes, and the missing
+fact or judgment. Complexity, a large plan and Deep planning are insufficient
+reasons on their own. Use the advertised escalation tool and let the runtime
+schedule the consultant. Keep the consultant out of your plan proposal.
 
-Request another consultation only for a new question, a newly selected report or
-artifact revision, or a clarified constraint; never repeat an unchanged packet.
-The consultation's model and effort follow runtime routing policy.
+When replanning, read prior consultation advice by its exact report ID and
+carry forward the recommendations that still apply. Before requesting another
+consultation, explain how you used the earlier advice and identify the new
+fact, changed assumption or different material question that warrants further
+advice. Keep working from the existing advice when the decision is unchanged.
+
+The consultant supplies analysis. Independent review and verification run
+through the ordinary lifecycle.

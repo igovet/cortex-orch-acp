@@ -72,7 +72,7 @@ pub fn codex_thread_config() -> String {
 }
 /// An `invalid_arguments` refusal naming the launch field and a static,
 /// secret-free reason (never a path or value).
-fn invalid(field: &str, reason: &'static str) -> Error {
+pub(crate) fn invalid(field: &str, reason: &'static str) -> Error {
     Error::InvalidField {
         field: field.to_owned(),
         reason,
@@ -208,11 +208,13 @@ impl LaunchSpec {
                     .and_then(|s| s.to_str())
                     != Some("opencode")
                 {
-                    return Err(Error::Invalid);
+                    return Err(invalid("credential_directory", "opencode_directory_required"));
                 }
                 (
                     "XDG_DATA_HOME",
-                    self.credential_directory.parent().ok_or(Error::Invalid)?,
+                    self.credential_directory
+                        .parent()
+                        .ok_or_else(|| invalid("credential_directory", "parent_required"))?,
                 )
             }
         };
@@ -230,9 +232,10 @@ impl LaunchSpec {
             env.insert(CODEX_CONFIG.into(), codex_thread_config());
             if !launcher.servers.is_empty() {
                 let servers =
-                    serde_json::to_string(&launcher.servers).map_err(|_| Error::Invalid)?;
+                    serde_json::to_string(&launcher.servers)
+                        .map_err(|_| invalid("codex_mcp_servers", "serialization_failed"))?;
                 if servers.contains('\0') {
-                    return Err(Error::Invalid);
+                    return Err(invalid("codex_mcp_servers", "contains_nul"));
                 }
                 env.insert(CODEX_MCP_SERVERS.into(), servers);
             }

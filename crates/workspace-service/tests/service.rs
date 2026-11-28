@@ -266,8 +266,7 @@ async fn conversation_order_uses_opening_sequence_and_matches_decision_pages() {
     assert_eq!(answer_tail["decisionRevision"], after["decisionRevision"]);
     assert!(decisions(prefix["nextCursor"].clone(), 1).await.is_err());
 
-    // A contradictory pointer may still have retained history, but it cannot
-    // bind that history to a different draft's decisions.
+    // A contradictory pointer must not serve a different draft's history.
     let other = service
         .workspace(json!({"protocol":{"major":1,"minor":8},"projectId":project,
         "actorId":"fixture","requestId":"create-other","operation":"tasks.create","target":project,
@@ -303,7 +302,7 @@ async fn conversation_order_uses_opening_sequence_and_matches_decision_pages() {
         &other_owner,
     )
     .unwrap();
-    let set_pointer = |target: &str| {
+    let set_pointer = |target: Option<&str>| {
         store.write(|db| {
             db.execute(
                 "UPDATE workspace_tasks SET execution_id=? WHERE task_id=?",
@@ -312,12 +311,17 @@ async fn conversation_order_uses_opening_sequence_and_matches_decision_pages() {
             Ok(())
         })
     };
-    set_pointer(&other_execution).unwrap();
+    set_pointer(Some(&other_execution)).unwrap();
+    let cross_linked = history("history.earlier", Value::Null, 1).await.unwrap_err();
+    assert_eq!(cross_linked.to_string(), "not_found");
+
+    // A legacy draft with no pointer can still display its own retained execution.
+    set_pointer(None).unwrap();
     let unbound =
         history("history.earlier", Value::Null, 1).await.unwrap()["data"]["value"].clone();
     assert_eq!(unbound["items"][0]["text"], "Answer received");
     assert!(unbound.get("decisionRevision").is_none());
-    set_pointer(&execution).unwrap();
+    set_pointer(Some(&execution)).unwrap();
     service.stop().await.unwrap();
 }
 
@@ -595,6 +599,205 @@ fn native_poller_external_writer_child() {
     let root = std::env::var_os("CORTEX_TEST_POLLER_ROOT").unwrap();
     let project = std::env::var("CORTEX_TEST_POLLER_PROJECT").unwrap();
     native_poller_commit(&native_poller_store(Path::new(&root)), &project, 3);
+}
+
+#[tokio::test]
+async fn native_delta_history_head_binds_the_committed_display_session_without_a_body() {
+    let fixture = Fixture::new();
+    let service = Native::bind(fixture.config()).await.unwrap();
+    let root = fixture.0.join("projects/one");
+    let registered = service.register(&root, "One").await.unwrap();
+    let project = registered["projectId"].as_str().unwrap();
+    service.activate(project).await.unwrap();
+    let store = native_poller_store(&root);
+    seed_history_fixture(&store, &root, project);
+
+    let mut events = service.subscribe();
+    let native = |operation, payload| json!({"protocol":{"major":2,"mapping":2},"requestId":"head-read","projectId":project,
+        "operation":operation,"payload":payload});
+    let board = service.native_query(native("tasks.board", json!({"id":project}))).await.unwrap();
+    append_history_fixture(&store, 0);
+    let event = tokio::time::timeout(Duration::from_secs(3), native_poller_event(&mut events)).await.unwrap();
+    assert_eq!(event["type"], "native_delta");
+    assert_eq!(event["projectId"], project);
+    assert_eq!(event["batch"]["generation"], board["generation"]);
+    assert_eq!(event["historyHeads"], json!([{
+        "taskId":"head-draft","executionId":"head-execution","position":"1","questionsEmpty":true
+    }]));
+    assert!(!event.to_string().contains("private committed fixture fragment"));
+    let history = service.native_query(native("history.page", json!({"target":"head-draft","cursor":null,"limit":20}))).await.unwrap();
+    assert_eq!(history["data"]["value"]["highWatermark"], event["historyHeads"][0]["position"]);
+    assert_eq!(history["data"]["value"]["items"][0]["text"], "private committed fixture fragment");
+    service.stop().await.unwrap();
+}
+
+fn seed_history_fixture(store: &cortex_core::Store, root: &Path, project: &str) {
+    store.write(|db| {
+        db.execute("INSERT INTO tasks VALUES ('head-task',?,'now')", [root.to_str()])?;
+        db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at)
+            VALUES ('head-task','EXECUTING','fixture','now','now')", [])?;
+        db.execute("INSERT INTO task_owners VALUES ('head-task','fixture',1,'now')", [])?;
+        db.execute("INSERT INTO acp_host_sessions VALUES ('head-session',?,'head-task','{}','{}','[]','now',NULL)", [root.to_str()])?;
+        db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,execution_id,created_at)
+            VALUES ('head-draft',?,'fixture','head-execution','now')", [project])?;
+        db.execute("INSERT INTO workspace_executions VALUES ('head-execution','head-draft','head-task','head-session',1,1,'now')", [])?;
+        Ok(())
+    }).unwrap();
+}
+
+fn append_history_fixture(store: &cortex_core::Store, sequence: i64) {
+    store.write(|db| {
+        db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,created_at)
+            VALUES ('head-session',?,'agent_message','private committed fixture fragment','now')", [sequence])?;
+        Ok(())
+    }).unwrap();
+}
+
+async fn socket_value(socket: &mut tokio::net::UnixStream) -> Value {
+    tokio::time::timeout(Duration::from_secs(3), read_frame(socket)).await.unwrap().unwrap()
+}
+
+async fn open_history_socket(service: &Service, params: Value) -> (tokio::net::UnixStream, Value) {
+    let mut socket = connect(service.socket_path()).await.unwrap();
+    write_frame(&mut socket, &json!({"jsonrpc":"2.0","id":"follow","method":"native.history.follow","params":params})).await.unwrap();
+    let ack = socket_value(&mut socket).await;
+    (socket, ack)
+}
+
+#[tokio::test]
+async fn native_history_follow_is_private_bounded_and_reopens_only_from_its_bound_cursor() {
+    let fixture = Fixture::new();
+    let mut config = fixture.config();
+    config.event_capacity = 64;
+    let service = Native::bind(config).await.unwrap();
+    let root = fixture.0.join("projects/one");
+    let other_root = fixture.0.join("projects/two");
+    std::fs::create_dir(&other_root).unwrap();
+    let project = service.register(&root, "One").await.unwrap()["projectId"].as_str().unwrap().to_owned();
+    let other = service.register(&other_root, "Two").await.unwrap()["projectId"].as_str().unwrap().to_owned();
+    service.activate(&project).await.unwrap();
+    service.activate(&other).await.unwrap();
+    let store = native_poller_store(&root);
+    seed_history_fixture(&store, &root, &project);
+    let serving = tokio::spawn(service.clone().serve());
+
+    let mut global = connect(service.socket_path()).await.unwrap();
+    write_frame(&mut global, &json!({"jsonrpc":"2.0","id":"global","method":"service.subscribe","params":{}})).await.unwrap();
+    assert_eq!(socket_value(&mut global).await["result"]["subscribed"], true);
+    let params = json!({"projectId":project,"taskId":"head-draft","executionId":"head-execution",
+        "generation":null,"cursor":null,"limit":1});
+    let (mut follow, ack) = open_history_socket(&service, params.clone()).await;
+    assert_eq!(ack["result"]["subscribed"], true, "{ack}");
+    let initial = socket_value(&mut follow).await["params"].clone();
+    assert_eq!(initial["type"], "native_history_page");
+    assert_eq!(initial["page"]["items"], json!([]));
+    assert_eq!(initial["decisions"]["decisionRevision"], initial["page"]["decisionRevision"]);
+    let initial_cursor = initial["page"]["tailCursor"].clone();
+    assert!(initial_cursor.as_str().unwrap().starts_with("nt1."));
+
+    let mut cross = params.clone();
+    cross["projectId"] = json!(other);
+    let (_, refused) = open_history_socket(&service, cross).await;
+    assert_eq!(refused["error"]["message"], "native_execution_binding_invalid");
+    let mut wrong_execution = params.clone();
+    wrong_execution["executionId"] = json!("foreign-execution");
+    assert_eq!(open_history_socket(&service, wrong_execution).await.1["error"]["message"], "native_execution_binding_invalid");
+
+    let mut extra_views = Vec::new();
+    for _ in 0..7 {
+        let (mut view, ack) = open_history_socket(&service, params.clone()).await;
+        assert_eq!(ack["result"]["subscribed"], true);
+        assert_eq!(socket_value(&mut view).await["params"]["type"], "native_history_page");
+        extra_views.push(view);
+    }
+    assert_eq!(open_history_socket(&service, params.clone()).await.1["error"]["message"], "history_follow_busy");
+    // Closing a pane frees its slot even while its project stays registered.
+    let removed_view = extra_views.pop().unwrap();
+    drop(removed_view);
+    let extra = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let (view, receipt) = open_history_socket(&service, params.clone()).await;
+            if receipt["result"]["subscribed"] == true {
+                break view;
+            }
+            assert_eq!(receipt["error"]["message"], "history_follow_busy");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    drop(extra);
+    drop(extra_views);
+
+    store.write(|db| {
+        db.execute("UPDATE workspace_tasks SET description='Unrelated',version=2 WHERE task_id='head-draft'", [])?;
+        cortex_core::store::append_public_tx(db, &project, "head-draft", "task", 2)?;
+        Ok(())
+    }).unwrap();
+    loop {
+        let value = socket_value(&mut global).await;
+        if value["params"]["type"] == "native_delta" {
+            assert_eq!(value["params"]["historyHeads"][0]["position"], "0");
+            break;
+        }
+    }
+    assert!(tokio::time::timeout(Duration::from_millis(100), read_frame(&mut follow)).await.is_err());
+
+    store.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='WAITING_USER' WHERE task_id='head-task'", [])?;
+        db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,created_at)
+            VALUES ('head-question','head-task','fixture','private fixture question','now')", [])?;
+        db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,created_at)
+            VALUES ('head-session',0,'agent_message','private committed fixture fragment','now')", [])?;
+        Ok(())
+    }).unwrap();
+    let committed = socket_value(&mut follow).await["params"].clone();
+    assert_eq!(committed["fromCursor"], initial_cursor);
+    assert_eq!(committed["generation"], initial["generation"]);
+    assert_eq!(committed["page"]["items"][0]["text"], "private committed fixture fragment");
+    assert_eq!(committed["decisions"]["items"][0]["prompt"], "private fixture question");
+    assert_eq!(committed["decisions"]["decisionRevision"], committed["page"]["decisionRevision"]);
+    assert_ne!(committed["page"]["decisionRevision"], initial["page"]["decisionRevision"]);
+    #[cfg(feature = "test-observations")]
+    assert_eq!(committed["observation"], json!({"projectionReads":2,"decisionReads":2,"emptyReads":0}));
+    let delta = loop {
+        let value = socket_value(&mut global).await;
+        if value["params"]["type"] == "native_delta" {
+            break value;
+        }
+    };
+    assert!(!delta.to_string().contains("private committed fixture fragment"));
+    assert!(!delta.to_string().contains("private fixture question"));
+
+    drop(follow);
+    let mut resume = params.clone();
+    resume["generation"] = initial["generation"].clone();
+    resume["cursor"] = initial_cursor;
+    let (mut replay, ack) = open_history_socket(&service, resume.clone()).await;
+    assert_eq!(ack["result"]["subscribed"], true);
+    let replayed = socket_value(&mut replay).await["params"].clone();
+    assert_eq!(replayed["page"]["items"], committed["page"]["items"]);
+    assert_eq!(replayed["fromCursor"], committed["fromCursor"]);
+
+    let mut invalid = resume.clone();
+    invalid["cursor"] = json!("nt1.wrong.-1.0");
+    assert_eq!(open_history_socket(&service, invalid).await.1["error"]["message"], "invalid_cursor");
+    let mut old = resume.clone();
+    old["generation"] = json!("previous-generation");
+    assert_eq!(open_history_socket(&service, old).await.1["error"]["message"], "history_reset");
+    append_history_fixture(&store, 1);
+    assert_eq!(open_history_socket(&service, resume).await.1["error"]["message"], "history_follow_backlog");
+
+    // An interested socket closes on unregister even without a new mutation.
+    service.remove(&project).await.unwrap();
+    loop {
+        let event = socket_value(&mut replay).await;
+        if event["params"]["type"] == "native_history_resync" {
+            assert_eq!(event["params"]["reason"], "project_inactive");
+            break;
+        }
+    }
+    assert!(tokio::time::timeout(Duration::from_secs(3), read_frame(&mut replay)).await.unwrap().is_err());
+    service.stop().await.unwrap();
+    serving.await.unwrap().unwrap();
 }
 
 #[tokio::test]

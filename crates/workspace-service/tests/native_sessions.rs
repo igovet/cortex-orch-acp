@@ -19,6 +19,9 @@ fn verification_available(root: &std::path::Path) -> bool {
         }
     }
 }
+#[path = "../../../tests/fixtures/plan-choice-defaults.rs"]
+mod fixture_choices;
+
 use cortex_core::{
     lifecycle::{domain, runtime::RuntimeAction},
     OpenMode, ProjectKey, Store, StoreChannel, TaskState,
@@ -106,7 +109,10 @@ impl Drop for Project {
         std::fs::remove_dir_all(&self.0).unwrap();
     }
 }
-fn call(name: &str, args: Value) -> String {
+fn call(name: &str, mut args: Value) -> String {
+    if name == "plan_submit" && args.get("plan").is_some() {
+        fixture_choices::fill_plan_choices(&mut args["plan"]);
+    }
     format!("call:{}", json!({"name":name,"arguments":args}))
 }
 /// An inline fixture report completed with every required report section of every
@@ -617,10 +623,10 @@ async fn channel_source_project_and_commands() {
             "call:{}",
             json!({"name":n,"arguments":a,"__fixture_expect":e})
         );
-        match tokio::time::timeout(Duration::from_secs(20), d.prompt(&prompt)).await {
-            Err(_) => { eprintln!("NOREPLY {n} {target}"); }
-            Ok(v) => { v.unwrap_or_else(|e| panic!("{n} fixture action {target}: {e:?}")); }
-        }
+        tokio::time::timeout(Duration::from_secs(20), d.prompt(&prompt))
+            .await
+            .unwrap_or_else(|_| panic!("{n} fixture action {target}: no reply"))
+            .unwrap_or_else(|e| panic!("{n} fixture action {target}: {e:?}"));
     }
     let d = h
         .dispatch("t".into(), o.clone(), SessionRole::Coordinator, p.route())
@@ -1271,7 +1277,11 @@ async fn channel_source_project_and_commands() {
         )
         .await;
         assert!(p.0.join("src/effect").is_file());
-        check(&w,"command_run",json!({"argv":["/bin/cat",".cortex-dev/cortex.sqlite3"],"request_key":"private"}),json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/cortex_store/code":"cortex_store_read_only_for_commands"})).await;
+        // This legacy fixture grants the whole checkout. Landlock cannot mask
+        // a name inside that open write tree. Use fixture text so command output
+        // proves the access without reading or exporting a live database file.
+        std::fs::write(p.0.join(".cortex-dev/command-fixture.txt"), "legacy checkout fixture").unwrap();
+        check(&w,"command_run",json!({"argv":["/bin/cat",".cortex-dev/command-fixture.txt"],"request_key":"private"}),json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/output":"legacy checkout fixture"})).await;
         // Exercise nested private-state writes before the existing timeout cases.
         // Removing the synthetic store changes its parent's ctime; the later
         // comparison needs a quiet checkout to obtain a revision binding.
@@ -1537,7 +1547,7 @@ async fn coordinator_tools_not_chat_and_lease() {
     // output does not) is a correctable content error with its exact code, never an
     // authority refusal; nothing is recorded and the coordinator may retry.
     let trivial = json!({"name":"plan_submit","arguments":{"request_key":"trivial","plan":{
-        "tasks":[{"id":"w","role":"backend-dev","objective":"Write notes.txt","dependencies":[],
+        "tasks":[{"id":"w","role":"general","objective":"Write notes.txt","dependencies":[],
             "scope":["notes.txt"],"model":"auto"}],
         "verification":[["grep","-x","ok","notes.txt"]]}},
         "__fixture_expect":{"/result/isError":true,
@@ -3339,7 +3349,7 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
         }
         // The gateway reaches the same paths only through a runtime decision: Cortex
         // state on request (missing parents included), Git reads without one, and
-        // live-store-class writes only in Auto.
+        // live-store-class writes are sealed in every access mode.
         async fn call(d: &workspace_service::native_sessions::SessionDriver, name: &str, args: Value, expected: Value) {
             let prompt = format!("call:{}", json!({"name":name,"arguments":args,"__fixture_expect":expected}));
             assert_eq!(d.prompt(&prompt).await.unwrap().stop_reason, "end_turn", "{name} {args}");
@@ -3357,18 +3367,15 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
         // database. Exercise the filename policy without touching an open store.
         assert!(!p.0.join(".cortex/cortex.sqlite3").exists());
         let journal = ".cortex/cortex.sqlite3-journal";
-        let journal_reply = if auto {
-            json!({"/result/isError":false})
-        } else {
-            json!({"/result/isError":true,"/result/structuredContent/code":"cortex_live_store"})
-        };
+        let journal_reply = json!({"/result/isError":true,"/result/structuredContent/code":"cortex_live_store"});
         call(&d, "project_write", json!({"path":journal,"content":"x","expected_sha256":"absent","request_key":"gw-live"}),
             journal_reply).await;
-        if auto {
-            assert_eq!(std::fs::read_to_string(p.0.join(journal)).unwrap(), "x");
-        } else {
-            assert!(!p.0.join(journal).exists());
-        }
+        assert!(!p.0.join(journal).exists());
+        std::fs::write(p.0.join(journal), "sealed fixture").unwrap();
+        use sha2::{Digest, Sha256};
+        call(&d, "project_delete", json!({"path":journal,"expected_sha256":format!("{:x}", Sha256::digest(b"sealed fixture")),"request_key":"gw-live-delete"}),
+            json!({"/result/isError":true,"/result/structuredContent/code":"private_or_invalid_path"})).await;
+        assert_eq!(std::fs::read_to_string(p.0.join(journal)).unwrap(), "sealed fixture");
         // A Git control file and credential files (by name, in any directory) are
         // decided the same way for gateway writes; reading a credential file and
         // writing ordinary source that merely mentions a token need no decision.
@@ -3395,11 +3402,7 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
         let asked = if auto { ("cortex_private".to_owned(), true, "mode:auto".to_owned()) }
             else { ("cortex_private".to_owned(), false, "no_owner_client".to_owned()) };
         let rule = |rule: &str| (rule.to_owned(), asked.1, asked.2.clone());
-        let journal_decision = (
-            "cortex_live_store".into(),
-            auto,
-            if auto { "mode:auto" } else { "runtime" }.into(),
-        );
+        let journal_decision = ("cortex_live_store".into(), false, "runtime".into());
         assert_eq!(decided, vec![asked.clone(), asked.clone(), journal_decision,
             rule("control_target"), rule("credential"), rule("credential")], "{access}");
         d.shutdown().await.unwrap();
@@ -3942,8 +3945,8 @@ async fn startup_failure_settles_only_owned_reaped_process() {
     drop(s);
     close(h).await;
 }
-/// A refusal before the engine process exists (here a launcher that cannot be
-/// prepared) must settle as a confirmed absence, never as an ambiguous worker
+/// A refusal before the engine process exists (here an argument with a NUL)
+/// must settle as a confirmed absence, never as an ambiguous worker
 /// that blocks recovery with `lost_worker_termination_unconfirmed`.
 async fn launch_refusal_before_spawn_is_a_confirmed_absence() {
     let p = Project::new();
@@ -3953,15 +3956,21 @@ async fn launch_refusal_before_spawn_is_a_confirmed_absence() {
         .await
         .unwrap();
     let mut route = p.route();
-    route.launch.codex_launcher = Some(CodexLauncher::new(|| Err(cortex_engine::Error::Invalid)));
-    assert!(h
-        .dispatch("t".into(), o, SessionRole::Coordinator, route)
-        .await
-        .is_err());
+    route.launch.args.push("invalid\0argument".into());
+    let error = match h.dispatch("t".into(), o, SessionRole::Coordinator, route).await {
+        Ok(_) => panic!("invalid launcher unexpectedly started"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), cortex_core::lifecycle::automatic::INVALID_SESSION_LAUNCH);
     let s = p.store();
     s.read(|db| {
         let why: String = db.query_row("SELECT payload_json FROM runtime_events WHERE type='NATIVE_SESSION_START_FAILED' ORDER BY id DESC LIMIT 1",[],|r|r.get(0))?;
-        assert!(why.contains("\"phase\":\"launch\"") && why.contains("invalid_arguments"), "{why}");
+        let payload: Value = serde_json::from_str(&why)?;
+        assert_eq!(payload["phase"], "launch");
+        assert_eq!(payload["error"], "invalid_arguments");
+        assert_eq!(payload["diagnostics"]["refusal"], json!({
+            "field":"args", "reason":"contains_nul"
+        }));
         let status: String = db.query_row("SELECT status FROM delegation_provisioning ORDER BY rowid DESC LIMIT 1",[],|r|r.get(0))?;
         assert_eq!(status, "terminated");
         assert_eq!(db.query_row("SELECT count(*) FROM capacity_reservations WHERE state='released'",[],|r|r.get::<_,i64>(0))?, 1);
@@ -4212,22 +4221,35 @@ async fn inline_result_is_published_once_bound_to_attempt_and_reconciled_after_r
     let mut forged = args.clone();
     forged["checks"] = json!([{"name":"invented pass","outcome":"passed","command":["true"],
         "tool_call_ref":"gateway:00000000000000000000000000000000"}]);
-    // A passed claim needs a project observation. With the folder unobservable (a
-    // `.git` entry Git cannot use, in this disposable fixture only) the claim is refused
-    // and nothing is published. (On an observable folder an invented pass is recorded
-    // `unverified` with its evidence gap, never as passed: `worker_checks::evaluate`.)
+    // A fresh checkout observation or independently retained work-set evidence is
+    // required to fall back after an observation failure. A broken fixture .git
+    // entry leaves no checkout observation. The invented receipt proves no work set
+    // either, so reject the submission before publication and leave the key reusable.
     std::fs::write(p.0.join(".git"), "gitdir: /nonexistent/cortex-fixture\n").unwrap();
-    let forged_stop = d
-        .prompt(&call("result_submit", forged))
-        .await
-        .unwrap()
-        .stop_reason;
+    let refused = format!("call:{}", json!({
+        "name":"result_submit", "arguments":forged,
+        "__fixture_expect":{
+            "/result/isError":true,
+            "/result/structuredContent/code":"project_revision_unavailable",
+            "/result/structuredContent/recorded":false,
+            "/result/structuredContent/missing/0":"invented pass [gateway:00000000000000000000000000000000]: the cited receipt is missing, ambiguous, duplicated or outside this attempt"
+        }
+    }));
+    // The fake ACP peer ends its turn normally after a structured MCP refusal.
+    assert_eq!(d.prompt(&refused).await.unwrap().stop_reason, "end_turn");
     std::fs::remove_file(p.0.join(".git")).unwrap();
-    assert_eq!(forged_stop, "refusal");
     s.read(|db| {
         assert_eq!(
             db.query_row("SELECT count(*) FROM reports", [], |r| r.get::<_, i64>(0))?,
             0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM runtime_requests WHERE task_id='t' AND request_key='result'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?,
+            0,
         );
         Ok(())
     })
@@ -4355,6 +4377,24 @@ async fn inline_result_is_published_once_bound_to_attempt_and_reconciled_after_r
         .is_err());
     close(reopened).await;
 }
+async fn timing_records_native_launch_and_dispatched_planning_turn() {
+    let p = Project::new();
+    let h = p.host().await;
+    let owner = h.create("t".into(), "Private timing fixture".into(), "owner".into()).await.unwrap();
+    let driver = h.dispatch("t".into(), owner, SessionRole::Coordinator, p.route()).await.unwrap();
+    driver.prompt("fixture-usage-reported").await.unwrap();
+    let timings = cortex_core::observability::task_timings(&p.store(), "t").unwrap();
+    for category in ["engine_launch", "planning_turn"] {
+        let observed: Vec<_> = timings.intervals.iter().filter(|row| row.category == category).collect();
+        assert_eq!(observed.len(), 1, "{category}");
+        assert_eq!(observed[0].basis, "observed");
+        assert!(observed[0].attempt_id.is_some());
+    }
+    assert!(!serde_json::to_string(&timings).unwrap().contains("Private timing fixture"));
+    driver.shutdown().await.unwrap();
+    close(h).await;
+}
+
 async fn prompt_usage_follows_real_native_dispatches() {
     let p = Project::new();
     let h = p.host().await;
@@ -4484,7 +4524,7 @@ async fn prompt_usage_follows_real_native_dispatches() {
             (
                 4,
                 "engine_reported",
-                json!({"outputTokens":3}),
+                json!({"outputTokens":3,"totalTokens":3}),
                 Some("refusal"),
                 0,
             ),
@@ -4723,16 +4763,16 @@ async fn native_plan_review_verification_journey(
     } else {
         json!([["/usr/bin/cmp", "/dev/null", "/dev/null"]])
     };
-    let plan = json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Change work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}],
-        "verification":verification});
+    let plan = json!({"tasks":[{"id":"work","role":"general","objective":"Change work.txt","dependencies":[],
+        "scope":["work.txt","after-terminal-write.txt"],"model":"auto"}],"verification":verification});
     // Invalid proposals cannot change the task, create nodes or consume the key; each is
     // a correctable content error (isError with its code), not an authority refusal.
     for bad in [
         json!({"tasks":[],"verification":[["true"]]}),
         json!({"tasks":[{"id":"work","role":"code-reviewer","objective":"Reserved","dependencies":[],"scope":["."],"model":"auto"}],"verification":[["true"]]}),
-        json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Cycle","dependencies":["work"],"scope":["."],"model":"auto"}],"verification":[["true"]]}),
-        json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Escape","dependencies":[],"scope":["../private"],"model":"auto"}],"verification":[["true"]]}),
-        json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Shell","dependencies":[],"scope":["."],"model":"auto"}],"verification":[["true","&&","false"]]}),
+        json!({"tasks":[{"id":"work","role":"general","objective":"Cycle","dependencies":["work"],"scope":["."],"model":"auto"}],"verification":[["true"]]}),
+        json!({"tasks":[{"id":"work","role":"general","objective":"Escape","dependencies":[],"scope":["../private"],"model":"auto"}],"verification":[["true"]]}),
+        json!({"tasks":[{"id":"work","role":"general","objective":"Shell","dependencies":[],"scope":["."],"model":"auto"}],"verification":[["true","&&","false"]]}),
     ] {
         let stop = coordinator
             .prompt(&call(
@@ -4829,7 +4869,41 @@ async fn native_plan_review_verification_journey(
     );
     let _ = truncated;
     let result = json!({"report":"# Work\n\nFixture file changed.","summary":"Changed the fixture file.","checks":[],"request_key":"result"});
-    submit_result(&h, &worker, "journey", &o, &a, result).await;
+    let reported = worker
+        .prompt(&format!("call:{}", json!({"name":"result_submit","arguments":with_sections(result),
+            "__fixture_delayed_terminal_ack":true})))
+        .await
+        .expect("the result-only writer turn must return its ACP reply");
+    assert_eq!(reported.stop_reason, "end_turn");
+    assert!(!p.0.join("after-terminal-write.txt").exists());
+    let receipt = h.result_receipt("journey".into(), o.clone(), a.clone(), "result".into())
+        .await.unwrap().expect("exact result receipt missing");
+    assert_eq!(receipt["assignment_ref"], a);
+    assert_eq!(receipt["outcome"], "recorded");
+    assert_eq!(receipt["certified"], false);
+    p.store().read(|db| {
+        let mut turns = db.prepare(
+            "SELECT change.payload_json FROM runtime_events start
+             JOIN trusted_channels c ON c.task_id=start.task_id
+               AND c.channel_id=json_extract(start.payload_json,'$.channel_id') AND c.assignment_id=?
+             JOIN runtime_events change ON change.task_id=start.task_id AND change.id>start.id
+               AND change.type='NATIVE_WRITER_TURN_CHANGES'
+               AND json_extract(change.payload_json,'$.turn')=json_extract(start.payload_json,'$.turn')
+               AND json_extract(change.payload_json,'$.channel_id')=c.channel_id
+             WHERE start.task_id='journey' AND start.type='NATIVE_WRITER_TURN_STARTED'
+             ORDER BY start.id"
+        )?;
+        let rows = turns.query_map([&a], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(rows.len(), 2);
+        for (raw, expected_paths) in rows.iter().zip([json!(["work.txt"]), json!([])]) {
+            let change: Value = serde_json::from_str(raw)?;
+            assert_eq!(change["native_mutation"], true);
+            assert_eq!(change["changed_paths_complete"], true, "{change}");
+            assert_eq!(change["changed_paths"], expected_paths, "{change}");
+        }
+        Ok(())
+    }).unwrap();
     // A report never stands in for a process wait or begins verification.
     assert_eq!(
         h.advance("journey".into(), o.clone()).await.unwrap()["state"],
@@ -4921,6 +4995,7 @@ async fn native_plan_review_verification_journey(
         "checks":[],"verdict":if fix{"REQUEST_CHANGES"}else{"APPROVE"},"request_key":"review",
         "findings":if fix{json!([{"node":"work","files":["work.txt"],"fix":"Make the fixture correct.","cross_cutting":false}])}else{json!([])}});
     if restart {
+        use sha2::{Digest, Sha256};
         let assignment = step["assignments"][0]["assignment_ref"]
             .as_str()
             .unwrap()
@@ -4938,9 +5013,20 @@ async fn native_plan_review_verification_journey(
                 })
                 .unwrap()
         };
-        std::fs::write(p.0.join("work.txt"), "changed during review").unwrap();
+        let first_change = "changed during review";
+        let first_hash = format!("{:x}", Sha256::digest(first_change.as_bytes()));
+        std::fs::write(p.0.join("work.txt"), first_change).unwrap();
+        let expect = |args: Value, expected: Value| format!("call:{}", json!({
+            "name":"result_submit","arguments":with_sections(args),"__fixture_expect":expected
+        }));
         review
-            .prompt(&call("result_submit", result.clone()))
+            .prompt(&expect(result.clone(), json!({
+                "/result/isError":true,
+                "/result/structuredContent/code":"review_project_revision_changed",
+                "/result/structuredContent/inline_reads/delivered_as_read":true,
+                "/result/structuredContent/inline_reads/items/0/path":"work.txt",
+                "/result/structuredContent/inline_reads/items/0/sha256":first_hash,
+            })))
             .await
             .unwrap();
         p.store().read(|db|{
@@ -4949,12 +5035,36 @@ async fn native_plan_review_verification_journey(
             Ok(())
         }).unwrap();
         assert_eq!(refusal()["code"], "review_project_revision_changed");
-        // The review is rebound to the current state and its packet now names the
-        // current bytes: the earlier read of the replaced bytes no longer covers the
-        // file, so a verdict submitted without re-reading it is refused, unrecorded.
+        // Only the first rebind delivers current bytes inline. A second change
+        // invalidates that read and exercises the ordinary coverage refusal.
+        let second_change = "changed again during review";
+        let second_hash = format!("{:x}", Sha256::digest(second_change.as_bytes()));
+        std::fs::write(p.0.join("work.txt"), second_change).unwrap();
+        result["request_key"] = json!("review-rebind-again");
+        review.prompt(&expect(result.clone(), json!({
+            "/result/isError":true,
+            "/result/structuredContent/code":"review_project_revision_changed"
+        }))).await.unwrap();
+        assert_eq!(refusal()["code"], "review_project_revision_changed");
+        p.store().read(|db| {
+            let sha: String = db.query_row(
+                "SELECT json_extract(file.value,'$.current_sha256') FROM (
+                    SELECT payload_json FROM runtime_events WHERE task_id='journey' AND type='REVIEW_PACKET'
+                    AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1
+                 ) p, json_each(p.payload_json,'$.packet.changed_files.files') file
+                 WHERE json_extract(file.value,'$.path')='work.txt'",
+                [&assignment], |r| r.get(0),
+            )?;
+            assert_eq!(sha, second_hash);
+            Ok(())
+        }).unwrap();
         result["request_key"] = json!("review-unread");
         review
-            .prompt(&call("result_submit", with_sections(result.clone())))
+            .prompt(&expect(result.clone(), json!({
+                "/result/isError":true,
+                "/result/structuredContent/code":"review_file_coverage_required",
+                "/result/structuredContent/missing/0":"work.txt (current complete read is missing or stale)"
+            })))
             .await
             .unwrap();
         let stale = refusal();
@@ -4973,6 +5083,10 @@ async fn native_plan_review_verification_journey(
             .await
             .unwrap()
             .is_none());
+        p.store().read(|db| {
+            assert_eq!(db.query_row("SELECT count(*) FROM reports", [], |r|r.get::<_,i64>(0))?, 1);
+            Ok(())
+        }).unwrap();
         // The reviewer re-reads what changed, then submits with a fresh request_key.
         review_reads(&p, &review, "journey", &assignment).await;
         result["request_key"] = json!("review-current");
@@ -5125,7 +5239,7 @@ async fn plain_folder_task_runs_its_whole_lifecycle() {
         )
         .await
         .unwrap();
-    let plan = json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Change work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}],
+    let plan = json!({"tasks":[{"id":"work","role":"general","objective":"Change work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}],
         "verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]});
     if !verification_available(&p.0) {
         coordinator.shutdown().await.unwrap();
@@ -5273,10 +5387,10 @@ async fn shared_checkout_writer_waits_until_review_and_both_verify() {
             .await
             .unwrap();
         let mut nodes = vec![
-            json!({"id":"work","role":"backend-dev","objective":"Update a file","dependencies":[],"scope":[task],"model":"auto"}),
+            json!({"id":"work","role":"general","objective":"Update a file","dependencies":[],"scope":[task],"model":"auto"}),
         ];
         if extra {
-            nodes.push(json!({"id":"more","role":"backend-dev","objective":"Finish the file","dependencies":["work"],"scope":[task],"model":"auto"}));
+            nodes.push(json!({"id":"more","role":"general","objective":"Finish the file","dependencies":["work"],"scope":[task],"model":"auto"}));
         }
         coordinator.prompt(&call("plan_submit",json!({"request_key":"plan","plan":{"tasks":nodes,"verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]}}))).await.unwrap();
         coordinator.shutdown().await.unwrap();
@@ -5480,7 +5594,8 @@ async fn project_skills_read_through_the_channel() {
     .await;
     d.shutdown().await.unwrap();
     s.write(|db| {
-        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'",[])?;
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1,plan_json=? WHERE task_id='t'",
+            [json!({"tasks":[{"id":"n","competencies":["database"]}]}).to_string()])?;
         db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-general','Work','[]','[\"src\"]','execution','running','a',NULL)",[])?;
         Ok(())
     }).unwrap();
@@ -5511,6 +5626,19 @@ async fn project_skills_read_through_the_channel() {
     }
     // The Cortex id wins over the same-named project file; its path reads the file.
     let bundled: Value = serde_json::from_str(include_str!("../schema/instructions.json")).unwrap();
+    let modules: Value = s.read(|db| {
+        let selected: String = db.query_row("SELECT json_extract(payload_json,'$.competency_modules')
+            FROM runtime_events WHERE task_id='t' AND type='NATIVE_ATTEMPT_DELIVERY'
+            AND json_extract(payload_json,'$.assignment_ref')='a' ORDER BY id LIMIT 1",
+            [], |r| r.get(0))?;
+        Ok(serde_json::from_str(&selected)?)
+    }).unwrap();
+    let source = bundled["competencies"]["database"].as_str().unwrap();
+    let section = format!("\n\n## Competency: database\n\n{source}\n");
+    use sha2::{Digest, Sha256};
+    assert_eq!(modules[0]["id"], "database");
+    assert_eq!(modules[0]["source_sha256"], format!("{:x}", Sha256::digest(source)));
+    assert_eq!(modules[0]["section_sha256"], format!("{:x}", Sha256::digest(section)));
     checked(
         &w,
         "tool-discipline",
@@ -5540,6 +5668,120 @@ async fn project_skills_read_through_the_channel() {
         .await;
     }
     w.shutdown().await.unwrap();
+    close(h).await;
+}
+
+async fn skill_delivery_receipts_bind_exact_responses_and_attempts() {
+    use sha2::{Digest, Sha256};
+
+    let p = Project::new();
+    let skill_path = ".agents/skills/audit-fixture/SKILL.md";
+    let body = format!("# Private fixture\n{}", "é".repeat(5000));
+    std::fs::create_dir_all(p.0.join(".agents/skills/audit-fixture")).unwrap();
+    std::fs::write(p.0.join(skill_path), &body).unwrap();
+    let h = p.host().await;
+    let owner = h.create("t".into(), "skill audit".into(), "owner".into()).await.unwrap();
+    let s = p.store();
+    let d = h.dispatch("t".into(), owner.clone(), SessionRole::Coordinator, p.route())
+        .await.unwrap();
+    let check = |name: &str, args: Value, expected: Value| {
+        format!("call:{}", json!({"name":name,"arguments":args,"__fixture_expect":expected}))
+    };
+    let receipts = || s.read(|db| {
+        let mut q = db.prepare("SELECT type,payload_json FROM runtime_events
+            WHERE task_id='t' AND type IN ('NATIVE_SKILL_DEFERRED','NATIVE_SKILL_DELIVERED') ORDER BY id")?;
+        let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?.into_iter()
+            .map(|(kind, data)| (kind, serde_json::from_str::<Value>(&data).unwrap())).collect::<Vec<_>>())
+    }).unwrap();
+
+    let failed = check("read_skill", json!({"skill":"unknown-skill"}),
+        json!({"/result/isError":true}));
+    assert_eq!(d.prompt(&failed).await.unwrap().stop_reason, "end_turn");
+    assert!(receipts().is_empty());
+    let direct = check("read_skill", json!({"skill":"documentation-sync"}),
+        json!({"/result/isError":false}));
+    assert_eq!(d.prompt(&direct).await.unwrap().stop_reason, "end_turn");
+    assert_eq!(d.prompt(&direct).await.unwrap().stop_reason, "end_turn");
+    assert_eq!(receipts().len(), 1);
+    let compiled: Value = serde_json::from_str(include_str!("../schema/instructions.json")).unwrap();
+    let bundled = compiled["skills"]["documentation-sync"].as_str().unwrap();
+    let inline = &receipts()[0].1;
+    assert_eq!(inline["skill_id"], "documentation-sync");
+    assert_eq!(inline["delivery"], "inline");
+    assert_eq!(inline["sha256"], format!("{:x}", Sha256::digest(bundled.as_bytes())));
+    assert_eq!(inline["bytes"], bundled.len());
+
+    let batch = check("read_batch", json!({"calls":[
+        {"id":"deferred","tool":"read_skill","arguments":{"skill":"audit-fixture"}},
+        {"id":"missing","tool":"read_skill","arguments":{"skill":"unknown-skill"}}
+    ]}), json!({"/result/isError":true, "/result/structuredContent/results/0/status":"deferred",
+        "/result/structuredContent/results/1/status":"error"}));
+    assert_eq!(d.prompt(&batch).await.unwrap().stop_reason, "end_turn");
+    assert_eq!(d.prompt(&batch).await.unwrap().stop_reason, "end_turn");
+    let events = receipts();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events[1].0, "NATIVE_SKILL_DEFERRED");
+    let offer = &events[1].1;
+    let id = offer["large_output_id"].as_str().unwrap();
+    let count = offer["output_bytes"].as_u64().unwrap();
+    let expected_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
+    assert_eq!(offer["sha256"], expected_hash);
+    assert_eq!(offer["version"], format!("sha256:{expected_hash}"));
+    assert_eq!(offer["bytes"], body.len());
+    assert_eq!(offer["skill_id"], format!("project-sha256:{:x}", Sha256::digest(skill_path.as_bytes())));
+    assert!(!offer.to_string().contains("audit-fixture"));
+    assert!(!offer.to_string().contains("Private fixture"));
+    assert_eq!(offer["task_id"], "t");
+    assert_eq!(offer["attempt"], inline["attempt"]);
+    assert_eq!(offer["channel_id"], inline["channel_id"]);
+    assert_eq!(offer["assignment_ref"], Value::Null);
+    assert!(offer["session"].is_string());
+
+    let read = |offset, limit| check("read_large_output",
+        json!({"large_output_id":id,"offset":offset,"limit":limit}),
+        json!({"/result/isError":false, "/result/structuredContent/integrity_verified":true}));
+    let retained = s.key().directory().join("t/.native-output").join(format!("skill-{id}.bin"));
+    let bytes = std::fs::read(&retained).unwrap();
+    let mut tampered = bytes.clone();
+    tampered[0] = b'!';
+    std::fs::write(&retained, tampered).unwrap();
+    let corrupt = check("read_large_output", json!({"large_output_id":id}),
+        json!({"/result/isError":true,
+            "/result/structuredContent/code":"output_integrity_mismatch"}));
+    assert_eq!(d.prompt(&corrupt).await.unwrap().stop_reason, "end_turn");
+    assert_eq!(receipts().len(), 2);
+    std::fs::write(&retained, bytes).unwrap();
+    assert_eq!(d.prompt(&read(count - 5, 5)).await.unwrap().stop_reason, "end_turn");
+    assert_eq!(receipts().len(), 2, "tail alone does not prove delivery");
+    let first = check("read_batch", json!({"calls":[{"id":"first","tool":"read_large_output",
+        "arguments":{"large_output_id":id,"offset":0,"limit":1024}}]}),
+        json!({"/result/isError":false, "/result/structuredContent/results/0/result/next_offset":1024}));
+    assert_eq!(d.prompt(&first).await.unwrap().stop_reason, "end_turn");
+    assert_eq!(receipts().len(), 2);
+    assert_eq!(d.prompt(&read(1024, 65536)).await.unwrap().stop_reason, "end_turn");
+    assert_eq!(d.prompt(&read(1024, 65536)).await.unwrap().stop_reason, "end_turn");
+    let events = receipts();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[2].0, "NATIVE_SKILL_DELIVERED");
+    assert_eq!(events[2].1["delivery"], "deferred_readback");
+    assert_eq!(events[2].1["sha256"], offer["sha256"]);
+    assert_eq!(events[2].1["output_sha256"], offer["output_sha256"]);
+    d.shutdown().await.unwrap();
+    close(h).await;
+
+    let h = p.host().await;
+    let fresh = h.dispatch("t".into(), owner, SessionRole::Coordinator, p.route())
+        .await.unwrap();
+    assert_eq!(fresh.prompt(&check("read_large_output", json!({"large_output_id":id}),
+        json!({"/result/isError":true}))).await.unwrap().stop_reason, "end_turn");
+    assert_eq!(receipts().len(), 3);
+    assert_eq!(fresh.prompt(&direct).await.unwrap().stop_reason, "end_turn");
+    let events = receipts();
+    assert_eq!(events.len(), 4);
+    assert_ne!(events[3].1["attempt"], inline["attempt"]);
+    assert_ne!(events[3].1["channel_id"], inline["channel_id"]);
+    fresh.shutdown().await.unwrap();
     close(h).await;
 }
 async fn coordinator_owner_decision_tools_bind_the_exact_failed_worker() {
@@ -6555,7 +6797,7 @@ async fn reopened_synthesis_feedback() -> bool {
                 .unwrap();
             assert_eq!(d.prompt(&call("plan_submit", json!({
                 "request_key":"unavailable",
-                "plan":{"tasks":[{"id":"recheck","role":"qa-engineer","objective":"Check work.txt",
+                "plan":{"tasks":[{"id":"recheck","role":"general","competencies":["testing"],"objective":"Check work.txt",
                     "dependencies":[],"scope":["work.txt"],"model":"auto"}],
                     "verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]}
             }))).await.unwrap().stop_reason, "end_turn");
@@ -6626,7 +6868,7 @@ async fn reopened_synthesis_feedback() -> bool {
                     .stop_reason,
                 "end_turn"
             );
-            let mut plan = json!({"tasks":[{"id":"recheck","role":"qa-engineer","objective":"Check unchanged work.txt",
+            let mut plan = json!({"tasks":[{"id":"recheck","role":"general","competencies":["testing"],"objective":"Check unchanged work.txt",
                 "dependencies":[],"scope":["work.txt"],"model":"auto"}],
                 "verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]});
             if revision == 2 {
@@ -7049,7 +7291,7 @@ async fn verification_drift_blocks_the_pass() {
         )
         .await
         .unwrap();
-    let plan = json!({"tasks":[{"id":"work","role":"backend-dev","objective":"Change work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}],
+    let plan = json!({"tasks":[{"id":"work","role":"general","objective":"Change work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}],
         "verification":[[std::env::current_exe().unwrap().to_str().unwrap(),"sleep-ms","2000"]]});
     coordinator
         .prompt(&call(
@@ -7986,9 +8228,8 @@ async fn linked_checkout_command_journey() {
     p.store().write(|db| cortex_core::access::switch_tx(db, &task, "auto", "fixture-auto", "acp_set_mode")).unwrap();
     probe(&driver, "outside_command", json!({"argv":["/usr/bin/cat","docs/tmp/doc.txt"],"cwd":p.0,"request_key":"outside-read"}),
         json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/output":"host doc\n"})).await;
-    // Administrative host commands in Auto still require a fresh owner decision.
-    // Use a harmless fixture whose basename is `systemctl`; it only creates a
-    // marker, so this exercises the consent route without touching a service.
+    // Use a harmless administrative command fixture. It only writes a marker.
+    // Auto authorizes it directly. Guarded requests consent for each host command.
     let admin_dir = p.0.join("admin-fixture");
     std::fs::create_dir(&admin_dir).unwrap();
     let marker = admin_dir.join("ran");
@@ -8000,6 +8241,29 @@ async fn linked_checkout_command_journey() {
     let session = p.store().read(|db| Ok(db.query_row(
         "SELECT session_id FROM acp_host_sessions WHERE task_id=?", [&task], |r| r.get::<_, String>(0))?)).unwrap();
     let admin_store = p.store();
+    probe(&driver, "outside_command", json!({
+        "argv":[admin_program,"restart","fixture"],"cwd":p.0,"request_key":"admin-auto"
+    }), json!({"/result/structuredContent/exit_code":0})).await;
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ran");
+    std::fs::remove_file(&marker).unwrap();
+    let settled = admin_store.read(|db| {
+        let raw: String = db.query_row(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='NATIVE_OUTSIDE_SETTLED'
+             AND json_extract(payload_json,'$.request_key')='admin-auto'",
+            [&task], |r| r.get(0),
+        )?;
+        Ok(serde_json::from_str::<Value>(&raw)?)
+    }).unwrap();
+    assert_eq!(settled["request_key"], "admin-auto");
+    assert_eq!(settled["rule"], "administrative_command");
+    assert_eq!(settled["allowed"], true);
+    assert_eq!(settled["mode"], "auto");
+    assert_eq!(settled["decider"], "mode:auto");
+    let items = cortex_core::workspace::control::decisions(&admin_store, "p", "owner", &json!({
+        "operation":"decisions.list","target":execution,"limit":100,
+    })).unwrap();
+    assert!(items["items"].as_array().unwrap().is_empty(), "Auto raised a permission card");
+    admin_store.write(|db| cortex_core::access::switch_tx(db, &task, "guarded", "fixture-guarded", "acp_set_mode")).unwrap();
     async fn answer_admin(
         store: &Store, execution: &str, session: &str, request_id: &str, label: &str,
     ) {
@@ -8016,9 +8280,9 @@ async fn linked_checkout_command_journey() {
             }
         }).await.unwrap_or_else(|_| panic!("administrative permission card did not open: {:?}", control::decisions(store, "p", "owner", &json!({"operation":"decisions.list","target":execution,"limit":100}))));
         assert_eq!(item["permission"]["operation"], "run");
-        assert_eq!(item["permission"]["access"], "auto");
-        assert!(item["prompt"].as_str().unwrap().contains("administrative access"));
-        assert_eq!(item["permission"]["rule"], "administrative_command");
+        assert_eq!(item["permission"]["access"], "guarded");
+        assert!(!item["prompt"].as_str().unwrap().is_empty());
+        assert_eq!(item["permission"]["rule"], "outside_command");
         let option = item["options"].as_array().unwrap().iter()
             .find(|o| o["label"] == label).unwrap()["optionId"].clone();
         control::answer(store, "p", "owner", &json!({
@@ -8194,6 +8458,11 @@ fn main() {
     )
     .then(command_acceptance::Inputs::new);
     tokio::runtime::Runtime::new().unwrap().block_on(async {
+        if mode == "timing" {
+            tokio::time::timeout(Duration::from_secs(30), timing_records_native_launch_and_dispatched_planning_turn())
+                .await.expect("native timing scenario exceeded deadline");
+            return;
+        }
         if mode == "linked-checkout-command" {
             tokio::time::timeout(Duration::from_secs(90), linked_checkout_command_journey())
                 .await.expect("linked checkout journey exceeded deadline");
@@ -8201,8 +8470,17 @@ fn main() {
             return;
         }
         if mode == "owner-decision" || mode.is_empty() {
-            tokio::time::timeout(Duration::from_secs(60), coordinator_owner_decision_tools_bind_the_exact_failed_worker())
-                .await.expect("owner decision fixture exceeded deadline");
+            let started = std::time::Instant::now();
+            let result = tokio::time::timeout(
+                Duration::from_secs(60),
+                coordinator_owner_decision_tools_bind_the_exact_failed_worker(),
+            )
+            .await;
+            eprintln!(
+                "native session case elapsed: owner decision ({} ms)",
+                started.elapsed().as_millis()
+            );
+            result.expect("owner decision fixture exceeded deadline");
             println!("owner decision: authenticated coordinator retry, localized questions and exact owner answers passed");
             if !mode.is_empty() { return; }
         }
@@ -8220,6 +8498,13 @@ fn main() {
             .await
             .expect("prompt usage fixture exceeded deadline");
             println!("native prompt usage: dispatch, settle, failure and result teardown passed");
+            return;
+        }
+        if mode == "invalid-launch" {
+            tokio::time::timeout(Duration::from_secs(20), launch_refusal_before_spawn_is_a_confirmed_absence())
+                .await
+                .expect("invalid launch fixture exceeded deadline");
+            println!("invalid launch diagnostic and process settlement passed");
             return;
         }
         if mode == "verifier-command-acceptance" {
@@ -8288,6 +8573,33 @@ fn main() {
         }
         if mode == "verification-drift" {
             verification_drift_blocks_the_pass().await;
+            return;
+        }
+        if mode == "skill-receipts" {
+            tokio::time::timeout(Duration::from_secs(45), async {
+                project_skills_read_through_the_channel().await;
+                skill_delivery_receipts_bind_exact_responses_and_attempts().await;
+            })
+                .await.expect("skill receipt scenario exceeded deadline");
+            println!("skill delivery receipts passed");
+            return;
+        }
+        if mode == "review-journey" {
+            let case = std::env::args().nth(2).expect("review-journey case required");
+            let (restart, failing, fix, truncated) = match case.as_str() {
+                "ordinary" => (false, false, false, false),
+                "restart" => (true, false, false, false),
+                "failing" => (false, true, false, false),
+                "fix" => (false, false, true, false),
+                "truncated" => (false, false, false, true),
+                _ => panic!("unknown review-journey case: {case}"),
+            };
+            tokio::time::timeout(
+                Duration::from_secs(45),
+                native_plan_review_verification_journey(restart, failing, fix, truncated, None),
+            )
+            .await
+            .expect("review journey exceeded deadline");
             return;
         }
         if mode == "shared-checkout" {
@@ -8368,16 +8680,47 @@ fn main() {
             println!("project and command tool scenarios passed");
             return;
         }
+        if mode == "result-publication" {
+            tokio::time::timeout(Duration::from_secs(45),
+                inline_result_is_published_once_bound_to_attempt_and_reconciled_after_restart(),
+            ).await.expect("result publication scenario exceeded deadline");
+            println!("missing evidence refused and native publication retried without replay");
+            return;
+        }
         // This executable serially exercises all scenarios, including full
-        // before/after project observations for evidence-bearing commands.
+        // before/after project observations for evidence-bearing commands. Keep
+        // a separate bound for a stuck case and for the complete sequence.
+        struct CaseTimer {
+            name: &'static str,
+            started: std::time::Instant,
+        }
+        impl Drop for CaseTimer {
+            fn drop(&mut self) {
+                eprintln!(
+                    "native session case elapsed: {} ({} ms)",
+                    self.name,
+                    self.started.elapsed().as_millis()
+                );
+            }
+        }
         macro_rules! run_case {
-            ($case:expr) => {{
-                eprintln!("native session case: {}", stringify!($case));
-                $case.await;
+            ($case:expr) => {
+                run_case!($case, 60)
+            };
+            ($case:expr, $seconds:expr) => {{
+                let name = stringify!($case);
+                eprintln!("native session case: {name}");
+                let _timer = CaseTimer {
+                    name,
+                    started: std::time::Instant::now(),
+                };
+                tokio::time::timeout(Duration::from_secs($seconds), $case)
+                    .await
+                    .unwrap_or_else(|_| panic!("native session case exceeded {}s: {name}", $seconds));
             }};
         }
-        tokio::time::timeout(Duration::from_secs(90), async {
-            run_case!(channel_source_project_and_commands());
+        tokio::time::timeout(Duration::from_secs(180), async {
+            run_case!(channel_source_project_and_commands(), 90);
             run_case!(attachments_reach_the_engine_as_readable_blocks());
             run_case!(claude_permission_requests_follow_runtime_policy());
             run_case!(owner_cards_stay_pending_and_record_the_owner());
@@ -8385,14 +8728,15 @@ fn main() {
             run_case!(read_only_channels_start_restricted_in_every_access_mode());
             run_case!(reopened_synthesis_feedback());
             run_case!(access_modes_and_outside_routes());
-            run_case!(sudo_prompts_and_host_reroute());
+            run_case!(sudo_prompts_and_host_reroute(), 90);
             run_case!(route_effort_starts_codex_and_claude_coordinators());
             run_case!(document_tools_through_engine_and_relay());
-            run_case!(configured_external_worker_grants());
+            run_case!(configured_external_worker_grants(), 90);
             run_case!(optional_external_failures_withhold_only_that_server());
-            run_case!(uncontained_external_server_runs_with_owner_authority());
+            run_case!(uncontained_external_server_runs_with_owner_authority(), 120);
             run_case!(native_workspace_binding_projects_activity_and_scoped_skills());
             run_case!(project_skills_read_through_the_channel());
+            run_case!(skill_delivery_receipts_bind_exact_responses_and_attempts());
             run_case!(recovery_project_operations_and_structured_tool_errors());
             run_case!(legacy_task_admission_and_session_lifetime_fence());
             run_case!(coordinator_tools_not_chat_and_lease());
@@ -8408,6 +8752,7 @@ fn main() {
             run_case!(repeated_configure_transport_loss_stops_with_the_roles_blocker());
             run_case!(inline_result_is_published_once_bound_to_attempt_and_reconciled_after_restart());
             run_case!(result_failure_and_review_refusal_are_not_acceptance());
+            run_case!(timing_records_native_launch_and_dispatched_planning_turn());
             run_case!(prompt_usage_follows_real_native_dispatches());
             run_case!(native_plan_review_verification_journey(false, false, false, false, None));
             run_case!(native_plan_review_verification_journey(true, false, false, false, None));

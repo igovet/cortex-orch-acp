@@ -300,11 +300,13 @@ impl Api<'_> {
             // The plugin sends only resolved absolute roots; a relative or
             // empty one is refused rather than read against a working directory.
             Py::Str(root) if root.starts_with('/') => {
-                let root = PathBuf::from(root);
-                let routing = root
-                    .join(cortex_acp::startup::project_store_name())
-                    .join("routing.json");
-                Ok(Some((root, routing)))
+                let environment = self.route_environment().map_err(Stop::Refused)?;
+                settings_api::view_project(
+                    &environment,
+                    &Value::String(root.clone()),
+                    cortex_acp::startup::project_store_name(),
+                )
+                .map_err(|error| Stop::Refused(from_value(&error)))
             }
             Py::Str(_) => Err(refused(
                 "invalid_project",

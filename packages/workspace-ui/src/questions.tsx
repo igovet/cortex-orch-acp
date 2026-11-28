@@ -1,24 +1,27 @@
 import { createSignal, createUniqueId, onCleanup, Show, untrack, useContext, type Accessor, type JSX } from "solid-js";
-import type { AttachmentInput, CommandReceipt, WorkspaceCommand } from "@cortex/workspace-domain";
+import type { AttachmentInput, CommandReceipt, Decision, WorkspaceCommand } from "@cortex/workspace-domain";
 import { AttachChips, createAttachments, createDictation, MessageComposer } from "./composer";
 import { questionCopy, workspaceCopy } from "./copy";
 import { useWs } from "./ctx";
 import { createUnsent, ScreenActive } from "./freshness";
 import { I, Keyed } from "./kit";
 import { Action } from "./layout";
+import { createLocalInput, questionDraftScope } from "./local-drafts";
 import { createInlineResultText, InlineResultText, ResultText } from "./result-text";
 import { clock } from "./selectors";
 
 /** `optionsOnly`: its options act by themselves (the runtime's stop question, a skill proposal), so an option takes no added words. */
-export type Ask = { id: string; text: string; from: string; language?: "ru" | "en"; at: number | null; unavailable?: string; topic?: string; optionsOnly?: true; options: { label: string; sub?: string; optionId?: string; recommended?: true }[]; answer: { text: string } | null };
+export type Ask = { id: string; draftBinding?: Decision["draftBinding"]; text: string; from: string; language?: "ru" | "en"; at: number | null; unavailable?: string; topic?: string; optionsOnly?: true; options: { label: string; sub?: string; optionId?: string; recommended?: true }[]; answer: { text: string } | null };
 /** The owner's answer to one question, as the form will send it. */
 export type AskAnswer = { ask: Ask; text: string; optionId: string | null; attachments?: AttachmentInput[] };
 
-type Shared = { needs: WorkspaceCommand["type"]; blocked: (ask: Ask) => string | undefined; note: (ask: Ask) => JSX.Element; /** Whose files an answer may tag with `@`. An answer has no `/` commands or skills. */ projectId?: string };
+type Shared = { needs: WorkspaceCommand["type"]; blocked: (ask: Ask) => string | undefined; note: (ask: Ask) => JSX.Element; /** Whose files an answer may tag with `@`. An answer has no `/` commands or skills. */ projectId?: string; draftScope?: readonly (string | null)[] };
 /** What a question's field gives the form: its answer once one is chosen or written, and whether files are still being read. */
-type Field = { answer: () => AskAnswer | null; busy: () => boolean; clear: () => void };
+type Field = { answer: () => AskAnswer | null; busy: () => boolean; clearOnConfirm: () => () => void };
 
 const keyOf = (o: Ask["options"][number]) => o.optionId ?? o.label;
+const answerKey = (ask: Ask) => JSON.stringify([ask.id, ask.draftBinding?.executionId, ask.draftBinding?.ownerEpoch,
+  ask.draftBinding?.sessionId, ask.draftBinding?.requirementRevision]);
 
 /**
  * One question of the form: choosing an option only prepares its answer. The owner may choose an option, add their own
@@ -35,8 +38,15 @@ function Question(props: Shared & { ask: Accessor<Ask>; n: number; of: number; h
   // An answer the app already holds for this question (a batch answered before this form) is where the form starts.
   const start = untrack(ask).answer?.text ?? null, startOption = untrack(ask).options.find(o => start === o.label || !!start?.startsWith(`${o.label}\n\n`));
   const [chosen, setChosen] = createSignal<string | null>(startOption ? keyOf(startOption) : null);
-  const [text, setText] = createSignal(start === null ? "" : startOption ? start.slice(startOption.label.length).trim() : start);
-  const files = createAttachments(), mic = createDictation();
+  const scope = () => props.draftScope && questionDraftScope(props.draftScope, ask());
+  const local = createLocalInput(ws.localDrafts, scope);
+  const [ephemeral, setEphemeral] = createSignal(start === null ? "" : startOption ? start.slice(startOption.label.length).trim() : start);
+  const text = () => local.hasDraft() ? local.text() : ephemeral();
+  const setText = (value: string) => {
+    if (local.enabled()) { local.set(value); setEphemeral(""); }
+    else setEphemeral(value);
+  };
+  const files = createAttachments(scope), mic = createDictation();
   createUnsent(() => !!text().trim() || files.files().length > 0);
   const option = () => ask().options.find(o => keyOf(o) === chosen()) ?? null;
   const write = (value: string) => { setText(value); if (value.trim() && ask().optionsOnly) setChosen(null); };
@@ -46,8 +56,11 @@ function Question(props: Shared & { ask: Accessor<Ask>; n: number; of: number; h
     if (o) return { ask: ask(), text: words ? `${o.label}\n\n${words}` : o.label, optionId: o.optionId ?? null, attachments: files.files() };
     return words ? { ask: ask(), text: text(), optionId: null, attachments: files.files() } : null;
   };
-  const id = untrack(ask).id;
-  props.register(id, { answer, busy: files.busy, clear: () => { setChosen(null); setText(""); files.clear(); } });
+  const id = answerKey(untrack(ask));
+  props.register(id, { answer, busy: files.busy, clearOnConfirm: () => {
+    const draft = local.snapshot(), clearSubmitted = files.clearSubmitted();
+    return () => { draft?.confirm(); clearSubmitted(); };
+  } });
   onCleanup(() => props.register(id, null));
   // A question with options always keeps its answer line, so choosing one fills the line instead of adding it and the page
   // does not move under the pointer.
@@ -95,6 +108,8 @@ function Question(props: Shared & { ask: Accessor<Ask>; n: number; of: number; h
     <MessageComposer class="dc-answer" label={copy().answerLabel(many() ? props.n : undefined)} placeholder={option() && !ask().optionsOnly ? copy().add(!!props.projectId) : ask().options.length ? copy().own(!!props.projectId) : copy().write(!!props.projectId)} text={text()} onText={write} files={files} mic={mic}
       suggest={props.projectId ? { projectId: props.projectId } : undefined}
       effect={answerLine()} off={off()}
+      draft={{ shown: local.hasDraft(), warning: local.warning() ? workspaceCopy("textDraftStorageUnavailable", ask().language ?? "en") : undefined,
+        discard: () => setText(""), label: workspaceCopy("discardAnswerDraft", ask().language ?? "en") }}
       send={props.plane ? { label: copy().send, needs: props.needs, why: props.plane.why, go: props.plane.go } : undefined} />
   </div>;
 }
@@ -114,49 +129,54 @@ export function QuestionForm(props: Shared & { asks: Ask[]; waiting: (ask: Ask) 
   const [inFlight, setInFlight] = createSignal<Record<string, { text: string; files?: AttachmentInput[] }>>({});
   const [sending, setSending] = createSignal(false);
   const [failure, setFailure] = createSignal<string | null>(null);
-  const open = () => props.asks.filter(a => sent()[a.id] === undefined && inFlight()[a.id] === undefined);
+  const open = () => props.asks.filter(a => sent()[answerKey(a)] === undefined && inFlight()[answerKey(a)] === undefined);
   const many = () => props.asks.length > 1;
   const language = () => props.asks[0]?.language ?? "en";
   const copy = () => questionCopy(language());
   const heading = () => many() ? copy().count(props.asks.length) : copy().question;
-  const answers = () => open().map(a => fields()[a.id]?.answer() ?? null);
+  const answers = () => open().map(a => fields()[answerKey(a)]?.answer() ?? null);
   const ready = () => answers().filter(Boolean).length;
   const why = () => {
     const blocked = open().map(props.blocked).find(Boolean);
     if (blocked) return blocked;
     if (sending()) return copy().sending(many());
-    if (open().some(a => fields()[a.id]?.busy())) return copy().attachments;
+    if (open().some(a => fields()[answerKey(a)]?.busy())) return copy().attachments;
     if (ready() < open().length) return many() ? copy().incomplete(ready(), open().length) : copy().choose;
     return undefined;
   };
   const send = () => {
     if (why() || ws.gate(props.needs)) return;
     const list = answers() as AskAnswer[];
+    const confirmations = list.map(a => fields()[answerKey(a.ask)]?.clearOnConfirm());
     const work = props.onSend(list);
     if (!work) return;
-    const given = Object.fromEntries(list.map(a => [a.ask.id, { text: a.text, files: a.attachments }]));
+    const given = Object.fromEntries(list.map(a => [answerKey(a.ask), { text: a.text, files: a.attachments }]));
     setFailure(null); setSending(true); setInFlight(given);
     void work.then(r => {
-      if (r.ok) { setSent(prior => ({ ...prior, ...given })); for (const a of list) fields()[a.ask.id]?.clear(); }
+      if (r.ok) { for (const confirmed of confirmations) confirmed?.(); setSent(prior => ({ ...prior, ...given })); }
       else setFailure(r.message || copy().failure);
     }, () => setFailure(copy().failure)).finally(() => { setInFlight({}); setSending(false); });
   };
   const first = () => open()[0] ?? props.asks[0];
   const shown = useContext(ScreenActive);
-  // Number keys choose an option of a single question; with several questions a number would not say which one it answers.
+  let form!: HTMLDivElement;
+  // Number keys choose an option of a single visible question. Focus identifies a target when several forms are present.
   const onKey = (e: KeyboardEvent) => {
     const el = document.activeElement, typing = el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement;
     if (many() || !shown() || typing || e.ctrlKey || e.metaKey || e.altKey || document.querySelector("dialog[open]") || !/^[1-8]$/.test(e.key)) return;
-    document.querySelector<HTMLElement>(`[id="decision-${first().id}"] .opt:nth-child(${e.key})`)?.click();
+    if (!form || form.closest("[hidden]")) return;
+    const nearby = form.closest(".conversation-actions");
+    if (nearby && !form.contains(el) && nearby.querySelectorAll("[data-question-form]").length > 1) return;
+    form.querySelector<HTMLElement>(`[id="decision-${first().id}"] .opt:nth-child(${e.key})`)?.click();
   };
   document.addEventListener("keydown", onKey);
   onCleanup(() => document.removeEventListener("keydown", onKey));
-  return <div class={open().length === 0 && !sending() ? "dc dc-done" : "dc"} role={many() ? "group" : undefined} lang={language()} aria-label={many() ? heading() : undefined}>
+  return <div ref={form} data-question-form="" class={open().length === 0 && !sending() ? "dc dc-done" : "dc"} role={many() ? "group" : undefined} lang={language()} aria-label={many() ? heading() : undefined}>
     <div class="dc-h"><I n="question" s={14} />{heading()}<span class="r">{open().length ? props.waiting(first()) : ""}</span></div>
-    <Keyed each={props.asks} by={a => a.id}>{(a, i) => <>
-      <Show when={sent()[a().id] ?? inFlight()[a().id]}>{given => <Answered question={a().text} answer={given().text} files={given().files} at={null} />}</Show>
-      <Show when={sent()[a().id] === undefined}>
-        <Question ask={a} n={i() + 1} of={props.asks.length} hidden={inFlight()[a().id] !== undefined} needs={props.needs} blocked={props.blocked} note={props.note} projectId={props.projectId} register={register}
+    <Keyed each={props.asks} by={answerKey}>{(a, i) => <>
+      <Show when={sent()[answerKey(a())] ?? inFlight()[answerKey(a())]}>{given => <Answered question={a().text} answer={given().text} files={given().files} at={null} />}</Show>
+      <Show when={sent()[answerKey(a())] === undefined}>
+        <Question ask={a} n={i() + 1} of={props.asks.length} hidden={inFlight()[answerKey(a())] !== undefined} needs={props.needs} blocked={props.blocked} note={props.note} projectId={props.projectId} draftScope={props.draftScope} register={register}
           plane={many() ? undefined : { get why() { return why(); }, go: send }} />
       </Show>
     </>}</Keyed>

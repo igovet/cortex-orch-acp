@@ -43,11 +43,11 @@ function world(options: { sprint?: Partial<Sprint>; asking?: boolean; legacy?: b
   return s;
 }
 
-async function mount(path: string, state = world()) {
+async function mount(path: string, state = world(), draftNamespace?: readonly string[]) {
   const p = scriptedPort({ capabilities: { everything: true, operations: [] } });
   history.replaceState(null, "", path);
   const root = document.createElement("div"); document.body.append(root);
-  dispose = render(() => <Workspace port={p.port} />, root);
+  dispose = render(() => <Workspace port={p.port} draftNamespace={draftNamespace} />, root);
   await settle(); p.emit(projection("1", state)); await settle();
   return p;
 }
@@ -127,7 +127,9 @@ describe("a sprint planned by a runtime task", () => {
     const working = rows.findIndex(row => row.matches(".ws-working"));
     expect(working).toBeGreaterThan(-1);
     expect(rows.findIndex(row => row.textContent?.includes("Retained planning note"))).toBeLessThan(working);
-    expect(rows.findIndex(row => row.matches(".sp-plan-line"))).toBe(working - 1);
+    const actions = feed.querySelector(".conversation-actions")!;
+    expect(rows.indexOf(actions)).toBeGreaterThan(working);
+    expect(actions.querySelector(".sp-plan-line button")?.textContent).toBe("Open plan");
   });
 
   it("stops planning from the composer while the planner works", async () => {
@@ -303,7 +305,7 @@ describe("a sprint planned by a runtime task", () => {
     const savedNote = "A saved planning note.";
     const initial = world({ legacy: true, sprint: { planning: "planning", conversation: [{ kind: "note", text: savedNote }] } });
     const live = world({ asking: false, sprint: { planning: "planning", conversation: initial.sprints[0].conversation }, task: { planningSprintId: "sp" } });
-    const p = await mount(`/m/${M}/p/p/s/sp/planning`, initial);
+    const p = await mount(`/m/${M}/p/p/s/sp/planning`, initial, ["split-read-fixture"]);
     const panel = conversation()!, feed = panel.querySelector(".timeline");
     const field = panel.querySelector<HTMLTextAreaElement>(".dock textarea")!;
     expect(tabs()).toEqual(["Conversation", "Plan", "Board", "Summary"]);
@@ -350,6 +352,11 @@ describe("a sprint planned by a runtime task", () => {
     expect(feed?.textContent).toContain("I am studying the project");
     expect(tabs()).toEqual(["Conversation", "Workers", "Plan", "Board", "Summary"]);
     expect($(".sidebar")?.textContent).not.toContain("Sprint planning task");
+    const replacement = structuredClone(live);
+    replacement.tasks[0].executionId = "new-planner-attempt";
+    p.emit(projection("5", replacement)); await settle();
+    expect(field.value).toBe("");
+    expect(panel.querySelector(".dock .ws-att")).toBeNull();
     expect(p.commands).toEqual([]);
   });
 });

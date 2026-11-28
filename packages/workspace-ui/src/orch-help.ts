@@ -204,42 +204,8 @@ export const WORK_KIND_HELP: Record<string, HelpText> = {
   writing: "Documentation: project knowledge, feature docs, decision records.",
   planning: "Breaking a task into steps with dependencies, risks and checks.",
   analysis: "Bounded research or analysis when no specialist fits.",
-  consultation: "Senior consultant only: second opinions requested by the coordinator. Until a model lists it, the consultant uses the Design list.",
+  consultation: "Senior Consultant gives a second opinion when the coordinator requests one.",
 };
-
-/** What each worker role does (keys are the runtime's role ids). */
-export const ROLE_HELP: Record<string, HelpText> = {
-  "worker-accessibility-auditor": "audits WCAG conformance, keyboard navigation and screen-reader risks",
-  "worker-accessibility-fixer": "fixes accessibility: semantics, keyboard, focus, contrast",
-  "worker-architect": "designs component boundaries, data flow and API contracts",
-  "worker-backend-dev": "implements APIs, business logic, persistence and server tests",
-  "worker-build-verification": "runs builds and tests and proves their exact results",
-  "worker-code-reviewer": "reviews changes for bugs, regressions, security and missing tests; does the mandatory task review",
-  "worker-data-engineer": "builds ETL, data migrations and integrity checks",
-  "worker-database-architect": "designs schemas, indexes, migrations and query plans",
-  "worker-debugger": "reproduces failures, proves the root cause, fixes and verifies",
-  "worker-devops-engineer": "works on CI/CD, containers and deployment safety",
-  "worker-explorer": "maps execution paths, dependencies and relevant files without changing them; automatic model tier: light for low and normal, standard for high complexity",
-  "worker-frontend-dev": "implements UI components, state, styling and UI tests",
-  "worker-fullstack-dev": "makes coordinated backend and frontend changes",
-  "worker-general": "general agent for research, analysis or small implementation; automatic model tier: light for low, standard for normal, deep for high complexity",
-  "worker-mobile-dev": "implements iOS, Android, React Native or Flutter changes",
-  "worker-performance-engineer": "finds bottlenecks and makes safe optimizations",
-  "worker-planner": "breaks work into steps, dependencies, risks and checks; automatic model tier: light for low, standard for normal, deep for high complexity",
-  "worker-qa-engineer": "writes automated tests and reproduction scenarios",
-  "worker-refactorer": "restructures code without changing behavior",
-  "worker-security-auditor": "audits auth, secrets, cryptography, dependencies and data protection",
-  "worker-senior-consultant": "gives senior decisions on the coordinator's request from published reports",
-  "worker-technical-writer": "writes project and feature documentation; automatic model tier: light for low, standard for normal, deep for high complexity",
-  "worker-ux-designer": "designs layouts, interaction flows and responsive behavior",
-};
-
-/** Help under one "Preferred work" switch: what the kind is and which agents it covers. */
-export function workKindHelp(kind: string, roles: readonly string[]): HelpText {
-  const base = WORK_KIND_HELP[kind] ?? `Work of kind ${kind}.`;
-  const agents = roles.length === 0 ? "No worker role uses this kind directly." : `Agents:\n${roles.map((role) => `  • ${role}${ROLE_HELP[role] ? ` — ${ROLE_HELP[role]}` : ""}`).join("\n")}`;
-  return `${base}\n${agents}`;
-}
 
 /** The lead of the Profiles section: the first two sentences of its help. */
 export const profilesLead = () => HELP.profilesIntro.split(/(?<=\.)\s+/).slice(0, 2).join(" ");

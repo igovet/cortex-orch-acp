@@ -16,8 +16,10 @@ use super::{
     settings::{self, Lock},
     sprint_dag,
     sprint_live::{self, Snapshot},
+    sprint_materialize,
 };
 use cortex_core::{
+    channels::{self, Credential},
     lifecycle::sprint_impact::{self, Checked, Settlement},
     workspace as core_workspace, CoreError, CoreResult, OpenMode, Store,
 };
@@ -28,6 +30,18 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
 };
+
+#[cfg(test)]
+std::thread_local! { static CRASH_AFTER: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(test)]
+fn crash_checkpoint(point: u8) {
+    if CRASH_AFTER.with(|selected| selected.get()) == point {
+        // Terminate the process before Rust cleanup or SQLite rollback callbacks run.
+        unsafe { libc::raise(libc::SIGKILL) };
+        unreachable!("SIGKILL returned");
+    }
+}
 
 fn sha(value: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(value.as_ref()))
@@ -74,7 +88,7 @@ pub(super) fn owner_view(revisions: &[Value]) -> Value {
             "applied":r["applied"],"submittedAt":r["submittedAt"],"appliedAt":r["appliedAt"],
             "reason":r["reason"],"changes":r["changes"],"held":r["held"],"findings":r["findings"],
             "ownerReason":r["ownerReason"],"updated":r["updated"],"added":r["added"],
-            "previous":r["previous"],"actor":r["actor"],"code":r["code"]}))
+            "previous":r["previous"],"actor":r["actor"],"code":r["code"],"startedAffected":r["startedAffected"]}))
         .collect::<Vec<_>>())
 }
 
@@ -170,6 +184,12 @@ pub(crate) fn settle(store: &Store, state: &Path, runtime: &str, routes: Routes<
     let mut notes = Vec::new();
     for r in approved {
         let id = r["revisionId"].as_str().unwrap_or_default().to_owned();
+        let newer = store.read(|db| sprint_impact::pending(db, runtime))? != r["trigger"].as_i64();
+        if newer {
+            store.write(|db| sprint_impact::settle_tx(db, runtime, &id,
+                Settlement::Refused { code: "sprint_impact_trigger_stale" }))?;
+            continue;
+        }
         let outcome = (|| -> Result<Option<Value>> {
             let (_, project) = store
                 .read(|db| binding(db, runtime))
@@ -177,10 +197,11 @@ pub(crate) fn settle(store: &Store, state: &Path, runtime: &str, routes: Routes<
                 .ok_or_else(|| refuse("sprint_membership_required", "The task is not in a sprint."))?;
             let path = product_path(state, &project)?;
             let mut product = settings::read_json(&path, json!({"tasks":{}, "sprints":[]}))?;
+            super::sprint_materialize::resolve_publication(&project, &mut product)?;
             let sprint = r["sprintId"].as_str().unwrap_or_default();
             let index = sprint_live::sprint_index(&product, &project, sprint)?;
             let snapshot = sprint_live::load(store, &product, &project, index, true)?;
-            if snapshot.sprint["runMode"] != "automatic" {
+            if snapshot.sprint["runMode"] != "automatic" || r["startedAffected"].as_array().is_some_and(|a| !a.is_empty()) {
                 return Ok(None);
             }
             apply(store, state, &project, &mut product, index, &snapshot, runtime, &r, "runtime", routes).map(Some)
@@ -193,7 +214,12 @@ pub(crate) fn settle(store: &Store, state: &Path, runtime: &str, routes: Routes<
             )),
             Ok(None) => {
                 store.write(|db| {
-                    sprint_impact::settle_tx(db, runtime, &id, Settlement::AwaitingOwner { reason: "owner_decision" })
+                    let reason = if r["startedAffected"].as_array().is_some_and(|a| !a.is_empty()) {
+                        "started_downstream"
+                    } else {
+                        "owner_decision"
+                    };
+                    sprint_impact::settle_tx(db, runtime, &id, Settlement::AwaitingOwner { reason })
                 })?;
                 notes.push(format!(
                     "Sprint revision {id} was reviewed; the owner applies or rejects it. This task may finish."
@@ -216,7 +242,7 @@ pub(crate) type Routes<'a> = &'a dyn Fn(&str) -> Option<Value>;
 /// One change of a revision, resolved against the live graph.
 enum Change<'a> {
     Update { member: &'a str, version: &'a str, title: Option<&'a str>, description: Option<&'a str>, depends: Option<Vec<&'a str>> },
-    Add { id: String, title: &'a str, description: &'a str, complexity: &'a str },
+    Add { id: String, key: &'a str, title: &'a str, description: &'a str, complexity: &'a str, corrects: Option<&'a str> },
     Cancel { member: &'a str },
 }
 
@@ -238,6 +264,8 @@ fn invalid(code: &'static str, detail: impl Into<String>) -> Refused {
 struct Candidate<'a> {
     changes: Vec<Change<'a>>,
     links: HashMap<String, Vec<String>>,
+    started_affected: Vec<String>,
+    rebound_inputs: HashMap<String, Value>,
 }
 
 /// Validate `changes` against the live graph: only drafts with no execution
@@ -283,7 +311,17 @@ fn check<'a>(
             return Err(invalid("invalid_change", format!("op {} needs {field}", c["op"].as_str().unwrap_or("?"))));
         }
     }
+    let mut corrections = HashMap::new();
+    for c in changes.iter().filter(|c| c["op"] == "add") {
+        if let Some(original) = c["corrects"].as_str() {
+            let key = c["key"].as_str().unwrap_or_default();
+            if corrections.insert(original, &keys[key]).is_some() {
+                return Err(invalid("duplicate_change", format!("{original} has more than one correction")));
+            }
+        }
+    }
     let mut touched = HashSet::new();
+    let mut rebound_inputs = HashMap::new();
     let mut out = Vec::new();
     let mut links: HashMap<String, Vec<String>> = HashMap::new();
     for c in changes {
@@ -327,6 +365,25 @@ fn check<'a>(
                         }
                         replacement.push(resolve(id, d)?);
                     }
+                    if all[id]["corrects"].as_str().is_some_and(|original| !replacement.iter().any(|id| id == original)) {
+                        return Err(invalid("correction_dependency_required", format!(
+                            "{id} must retain the prerequisite it corrects")));
+                    }
+                    if let Some(inputs) = all[id]["consumes"].as_array() {
+                        let mut inputs = inputs.clone();
+                        for input in &mut inputs {
+                            let from = input["from"].as_str().ok_or_else(sprint_live::invalid_members)?;
+                            let from = corrections.get(from).map_or(from, |id| id.as_str());
+                            if !replacement.iter().any(|id| id == from) {
+                                return Err(invalid("artifact_dependency_required", format!(
+                                    "{id} must retain the prerequisite supplying its declared artifact, or depend on its correction")));
+                            }
+                            input["from"] = json!(from);
+                        }
+                        if all[id]["consumes"] != json!(inputs) {
+                            rebound_inputs.insert(id.to_owned(), json!(inputs));
+                        }
+                    }
                     links.insert(id.to_owned(), replacement);
                 }
                 out.push(Change::Update { member: id, version, title, description, depends });
@@ -347,9 +404,39 @@ fn check<'a>(
                     Value::String(x) if ["low", "normal", "high"].contains(&x.as_str()) => x.as_str(),
                     _ => return Err(invalid("invalid_change", format!("the new task {key} has an unknown complexity"))),
                 };
+                let corrects = c["corrects"].as_str();
+                if let Some(original) = corrects {
+                    let source = members.get(original)
+                        .ok_or_else(|| invalid("task_outside_sprint", format!("{original} is not in this sprint")))?;
+                    if source.draft || !sprint_live::predecessor_allowed(snapshot, source) {
+                        return Err(invalid("correction_source_unavailable", format!(
+                            "{original} must be a started or completed prerequisite with a confirmed execution")));
+                    }
+                    if !links[&keys[key]].iter().any(|id| id == original) {
+                        return Err(invalid("correction_dependency_required", format!(
+                            "Correction {key} must depend on {original}")));
+                    }
+                }
+                if let Some(original) = corrects {
+                    if let Some(inputs) = all[original]["consumes"].as_array() {
+                        let mut inputs = inputs.clone();
+                        for input in &mut inputs {
+                            let from = input["from"].as_str().ok_or_else(sprint_live::invalid_members)?;
+                            let from = corrections.get(from).map_or(from, |id| id.as_str());
+                            if !links[&keys[key]].iter().any(|id| id == from) {
+                                return Err(invalid("artifact_dependency_required", format!(
+                                    "Correction {key} must include the prerequisite supplying each of its inherited inputs")));
+                            }
+                            input["from"] = json!(from);
+                        }
+                        rebound_inputs.insert(keys[key].clone(), json!(inputs));
+                    }
+                }
                 out.push(Change::Add {
                     complexity,
+                    corrects,
                     id: keys[key].clone(),
+                    key,
                     title: c["title"].as_str().unwrap_or_default(),
                     description: c["description"].as_str().unwrap_or_default(),
                 });
@@ -395,7 +482,68 @@ fn check<'a>(
         nodes.push((id.as_str(), links[id].iter().map(String::as_str).collect()));
     }
     sprint_dag::ordered(&nodes).map_err(|e| sprint_live::dag_error(e, all))?;
-    Ok(Candidate { changes: out, links })
+    let mut started_affected = HashSet::new();
+    for change in &out {
+        let Change::Add { id, corrects: Some(original), .. } = change else { continue };
+        let mut frontier = vec![*original];
+        let mut seen = HashSet::from([*original]);
+        while let Some(predecessor) = frontier.pop() {
+            for dependent in &snapshot.members {
+                if !dependent.dependencies.as_ref().is_some_and(|deps| deps.iter().any(|d| d == predecessor)) {
+                    continue;
+                }
+                if seen.insert(dependent.id.as_str()) {
+                    frontier.push(&dependent.id);
+                }
+                if !dependent.draft {
+                    started_affected.insert(dependent.id.clone());
+                    if predecessor == *original && sprint_live::predecessor_allowed(snapshot, dependent)
+                        && !corrections.get(dependent.id.as_str()).is_some_and(|correction| links[*correction].contains(id))
+                    {
+                        return Err(invalid("correction_consumer_required", format!(
+                            "Add a follow-up for already-started {} and make it depend on this correction", dependent.id)));
+                    }
+                } else if predecessor == *original
+                    && !links.get(&dependent.id).is_some_and(|deps| deps.contains(id)) {
+                    return Err(invalid("correction_consumer_required", format!(
+                        "Add the correction as a prerequisite of downstream draft {}", dependent.id)));
+                }
+            }
+        }
+    }
+    let mut started_affected: Vec<_> = started_affected.into_iter().collect();
+    started_affected.sort();
+    Ok(Candidate { changes: out, links, started_affected, rebound_inputs })
+}
+
+/// The runtime-derived typed effects the reviewer must see before approval.
+fn review_projection(candidate: &Candidate<'_>, records: &Value) -> Result<Value> {
+    let contracts = |record: &Value, field: &str| record[field].as_array().cloned().unwrap_or_default();
+    let mut rows = Vec::new();
+    for change in &candidate.changes {
+        match change {
+            Change::Add { id, key, corrects: Some(original), .. } => {
+                let produces = contracts(&records[*original], "produces");
+                let consumes = candidate.rebound_inputs.get(id).and_then(Value::as_array).cloned().unwrap_or_default();
+                if !produces.is_empty() || !consumes.is_empty() {
+                    rows.push(json!({"op":"add","key":key,"member_id":id,"corrects":original,
+                        "dependsOn":candidate.links[id],"produces":produces,"consumes":consumes}));
+                }
+            }
+            Change::Update { member, .. } => {
+                if let Some(consumes) = candidate.rebound_inputs.get(*member) {
+                    rows.push(json!({"op":"update","member_id":member,"dependsOn":candidate.links[*member],
+                        "produces":contracts(&records[*member], "produces"),"consumes":consumes}));
+                }
+            }
+            _ => {}
+        }
+    }
+    let projection = json!(rows);
+    if projection.to_string().len() > PAGE_BYTES {
+        return Err(refuse("sprint_review_projection_too_large", "Submit fewer typed corrections in one revision so the review can see all resulting contracts."));
+    }
+    Ok(projection)
 }
 
 fn descriptions(store: &Store, project: &str, ids: &[&str]) -> Result<HashMap<String, String>> {
@@ -432,7 +580,33 @@ fn refused(error: Refused) -> Value {
 }
 
 /// `sprint_revision_submit` after its channel and schema checks.
-pub(crate) fn submit(store: &Store, state: &Path, runtime: &str, actor: &str, args: &Value) -> CoreResult<Value> {
+pub(crate) fn submit(
+    store: &Store,
+    state: &Path,
+    runtime: &str,
+    actor: &str,
+    args: &Value,
+    credential: Option<&Credential>,
+) -> CoreResult<Value> {
+    let authorize = |db: &Connection| -> CoreResult<()> {
+        if let Some(c) = credential {
+            let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
+            if i.task != runtime || i.role != "coordinator" || i.stage.is_some() {
+                return Err(CoreError::Refused("tool_refused"));
+            }
+            let current_epoch: i64 = db.query_row(
+                "SELECT e.owner_epoch FROM workspace_tasks w JOIN workspace_executions e
+                 ON e.execution_id=w.execution_id AND w.task_id=e.task_id
+                 JOIN workspace_projects p USING(project_id)
+                 WHERE e.runtime_task_id=? AND p.project_root=? AND p.activated_by=?",
+                (runtime, store.key().root().to_str(), crate::actor()), |r| r.get(0),
+            ).optional()?.ok_or(CoreError::Refused("sprint_membership_required"))?;
+            if current_epoch != i.epoch {
+                return Err(CoreError::Refused("stale_execution"));
+            }
+        }
+        Ok(())
+    };
     let key = args["request_key"].as_str().ok_or(CoreError::Refused("invalid_request_key"))?;
     let replay: bool = store.read(|db| {
         Ok(db
@@ -445,12 +619,15 @@ pub(crate) fn submit(store: &Store, state: &Path, runtime: &str, actor: &str, ar
             .is_some())
     })?;
     if replay {
-        let value = store.write(|db| sprint_impact::submit_tx(db, runtime, actor, key, args, None))?;
+        let value = store.write(|db| {
+            authorize(db)?;
+            sprint_impact::submit_tx(db, runtime, actor, key, args, None)
+        })?;
         return Ok(reply(value, false));
     }
     let _lock = Lock::new(state, "machine.lock").map_err(core)?;
     let m = membership(store, state, runtime)?.ok_or(CoreError::Refused("sprint_membership_required"))?;
-    let trigger = args["trigger"].as_i64().unwrap_or(0);
+    let trigger = args["trigger"].as_i64();
     if let Err(CoreError::Refused(code)) = store.write(|db| sprint_impact::check_submission(db, runtime, trigger)) {
         return Ok(refused(refuse(code, match code {
             "sprint_impact_not_expected" => "No sprint impact check is open for this task.".to_owned(),
@@ -460,10 +637,16 @@ pub(crate) fn submit(store: &Store, state: &Path, runtime: &str, actor: &str, ar
     }
     let changes = args["changes"].as_array().cloned().unwrap_or_default();
     if args["verdict"] == "unchanged" {
+        if trigger.is_none() {
+            return Ok(refused(refuse("sprint_impact_not_expected", "Verdict unchanged requires an open sprint impact check.")));
+        }
         if !changes.is_empty() {
             return Ok(refused(refuse("sprint_revision_changes_unexpected", "Verdict unchanged takes no changes.")));
         }
-        let value = store.write(|db| sprint_impact::submit_tx(db, runtime, actor, key, args, None))?;
+        let value = store.write(|db| {
+            authorize(db)?;
+            sprint_impact::submit_tx(db, runtime, actor, key, args, None)
+        })?;
         return Ok(reply(value, false));
     }
     if changes.is_empty() {
@@ -493,8 +676,10 @@ pub(crate) fn submit(store: &Store, state: &Path, runtime: &str, actor: &str, ar
         let context: Vec<Value> = affected
             .iter()
             .map(|id| json!({"member_id":id,"title":m.product["tasks"][id]["title"],
-                "dependsOn":m.product["tasks"][id]["dependencies"],"description":current.get(id)}))
+                "dependsOn":m.product["tasks"][id]["dependencies"],"description":current.get(id),
+                "consumes":m.product["tasks"][id]["consumes"],"produces":m.product["tasks"][id]["produces"]}))
             .collect();
+        let projection = review_projection(&candidate, &m.product["tasks"])?;
         Ok(Checked {
             revision_id,
             sprint_id: m.sprint.clone(),
@@ -503,11 +688,16 @@ pub(crate) fn submit(store: &Store, state: &Path, runtime: &str, actor: &str, ar
             affected,
             cancel,
             context: json!(context),
+            review_projection: projection,
+            started_affected: candidate.started_affected,
         })
     })();
     match outcome {
         Ok(checked) => {
-            let value = store.write(|db| sprint_impact::submit_tx(db, runtime, actor, key, args, Some(checked)))?;
+            let value = store.write(|db| {
+                authorize(db)?;
+                sprint_impact::submit_tx(db, runtime, actor, key, args, Some(checked))
+            })?;
             Ok(reply(value, false))
         }
         Err(error) => Ok(refused(error)),
@@ -540,6 +730,19 @@ fn apply(
     let id = revision["revisionId"].as_str().unwrap_or_default().to_owned();
     let changes = revision["changes"].as_array().cloned().unwrap_or_default();
     let candidate = check(snapshot, &product["tasks"], project, &sprint_id, &id, &changes)?;
+    if json!(candidate.started_affected) != json!(revision["startedAffected"].as_array().cloned().unwrap_or_default()) {
+        return Err(refuse("stale_graph_revision", "The downstream executions changed. Submit a new revision."));
+    }
+    let projection = review_projection(&candidate, &product["tasks"])?;
+    if revision["reviewProjection"].is_null() {
+        if projection.as_array().is_some_and(|rows| !rows.is_empty()) {
+            return Err(refuse("sprint_review_projection_required",
+                "The previous review could not see the derived artifact contracts. Submit a new revision for independent review."));
+        }
+    } else if revision["reviewProjection"] != projection {
+        return Err(refuse("sprint_review_projection_changed",
+            "The derived artifact contracts changed after review. Submit a new revision for independent review."));
+    }
     let updated: Vec<&str> = candidate
         .changes
         .iter()
@@ -553,7 +756,8 @@ fn apply(
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .map(|t| json!([t, product["tasks"][t]["dependencies"], product["tasks"][t]["title"], texts.get(t)]))
+            .map(|t| json!([t, product["tasks"][t]["dependencies"], product["tasks"][t]["title"],
+                product["tasks"][t]["consumes"], product["tasks"][t]["produces"], product["tasks"][t]["corrects"], texts.get(t)]))
             .collect();
         sha(json!([roster, links]).to_string())
     };
@@ -561,7 +765,8 @@ fn apply(
     let previous: Vec<Value> = updated
         .iter()
         .map(|t| json!({"memberId":t,"title":product["tasks"][t]["title"],"dependencies":product["tasks"][t]["dependencies"],
-            "description":before_text.get(*t),"version":snapshot.tasks.get(*t).and_then(|v| version_text(&v["version"]))}))
+            "description":before_text.get(*t),
+            "consumes":product["tasks"][*t]["consumes"],"version":snapshot.tasks.get(*t).and_then(|v| version_text(&v["version"]))}))
         .collect();
     let mut after_text = before_text.clone();
     let route = super::sprint_materialize::owner_sprint_route(&sprint);
@@ -570,7 +775,7 @@ fn apply(
     let mut options: HashMap<String, Value> = HashMap::new();
     let mut assigned: HashMap<String, (Value, &str)> = HashMap::new();
     for c in &candidate.changes {
-        let Change::Add { id, complexity, .. } = c else { continue };
+        let Change::Add { id, complexity, corrects, .. } = c else { continue };
         let mut o = json!({"checkout":{"kind":sprint.get("checkout").filter(|c| !c.is_null()).map(|c| c["kind"].clone()).unwrap_or_else(|| json!("main"))}});
         if sprint["checkout"]["kind"] == "worktree" && sprint["checkout"]["shared"] == true {
             o["sprintWorktree"] = json!({"sprintId":sprint["id"],
@@ -590,6 +795,13 @@ fn apply(
             o["settings"] = merged;
             assigned.insert(id.clone(), (a, complexity));
         }
+        if let Some(original) = corrects {
+            let outputs = product["tasks"][*original]["produces"].as_array().cloned().unwrap_or_default();
+            let inputs = candidate.rebound_inputs.get(id).and_then(Value::as_array).cloned().unwrap_or_default();
+            if !outputs.is_empty() || !inputs.is_empty() {
+                o["sprintDeliverables"] = json!({"sprintId":sprint_id,"produces":outputs,"consumes":inputs});
+            }
+        }
         options.insert(id.clone(), o);
     }
     let mut added = Vec::new();
@@ -604,15 +816,28 @@ fn apply(
                 if depends.is_some() {
                     record["dependencies"] = json!(candidate.links[*member]);
                 }
+                if let Some(inputs) = candidate.rebound_inputs.get(*member) {
+                    record["consumes"] = inputs.clone();
+                }
                 if let Some(d) = description {
                     after_text.insert((*member).to_owned(), (*d).to_owned());
                 }
             }
-            Change::Add { id, title, description, .. } => {
+            Change::Add { id, title, description, corrects, .. } => {
                 product["tasks"][id.as_str()] = json!({"sprintId":sprint_id,"dependencies":candidate.links[id],
                     "planning":false,"title":title.trim(),"titleState":"generated",
                     "targetBranch":sprint["targetBranch"],"targetInherited":true,
                     "revisionId":revision["revisionId"]});
+                if let Some(original) = corrects {
+                    let outputs = product["tasks"][*original]["produces"].clone();
+                    product["tasks"][id.as_str()]["corrects"] = json!(original);
+                    if outputs.is_array() {
+                        product["tasks"][id.as_str()]["produces"] = outputs;
+                    }
+                    if let Some(inputs) = candidate.rebound_inputs.get(id) {
+                        product["tasks"][id.as_str()]["consumes"] = inputs.clone();
+                    }
+                }
                 if let Some((a, complexity)) = assigned.get(id) {
                     product["tasks"][id.as_str()]["sprintRoute"] = json!({"routeId":a["routeId"],"engine":a["engine"],
                         "model":a["model"],"tier":a["tier"],"effort":a["effort"],
@@ -641,29 +866,61 @@ fn apply(
     let wrote = std::cell::Cell::new(false);
     let payload = json!({"before_digest":before_digest,"after_digest":after_digest,"updated":updated,
         "added":added,"previous":previous});
+    let previous_tasks = Value::Object(updated.iter()
+        .map(|member| ((*member).to_owned(), prior["tasks"][*member].clone())).collect());
+    let draft_versions = Value::Object(updated.iter()
+        .map(|member| {
+            let version = version_text(&snapshot.tasks[*member]["version"])
+                .and_then(|version| version.parse::<i64>().ok());
+            ((*member).to_owned(), json!(version))
+        }).collect());
+    let token = format!("sprint-revision-{id}");
+    let fingerprint = sprint_materialize::stage_revision(product, &store_root, &sprint_id, &token,
+        &prior["sprints"][index]["taskIds"], &added, previous_tasks, draft_versions);
     let result = store.write(|db| {
         for c in &candidate.changes {
             if let Change::Update { member, version, title, description, .. } = c {
                 core_workspace::edits::revise_draft_tx(db, project, member, version, *description,
                     title.filter(|_| prior["tasks"][*member]["titleState"] != "user"))?;
+                if let Some(inputs) = candidate.rebound_inputs.get(*member) {
+                    let count = db.execute(
+                        "UPDATE workspace_task_options SET options_json=json_set(options_json,'$.sprintDeliverables.consumes',json(?))
+                         WHERE task_id=? AND json_extract(options_json,'$.sprintDeliverables.sprintId')=?
+                           AND json_extract(options_json,'$.sprintDeliverables.consumes')=json(?)",
+                        (inputs.to_string(), member, &sprint_id, prior["tasks"][*member]["consumes"].to_string()),
+                    )?;
+                    if count != 1 {
+                        return Err(CoreError::Refused("artifact_contract_changed"));
+                    }
+                }
             }
         }
-        if !drafts.is_empty() {
-            core_workspace::create_drafts_tx(db, &store_root, project, &machine_actor, &drafts)?;
+        if !drafts.is_empty()
+            && core_workspace::create_drafts_tx(db, &store_root, project, &machine_actor, &drafts)? != drafts.len()
+        {
+            return Err(CoreError::Refused("payload_conflict"));
         }
         sprint_impact::settle_tx(db, runtime, &id, Settlement::Applied { actor, payload: payload.clone() })?;
+        sprint_materialize::record_revision_receipt(db, project, &machine_actor, &token, &fingerprint)?;
         wrote.set(true);
         settings::write_json(&path, product).map_err(|e| CoreError::Refused(e.code))?;
+        #[cfg(test)]
+        crash_checkpoint(1);
         Ok(())
     });
     match result {
-        Ok(()) => Ok(payload),
+        Ok(()) => {
+            #[cfg(test)]
+            crash_checkpoint(2);
+            sprint_materialize::finish_revision(store, &path, project, product, true)?;
+            Ok(payload)
+        }
         Err(error) => {
-            if wrote.get() && settings::write_json(&path, &prior).is_err() {
-                return Err(refuse("machine_outcome_unknown",
-                    "Applying the sprint revision failed and the sprint could not be restored. Refresh before trying again."));
+            if wrote.get() {
+                sprint_materialize::finish_revision(store, &path, project, product, false)?;
+            } else {
+                *product = prior;
             }
-            *product = prior;
             Err(context::core(error))
         }
     }
@@ -747,6 +1004,7 @@ pub(crate) fn pending_descriptions(store: &Store, state: &Path, runtime: &str, a
         let row = json!({"member_id":x.id,"title":m.product["tasks"][&x.id]["title"],
             "version":snapshot.tasks.get(&x.id).and_then(|v| version_text(&v["version"])),
             "dependsOn":x.dependencies,"held":snapshot.records[&x.id]["revisionPending"] == true,
+            "produces":m.product["tasks"][&x.id]["produces"],"consumes":m.product["tasks"][&x.id]["consumes"],
             "description":texts.get(&x.id)});
         bytes += row.to_string().len();
         if !rows.is_empty() && bytes > PAGE_BYTES {

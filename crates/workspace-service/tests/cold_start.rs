@@ -1,6 +1,7 @@
 //! Cold-start/socket regressions with disposable roots and no interpreter on the child PATH.
 #[path = "support/hermetic.rs"]
 mod hermetic;
+use cortex_core::{store::StoreRoot, ProjectKey, StoreChannel};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -73,6 +74,17 @@ impl Fixture {
         fs::write(path, content).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
+    fn store_key(&self, project: &Path) -> ProjectKey {
+        let state_home = self.root.join("state");
+        let channel = workspace_protocol::channel::current();
+        let (channel, state) = if channel.is_dev() {
+            (StoreChannel::Dev, channel.state_dir(&state_home).join("state"))
+        } else {
+            (StoreChannel::Release, state_home)
+        };
+        StoreRoot::new(&state, channel).unwrap().project_key(project).unwrap()
+    }
+
     fn socket(&self) -> PathBuf {
         workspace_protocol::channel::current()
             .runtime_dir(&self.root.join("runtime"))
@@ -270,13 +282,8 @@ impl Fixture {
         assert!(created["target"].is_string(), "{created}");
         if !self.root.join("history-seeded").exists() {
             let root = self.root.join("projects/one");
-            let channel = if workspace_protocol::channel::current().is_dev() {
-                cortex_core::StoreChannel::Dev
-            } else {
-                cortex_core::StoreChannel::Release
-            };
             let store = cortex_core::Store::open(
-                cortex_core::ProjectKey::new(&root, channel).unwrap(),
+                self.store_key(&root),
                 cortex_core::OpenMode::RuntimeValidate,
             )
             .unwrap();
@@ -391,6 +398,80 @@ async fn native_cold_start_without_helper_assets_keeps_all_projects() {
     f.stop().await;
 }
 
+#[tokio::test]
+async fn activation_reports_actual_relocation_and_preserves_the_project_marker() {
+    assert_observed_relocation(false).await;
+}
+
+#[tokio::test]
+async fn edit_bootstrap_reports_actual_relocation() {
+    assert_observed_relocation(true).await;
+}
+
+async fn assert_observed_relocation(edit: bool) {
+    use cortex_core::{OpenMode, Store};
+
+    let mut fixture = Fixture::new();
+    fixture.start().await;
+    let id = fixture.register("one").await;
+    let project = fixture.root.join("projects/one");
+    let key = fixture.store_key(&project);
+    let channel = key.channel();
+    let original = ProjectKey::new(&project, channel).unwrap();
+    let marker = original.anchor_directory().join("owner.json");
+    let marker_before = if channel == StoreChannel::Dev { Some(fs::read(&marker).unwrap()) } else { None };
+    let local = Store::open(original, OpenMode::Initialize).unwrap();
+    local.write(|db| {
+        db.execute(
+            "INSERT INTO tasks (id, project_root, created_at) VALUES (?, ?, ?)",
+            ("t_fixture", project.to_str().unwrap(), cortex_core::now()),
+        )?;
+        if edit {
+            db.execute_batch(
+                "DROP TABLE code_owner_file_leases;
+                 DROP TABLE code_writer_reservations;
+                 DROP TABLE code_editor_epoch;",
+            )?;
+        }
+        Ok(())
+    }).unwrap();
+    drop(local);
+
+    let mut events = connect(&fixture.socket()).await.unwrap();
+    write_frame(&mut events, &json!({"jsonrpc":"2.0","id":1,"method":"service.subscribe","params":{}})).await.unwrap();
+    assert_eq!(read_frame(&mut events).await.unwrap()["result"]["subscribed"], true);
+    if edit {
+        let lease = fixture.machine("repo.file.lease.acquire", Some(&id), json!({"file":"readme.txt"})).await;
+        assert!(lease["leaseToken"].is_string());
+    } else {
+        fixture.rpc("projects.activate", json!({"projectId":id})).await;
+    }
+    let seen = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut flags = Vec::new();
+        while flags.len() != 2 {
+            let frame = read_frame(&mut events).await.unwrap();
+            let event = &frame["params"];
+            if event["type"] == "project_state" && event["projectId"] == id {
+                if let Some(active) = event["movingHistory"].as_bool() {
+                    flags.push(active);
+                }
+            }
+        }
+        flags
+    }).await.unwrap();
+    assert_eq!(seen, [true, false]);
+    let status = fixture.rpc("projects.status", json!({"projectId":id})).await;
+    assert_eq!(status["ready"], !edit);
+    assert!(status.get("movingHistory").is_none());
+    if let Some(bytes) = marker_before { assert_eq!(fs::read(marker).unwrap(), bytes); }
+    let store = Store::open(key.clone(), OpenMode::LiveReadOnly).unwrap();
+    assert_eq!(Some(store.key().directory()), key.home_directory());
+    let history: String = store.read(|db| Ok(db.query_row("SELECT id FROM tasks", [], |row| row.get(0))?)).unwrap();
+    assert_eq!(history, "t_fixture");
+    drop(store);
+    fixture.stop().await;
+}
+
 impl Fixture {
     /// Registers and activates project `one` and waits until its runtime is ready.
     async fn ready_project(&self) -> String {
@@ -452,12 +533,7 @@ impl Fixture {
 #[tokio::test]
 async fn native_edit_lease_acquires_while_store_is_being_read() {
     let mut f = Fixture::new();
-    let channel = if workspace_protocol::channel::current().is_dev() {
-        cortex_core::StoreChannel::Dev
-    } else {
-        cortex_core::StoreChannel::Release
-    };
-    let key = cortex_core::ProjectKey::new(&f.root.join("projects/one"), channel).unwrap();
+    let key = f.store_key(&f.root.join("projects/one"));
     f.start().await;
     let id = f.ready_project().await;
     let created = f.rpc("workspace", json!({
@@ -528,13 +604,8 @@ async fn conversation_of_a_run_working_when_the_service_stopped_stays_readable_a
     // While the service is down, the store holds a run that was executing, with a long conversation:
     // a reply in streamed chunks, tool calls in several updates each, and an owner message.
     let root = f.root.join("projects/one");
-    let channel = if workspace_protocol::channel::current().is_dev() {
-        cortex_core::StoreChannel::Dev
-    } else {
-        cortex_core::StoreChannel::Release
-    };
     let store = cortex_core::Store::open(
-        cortex_core::ProjectKey::new(&root, channel).unwrap(),
+        f.store_key(&root),
         cortex_core::OpenMode::RuntimeValidate,
     )
     .unwrap();

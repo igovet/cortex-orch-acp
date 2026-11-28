@@ -23,6 +23,11 @@ use tokio::{
 /// Policy belongs to Core, not engine-native options or model JSON.
 pub trait PermissionPolicy: Send + Sync + 'static {
     fn authority(&self) -> FutureResult<'_, ()>;
+    /// The transport may wait for this exact pending prompt's terminal reply.
+    /// This is distinct from permission or authority to start another call.
+    fn completed_prompt(&self, _session: &str) -> FutureResult<'_, bool> {
+        Box::pin(async { Ok(false) })
+    }
     fn decide<'a>(
         &'a self,
         session: &'a str,
@@ -31,6 +36,7 @@ pub trait PermissionPolicy: Send + Sync + 'static {
         request: &'a Value,
     ) -> FutureResult<'a, PermissionDecision>;
 }
+pub const TERMINAL_PROMPT_GRACE: Duration = Duration::from_secs(10);
 pub enum PermissionDecision {
     Cancelled,
     Selected(String),
@@ -497,7 +503,10 @@ impl Engine {
         if instructions.is_some_and(|path| {
             spec.engine != crate::environment::EngineKind::Codex || !path.is_absolute()
         }) {
-            return Err(Error::Invalid);
+            return Err(crate::environment::invalid(
+                "model_instructions_file",
+                "requires_codex_and_absolute_path",
+            ));
         }
         // The view is prepared after the launch environment, so it can show the
         // Codex launcher just prepared and the session's instructions file. A view
@@ -525,7 +534,9 @@ impl Engine {
                 .map_or_else(|| path.to_path_buf(), |c| c.view_path(path));
             let mut config: Value =
                 serde_json::from_str(&crate::environment::codex_thread_config())
-                    .map_err(|_| Error::Invalid)?;
+                    .map_err(|_| {
+                        crate::environment::invalid("codex_config", "invalid_runtime_config")
+                    })?;
             config["model_instructions_file"] = json!(path);
             env.insert(crate::environment::CODEX_CONFIG.into(), config.to_string());
         }
@@ -633,9 +644,25 @@ impl Engine {
         let monitor_inner = inner.clone();
         let monitor_policy = policy.clone();
         let monitor = tokio::spawn(async move {
+            let mut draining = None;
             while !monitor_inner.closed.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                if monitor_policy.authority().await.is_err() {
+                if draining.is_some() || monitor_policy.authority().await.is_err() {
+                    let pending = monitor_inner.pending.lock().unwrap().iter().find_map(|(id, call)| {
+                        call.prompt.as_ref().map(|prompt| (*id, prompt.session.clone()))
+                    });
+                    if let Some((id, session)) = pending {
+                        let (initial_id, started) = *draining
+                            .get_or_insert_with(|| (id, tokio::time::Instant::now()));
+                        if id == initial_id && started.elapsed() < TERMINAL_PROMPT_GRACE
+                            && matches!(tokio::time::timeout_at(
+                                started + TERMINAL_PROMPT_GRACE,
+                                monitor_policy.completed_prompt(&session),
+                            ).await, Ok(Ok(true)))
+                        {
+                            continue;
+                        }
+                    }
                     monitor_inner.diagnostics.closed("authority_refused");
                     close(&monitor_inner);
                     let _ = monitor_inner.shutdown.send(true);

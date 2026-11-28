@@ -244,12 +244,13 @@ language such as "do not modify ..." creates no denial. A denial is stored in it
 normalized path form, and a write is matched after the same normalization, so a `./`
 spelling cannot bypass it.
 
-### Senior consultation is escalation-only
+### Senior consultation addresses unresolved decisions
 
-A senior consultant is reached only through `escalation_request`. A plan that names the
-consultant is refused with `consultant_requires_escalation`. The runtime builds the
-consultant's packet, from the reports the escalation names and then the reports of the
-escalated revision, with each report's SHA-256 and recorded artifact versions. The
+The runtime schedules senior consultation for an explicit escalation or at
+its dedicated recovery step. Planning depth does not schedule consultation. A plan that names the
+consultant is refused with `consultant_requires_escalation`. The consultation
+packet includes the latest verified advice, reports named in the escalation
+and reports from the revision being replaced, with their artifact identities. The
 consultant has no `access_request`, `ask_question`, `replan_request`, `scope_request`
 or `escalation_request` route: these are withheld and refused by dispatch. It cannot
 consume the replan budget or request a recursive consultation. It records a missing
@@ -321,7 +322,7 @@ Reject making Auto the default (it confuses capability with blanket approval),
 removing every engine jail (unnecessarily broadens native/role authority), or
 depending on uninstalled proxy/VM/host APIs. Keep old sessions/tasks without
 initialization Guarded, preserve explicit choices and fail closed on unknown or
-unreadable state. New initialization is additive project-local SQLite metadata;
+unreadable state. The original project-local layout has been superseded by [one private home SQLite store per project and channel](storage.md#where-the-database-lives-and-how-it-moves). New initialization remains additive;
 owner settings are never silently replaced. See [permissions](../features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
 
 ## 2026-10-09 observability decision gates and the edit-tool decision
@@ -734,7 +735,7 @@ model run. Default verification is now no-paid: targeted pytest, the Paseo
 plugin type-check and `test:*` scripts, and the no-paid smoke harness. A paid
 live check runs only when the owner explicitly requests it for the current work
 and names the mode: `cli` (headless through the guarded Paseo CLI, checked
-against the disposable project's `.cortex` store) or `desktop` (the Electron
+against the disposable project's channel store) or `desktop` (the Electron
 app, for rendered behavior). Without a request, an applicable live check is
 reported as not run with the blocker "paid live check not requested by the
 owner", never as passing. The isolated dev Paseo, production-account and model
@@ -866,6 +867,8 @@ unchanged. Requested via a delivered user steer.
 - Build-verification profile: keep it (all 23 profiles are required);
   document it as runtime-reserved — not plannable, not dispatched — since the
   runtime itself executes command verification. Approved by the user.
+  The later adoption of five [adaptive profiles](adaptive-profiles.md)
+  supersedes the profile count and retains the reserved verifier.
 - Retention: ship a user-run maintenance CLI, `python3 src/cortex_clear.py
   --project-root <path> --days N [--keep-thread <id>]`; the coordinator only
   explains it. Codex-era `CODEX_*` env protection is removed. Approved by the user.

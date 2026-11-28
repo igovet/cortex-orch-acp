@@ -1,4 +1,5 @@
 import { render } from "solid-js/web";
+import { LanguageDescription } from "@codemirror/language";
 import { undo } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -118,7 +119,10 @@ describe("editing a checkout file", () => {
     expect(status()).toBe("Unsaved");
     expect(tab()).toBe("a.txt, unsaved");
     expect(button("Save a.txt")!.getAttribute("aria-disabled")).toBeNull();
+    const gitReads = () => d.calls.filter(c => (c.message as { op?: string })?.op === "repo.snapshot").length;
+    const beforeSave = gitReads();
     await click("Save a.txt");
+    expect(gitReads()).toBeGreaterThan(beforeSave);
     expect(d.state.saves).toEqual([{ file: "a.txt", text: "one\ntwo\nthree\n", revision: rev(1) }]);
     expect(d.state.files["a.txt"]).toBe("one\ntwo\nthree\n");
     expect(status()).toBe("Saved");
@@ -379,6 +383,27 @@ describe("while Cortex works in the checkout", () => {
     expect(button("Save a.txt")).toBeUndefined();
     expect(d.calls.some(c => /repo\.(lsp|file\.lease)\./.test(String((c.message as { op?: string })?.op)))).toBe(false);
   });
+});
+
+it("opens the protected file while its syntax grammar is still loading", async () => {
+  const original = LanguageDescription.prototype.load;
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const loading = vi.spyOn(LanguageDescription.prototype, "load").mockImplementationOnce(async function (this: LanguageDescription) {
+    await pending;
+    return original.call(this);
+  });
+  try {
+    await open(disk({ "sample.rs": "fn main() {}\n" }), CODE("sample.rs"));
+    expect(loading).toHaveBeenCalledOnce();
+    expect(view().state.readOnly).toBe(true);
+    expect(doc()).toBe("fn main() {}\n");
+    type("unleased edit");
+    expect(doc()).toBe("fn main() {}\n");
+  } finally {
+    release();
+    loading.mockRestore();
+  }
 });
 
 it("shows local diagnostics with marks and a list and opens a definition via F12", async () => {

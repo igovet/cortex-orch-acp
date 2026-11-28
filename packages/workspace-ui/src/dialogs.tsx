@@ -83,7 +83,7 @@ function Accept(props: { d: Of<"accept">; onClose: () => void }) {
     const consent = automaticFinish();
     setSending(true);
     try {
-      const result = await ws.run({ type: "accept_result", taskId: props.d.taskId, digest: r().digest, openChecks: true,
+      const result = await ws.run({ type: "accept_result", taskId: props.d.taskId, digest: r().digest, sourceVersion: r().sourceVersion, openChecks: true,
         ...(consent ? { sourceVersion: consent.sourceVersion, automaticFinish: { sprintId: consent.sprintId, targetBranch: consent.targetBranch } } : {}), now: ws.store.clock() });
       if (result.ok && ws.dialog() === props.d) props.onClose();
     } finally { setSending(false); }
@@ -242,7 +242,7 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
       let digest = t().acceptance?.digest;
       if (!digest) {
         const r = t().result!;
-        const accepted = await ws.run({ type: "accept_result", taskId: t().id, digest: r.digest, ...(overrides() ? { openChecks: true } : {}), now: ws.store.clock() });
+        const accepted = await ws.run({ type: "accept_result", taskId: t().id, digest: r.digest, sourceVersion: r.sourceVersion, ...(overrides() ? { openChecks: true } : {}), now: ws.store.clock() });
         if (!accepted.ok) return;
         digest = r.digest;
       }

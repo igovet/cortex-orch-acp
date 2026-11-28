@@ -1,6 +1,7 @@
 import { CODE_LANGUAGE, type LocalCodePort } from "./code-support";
 import { batch, createMemo, createSignal, onCleanup } from "solid-js";
-import { applyFacts, applyMachineFacts, applyProjection, applySprintDeletion, capabilityOf, compareVersions, emptyWorkspace, FEATURES, hasCapability, noCapabilities, projectionKey } from "@cortex/workspace-domain";
+import { applyConversation, applyFacts, applyMachineFacts, applyProjection, applySprintDeletion, capabilityOf, compareVersions, emptyWorkspace, FEATURES, hasCapability, noCapabilities, projectionKey } from "@cortex/workspace-domain";
+import type { ConversationUpdate } from "@cortex/workspace-domain";
 import type { Attachment, AttachmentInput, AttachmentRef, CommandEnvelope, CommandReceipt, FileRead, GitInterest, FolderListing, FolderListRequest, IntegrationText, IntegrationTextRequest, LiveSprintGraph, MachineFacts, RemoteOperation, RemoteRequests, RemoteStatus, PortCapabilities, PortConnection, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectSkills, SprintGraphEdit, SprintGraphWrite, SprintOrder, WorkspaceCommand, WorkspacePort, WorkspaceState } from "@cortex/workspace-domain";
 import type { OwnerActionVerb } from "@cortex/workspace-domain";
 import { downloadAttachment } from "./attachments";
@@ -76,10 +77,11 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
   let registered: Set<string> | undefined;
   let latest: string | null = options.initial?.version ?? null;
   if (options.initial) versions.set("workspace", options.initial.version);
-  const [projected, setHeld] = createSignal(options.initial?.state ?? emptyWorkspace());
+  const [projected, setHeld] = createSignal(options.initial?.state ?? emptyWorkspace("Machine"));
   // Only what really changed reaches the screens: an unchanged read leaves every record the same object.
   const deletions = new Map<string, Set<string>>();
   const projectIssues = new Map<string, string | null>(), projectCauses = new Map<string, string | null>();
+  const [movingHistory, setMovingHistory] = createSignal<ReadonlySet<string>>(new Set());
   const setProjected = (change: (current: WorkspaceState) => WorkspaceState) => setHeld(current => {
     let next = change(current);
     // An older in-flight read cannot resurrect an acknowledged deletion.
@@ -157,6 +159,9 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
   const revisionHolds = createMemo<ReadonlySet<string>>(() => new Set([...graphs().values()].flatMap(g => revisionHeld(g.graph))),
     new Set(), { equals: (a, b) => a.size === b.size && [...a].every(id => b.has(id)) });
   const index = createMemo<WorkspaceIndex>(prev => stableIndex(prev, buildIndex(state(), now, orders(), revisionHolds())));
+  // Only an unstarted draft can replace its initial attachments. Keep references for
+  // recently opened executions in this store. Legacy replies can contain whole files.
+  const initialFiles = new Map<string, { executionId: string; projectId: string; files: AttachmentInput[] }>();
   // The projects whose tasks a confirmed read delivered in this run. A cached first frame is not one, and neither is the empty
   // stand-in (`standIn`) of a project whose Cortex is away or not activated: neither says what the project holds.
   const [readProjects, setReadProjects] = createSignal<ReadonlySet<string>>(new Set(options.initial?.state.projects.map(p => p.id) ?? []));
@@ -343,6 +348,12 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
   // next read, and a slow machine would never stop confirming.
   const queuedEnrichments = new Map<string, ProjectionUpdate>();
   const queuedFacts = new Map<string, ProjectFacts>();
+  const queuedConversations = new Map<string, ConversationUpdate>();
+  const installConversation = (update: ConversationUpdate) => {
+    if (registered && !registered.has(update.projectId)) return;
+    if (versions.get(`project:${update.projectId}`) !== update.version) return;
+    setProjected(current => applyConversation(current, update, facts.get(update.projectId)));
+  };
   const installEnrichment = (update: ProjectionUpdate) => batch(() => {
     if (!install(update, true) || update.scope !== "project") return;
     const held = facts.get(update.slice.project.id);
@@ -401,8 +412,9 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
       if (active) {
         for (const update of queuedEnrichments.values()) guarded(() => installEnrichment(update), undefined);
         for (const update of queuedFacts.values()) guarded(() => installFacts(update), undefined);
+        for (const update of queuedConversations.values()) guarded(() => installConversation(update), undefined);
       }
-      queuedEnrichments.clear(); queuedFacts.clear();
+      queuedEnrichments.clear(); queuedFacts.clear(); queuedConversations.clear();
       if (queuedReads.size && active) {
         // Always read again after a command reply, even when an older poll is in flight. One project at a time, in the
         // order queued (an owner action's project at the head), and a read of every project last: a project read never
@@ -508,6 +520,14 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
       });
       return;
     }
+    if (update.kind === "project_migration") {
+      setMovingHistory(previous => {
+        const next = new Set(previous);
+        if (update.active) next.add(update.projectId); else next.delete(update.projectId);
+        return next;
+      });
+      return;
+    }
     if (update.kind === "project_state") {
       if (registered && !registered.has(update.project.id)) return;
       projectIssues.set(update.project.id, update.issue);
@@ -526,9 +546,17 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
       installEnrichment(update.update);
       return;
     }
+    if (update.kind === "conversation") {
+      if (refreshing) queuedConversations.set(update.conversation.taskId, update);
+      installConversation(update);
+      return;
+    }
     if (update.kind === "registry") {
       const keep = new Set(update.projectIds);
+      setMovingHistory(previous => new Set([...previous].filter(id => keep.has(id))));
       registered = keep;
+      if ([...readProjects()].some(id => !keep.has(id))) setReadProjects(held => new Set([...held].filter(id => keep.has(id))));
+      for (const [taskId, cached] of initialFiles) if (!keep.has(cached.projectId)) initialFiles.delete(taskId);
       // Re-adding a detached project may legitimately return its unchanged projection.
       for (const key of versions.keys()) if (key.startsWith("project:") && !keep.has(key.slice(8))) versions.delete(key);
       for (const id of facts.keys()) if (!keep.has(id)) facts.delete(id);
@@ -603,6 +631,11 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
      */
     /** Moves on every confirmed facts install: a screen holding its last confirmed mode releases it when this moves. */
     factsInstalls,
+    /** Saved checkout binding, scoped to today's facts for its project. */
+    taskWorkspaceOverlay: (projectId: string, taskId: string) => {
+      factsInstalls();
+      return facts.get(projectId)?.overlays[taskId];
+    },
     taskRouteKnown: (taskId: string): boolean => {
       if (port.mode !== "real") return true;
       const task = state().tasks.find(t => t.id === taskId);
@@ -617,6 +650,7 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     /** The first screen's gate: the machine has answered and its settings are in, or waiting for them has run out. */
     loaded: () => ready() && machineSettled(),
     syncing, now, receipt, acceptanceIssue, connection, rejected, can, reload: () => track(reload()),
+    movingProjectHistory: (projectId: string) => movingHistory().has(projectId),
     /** Opening a project's screen, or its manual refresh, keeps the confirmed display and asks only for this project's moving
      *  facts; with `git`, its repository too, read afresh. */
     refreshProjectFacts: async (projectId: string, git = true) => {
@@ -636,8 +670,8 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
      * port reads in the background only what some screen holds interest in; opening one reads it once, now. `taskId` is
      * the task it shows: only such tasks' worker rows are read.
      */
-    interest: (projectId: string, kind: GitInterest, taskId?: string) => {
-      const release = port.interest?.(projectId, kind, taskId) ?? (() => {});
+    interest: (projectId: string, kind: GitInterest, taskId?: string, conversation?: boolean) => {
+      const release = port.interest?.(projectId, kind, taskId, conversation) ?? (() => {});
       void self.refreshProjectFacts(projectId, kind !== "facts");
       return release;
     },
@@ -646,7 +680,19 @@ export function createWorkspaceStore(port: WorkspacePort & LocalCodePort, option
     takeDroppedFiles: () => port.takeDroppedFiles?.() ?? Promise.resolve([]),
     readClipboardImage: () => port.readClipboardImage?.() ?? Promise.resolve([]),
     /** The files of a saved task, read when its page opens. Nothing here when this backend keeps none. */
-    readTaskAttachments: (taskId: string) => port.readTaskAttachments?.(taskId) ?? Promise.resolve([]),
+    async readTaskAttachments(taskId: string) {
+      const task = index().byId.get(taskId)?.task;
+      const cached = initialFiles.get(taskId);
+      if (task?.executionId && cached?.executionId === task.executionId && cached.projectId === task.projectId) return cached.files.slice();
+      const files = await port.readTaskAttachments?.(taskId) ?? [];
+      const current = index().byId.get(taskId)?.task;
+      if (task?.executionId && current?.executionId === task.executionId && current.projectId === task.projectId
+          && files.every(file => typeof file === "string" || "sha256" in file)) {
+        initialFiles.set(taskId, { executionId: task.executionId, projectId: task.projectId, files: files.slice() });
+        if (initialFiles.size > 32) initialFiles.delete(initialFiles.keys().next().value!);
+      }
+      return files;
+    },
     /** Files just attached go to the machine once and come back as references. A backend with no machine keeps the bytes in the draft. */
     uploadAttachments: (files: Attachment[]): Promise<AttachmentInput[]> => port.uploadAttachments ? port.uploadAttachments(files) : Promise.resolve(files),
     /** One saved file's bytes, read only when it is opened. */

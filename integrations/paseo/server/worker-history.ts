@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { readWorkerHistory } from "../shared/worker-history.ts";
 import { runStoreReader, storeReaderRefusal } from "./store-reader.ts";
@@ -106,8 +105,9 @@ export async function resolveAgentTask(input: { workspaceId: string; agentId: st
 
   const projectRoot = await resolveProjectRoot(directory);
   if (!projectRoot) return { message: "Worker history is unavailable for this workspace." };
-  if (!existsSync(`${projectRoot}/.cortex/cortex.sqlite3`)) return { message: "No Cortex store is present in this workspace." };
-  const taskId = await readTaskId(projectRoot, sessionId);
+  const binding = await runStoreReader("task-id", [projectRoot, sessionId], { timeoutMs: 5000 });
+  if (binding.status !== 0) return { message: binding.refusal ?? "The Cortex project store could not be read." };
+  const taskId = binding.stdout.trim();
   if (!taskId) return { message: "No durable Cortex task is bound to this agent." };
   agentTaskCache.set(cacheKey, { directory, sessionId, projectRoot, taskId });
   return { projectRoot, taskId };
@@ -129,9 +129,4 @@ export async function getWorkerHistory(input: { workspaceId: string; agentId: st
   } catch {
     return { assignments: [], available: false, truncated: false, nextCursor: null, nextAssignmentCursor: null, message: "Worker history returned an invalid response." };
   }
-}
-
-async function readTaskId(projectRoot: string, sessionId: string): Promise<string | null> {
-  const result = await runStoreReader("task-id", [projectRoot, sessionId], { timeoutMs: 5000 });
-  return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null;
 }

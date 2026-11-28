@@ -6,6 +6,7 @@ import { ReviewDialogs, type WsDialog } from "./dialogs";
 import { createBuffers } from "./editor-buffers";
 import { QuestionNotifications } from "./notifications";
 import { NewPage } from "./newtask";
+import { TaskWorkspaceDock } from "./task-workspace";
 import { CODE_LANGUAGE } from "./code-support";
 import { workspaceCopy, type CopyKey } from "./copy";
 import { useWs, WsContext, type DemoSlot, type Shell, type WindowChrome, type Ws } from "./ctx";
@@ -40,6 +41,7 @@ import { SettingsPage } from "./settings";
 import { createSettingsState } from "./settings-state";
 import { SprintPage } from "./sprint";
 import { createWorkspaceStore, SAVE_ATTACHMENT, type StoreOptions } from "./store";
+import { createLocalDrafts } from "./local-drafts";
 import { CloseDialog, ExternalDoneDialog } from "./task-chrome";
 import { sprintView } from "./selectors";
 import { tabTitle } from "./tabs";
@@ -72,7 +74,7 @@ function Content() {
   return <Show when={ws.store.ready()} fallback={<NotLoaded />}><Show when={knownMachine()} fallback={<NotFound message="This machine is not connected to this Workspace" />}>
     <Switch fallback={<NotFound message="This page does not exist" />}>
       <Match when={route().name === "home"}><Home /></Match>
-      <Match when={route().name === "board"}><MachineBoard /></Match>
+      <Match when={route().name === "board" && (route() as Extract<Route, { name: "board" }>)}>{r => <MachineBoard route={r()} />}</Match>
       <Match when={route().name === "inbox"}><Inbox /></Match>
       <Match when={route().name === "archive"}><Archive /></Match>
       <Match when={route().name === "new" && (route() as Extract<Route, { name: "new" }>)}>{r => <NewPage route={r()} />}</Match>
@@ -145,7 +147,9 @@ export type WorkspaceProps = StoreOptions & { notify?: import("./notification-ta
   /** The shell around the interface. Without one it is the desktop, unchanged. */
   shell?: Shell;
   /** A theme the shell already holds, so one choice of theme is applied by one owner. */
-  theme?: Theme };
+  theme?: Theme;
+  /** An authenticated native app profile or phone pairing, local to this device. */
+  draftNamespace?: readonly string[] };
 /** What a phone never offers, whatever the machine can do: a terminal, editing files, the system folder chooser, programs on the
  *  computer's own screen, and saving a file to disk. Code stays a viewer. */
 export const PHONE_WITHHELD: readonly string[] = [FEATURES.terminal, FEATURES.editFiles, CODE_LANGUAGE, FEATURES.pickFolder, SAVE_ATTACHMENT, "workspace.open_editor", "workspace.open_vscode", "workspace.open_logs", "workspace.reveal_file"];
@@ -189,12 +193,13 @@ function TabBody(props: { make: () => Ws; shown: Accessor<boolean>; unsent: (che
     // The task on view (its page, the one previewed on a board, or the task planning the sprint on view) is the only one
     // whose worker rows and conversation are read.
     const task = r.name === "task" ? r.task : r.name === "project" ? ws.selected() ?? "" : r.name === "sprint" ? sprintPlanningTask(ws.store.state(), r.sprint) ?? "" : "";
-    return `${git ? "git" : "facts"}|${project}|${task}`;
+    const conversation = (r.name === "task" && !r.tab) || (r.name === "sprint" && r.tab === "planning");
+    return `${git ? "git" : "facts"}|${project}|${task}|${conversation}`;
   });
   createEffect(on(interest, key => {
     if (!key) return;
-    const [kind, project, task] = key.split("|");
-    onCleanup(ws.store.interest(project, kind as "facts" | "git", task || undefined));
+    const [kind, project, task, conversation] = key.split("|");
+    onCleanup(ws.store.interest(project, kind as "facts" | "git", task || undefined, conversation === "true"));
   }));
   // A preview belongs to the view it was made in.
   createEffect(on(() => ws.router.path(), () => ws.select(null), { defer: true }));
@@ -228,7 +233,7 @@ export function Workspace(props: WorkspaceProps) {
   const around: Shell = props.shell ?? { kind: "desktop" };
   const phone = around.kind === "phone" ? around : undefined;
   const store = createWorkspaceStore(props.port, { now: props.now, initial: props.initial, track: press.track, ...(phone ? { withhold: PHONE_WITHHELD } : {}) });
-  const tabs = createTabs();
+  const tabs = createTabs(props.shell && props.draftNamespace ? JSON.stringify(props.draftNamespace) : undefined);
   // The phone shell marks the root, so its touch sizes apply there and nowhere else.
   if (phone) {
     document.documentElement.dataset.shell = "phone";
@@ -241,6 +246,7 @@ export function Workspace(props: WorkspaceProps) {
   const locals = new Map<number, TabLocal>();
   const localOf = (id: number) => { let held = locals.get(id); if (!held) { held = createTabLocal(); locals.set(id, held); } return held; };
   const panels = createPanels();
+  const [taskWorkspaceDock, setTaskWorkspaceDock] = createSignal<HTMLElement>();
   // A window narrower than a reading column plus the sidebar holds the sidebar away for now, on every page, so each page keeps
   // its width down to phone size. The owner's choice is untouched, and asking for the sidebar back brings it back.
   const narrowQuery = typeof window.matchMedia === "function" ? window.matchMedia("(max-width: 819.98px)") : undefined;
@@ -254,6 +260,7 @@ export function Workspace(props: WorkspaceProps) {
   const theme = props.theme ?? createTheme();
   const demo = props.demo;
   const drafts = new Map<string, string>();
+  const localDrafts = props.draftNamespace ? createLocalDrafts(props.draftNamespace) : undefined;
   const unique = () => demo?.unique() ?? (globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`).slice(0, 8);
   const [closing, setClosing] = createSignal<string | null>(null);
   const [externalClose, setExternalClose] = createSignal<"external" | "already_in_target" | null>(null);
@@ -261,6 +268,7 @@ export function Workspace(props: WorkspaceProps) {
   let closeRefused: ((message: string) => void) | undefined;
   const [paletteOpen, setPaletteOpen] = createSignal(false);
   const [helpOpen, setHelpOpen] = createSignal(false);
+  const [menuSprint, setMenuSprint] = createSignal<{ id: string; projectId: string }>();
   const [menuTask, setMenuTask] = createSignal<string | null>(null);
   const [dialog, setDialog] = createSignal<WsDialog | null>(null);
   const settings = createSettingsState();
@@ -279,6 +287,7 @@ export function Workspace(props: WorkspaceProps) {
   const leaving = (e: BeforeUnloadEvent) => { if (buffers.unsaved().length) e.preventDefault(); };
   window.addEventListener("beforeunload", leaving);
   onCleanup(() => window.removeEventListener("beforeunload", leaving));
+  let rowTrigger: HTMLElement | undefined;
   let taskMenu: HTMLDivElement | undefined, shell!: HTMLDivElement, main!: HTMLElement;
 
   /** Everything that follows the route, for the frame (the active tab) and for each tab's own content. */
@@ -325,7 +334,7 @@ export function Workspace(props: WorkspaceProps) {
   const ws: Ws = {
     shell: around, keys: hint => phone ? undefined : hint,
     ...scopedTo(router, () => localOf(tabs.activeId()), store.state),
-    notify: props.notify, openResultTarget: props.openResultTarget, unseen, store, panels, theme, buffers, demo, chrome, drafts, terminal: props.terminal, voice: props.voice, settings, t, gate,
+    notify: props.notify, openResultTarget: props.openResultTarget, unseen, store, panels, theme, buffers, demo, chrome, drafts, localDrafts, terminal: props.terminal, voice: props.voice, settings, t, gate,
     can: store.can,
     needs(type) { const reason = gate(type); return reason ? { "aria-disabled": "true", "data-why": reason } : {}; },
     noOpener: (capability, reason) => store.can(capability) ? undefined : store.connection().state === "connected" ? t(reason) : t("notOffered"),
@@ -361,24 +370,40 @@ export function Workspace(props: WorkspaceProps) {
       const task = store.state().tasks.find(t => t.id === taskId), result = task?.result;
       if (!task || !result) return;
       if (acceptNeedsTick(task)) setDialog({ kind: "accept", taskId });
-      else void store.dispatch({ type: "accept_result", taskId, digest: result.digest, now: store.clock() });
+      else void store.dispatch({ type: "accept_result", taskId, digest: result.digest, sourceVersion: result.sourceVersion, now: store.clock() });
     },
     openPalette: () => setPaletteOpen(true),
     openHelp: () => setHelpOpen(true),
     openTaskMenu(taskId, trigger, point) {
       setMenuTask(taskId);
-      if (!taskMenu) return;
-      press.invokedBy(taskMenu, trigger);
-      trigger.focus({ preventScroll: true });
-      place(taskMenu, trigger, "right");
-      if (point) Object.assign(taskMenu.style, { inset: "auto", left: `${point.x}px`, top: `${point.y}px` });
-      taskMenu.showPopover?.();
-      keepInside(taskMenu);
-      taskMenu.scrollTop = 0;
-      taskMenu.querySelector<HTMLElement>("[role=menuitem]")?.focus({ preventScroll: true });
+      setMenuSprint(undefined);
+      showRowMenu(trigger, point);
+    },
+    openSprintMenu(sprint, trigger, point) {
+      setMenuTask(null);
+      setMenuSprint({ id: sprint.id, projectId: sprint.projectId });
+      showRowMenu(trigger, point);
     },
   };
+  function showRowMenu(trigger: HTMLElement, point?: { x: number; y: number }) {
+    if (!taskMenu) return;
+    rowTrigger = trigger;
+    press.invokedBy(taskMenu, trigger);
+    trigger.focus({ preventScroll: true });
+    place(taskMenu, trigger, "right");
+    if (point) Object.assign(taskMenu.style, { inset: "auto", left: `${point.x}px`, top: `${point.y}px` });
+    taskMenu.showPopover?.();
+    keepInside(taskMenu);
+    taskMenu.scrollTop = 0;
+    taskMenu.querySelector<HTMLElement>("[role=menuitem]")?.focus({ preventScroll: true });
+  }
   const { machine, go, inspectable, selected, select: setSelected, toggleTerminal } = ws;
+  const taskWorkspaceVisible = () => {
+    const r = ws.router.route();
+    return r.name === "new" && r.kind === "task" && !phone && store.mode === "real"
+      && !demo && store.ready() && inspectable() && panels.wide() && panels.inspectorVisible();
+  };
+  const visibleTaskDock = () => taskWorkspaceVisible() ? taskWorkspaceDock() : undefined;
   const route = () => router.route();
 
   // A parked tab keeps the state it last showed, and reads the machine again the moment it is on view.
@@ -578,12 +603,12 @@ export function Workspace(props: WorkspaceProps) {
             <QuestionNotifications tabs={tabs} clicks={props.notificationClicks} service={props.notificationService} />
             {props.notice}
             {/* In a fixed order: moving a mounted pane in the document would lose its scroll positions. */}
-            <div class="ws-panes"><For each={[...tabs.ids()].sort((a, b) => a - b)}>{id => {
+            <TaskWorkspaceDock.Provider value={visibleTaskDock}><div class="ws-panes"><For each={[...tabs.ids()].sort((a, b) => a - b)}>{id => {
               const shown = createMemo(() => tabs.activeId() === id);
               return <TabPane id={id} shown={shown} make={() => paneWs(id, shown)} unsent={unsentIn(id)} keepFocus={() => keepStripFocus} home={() => main} />;
-            }}</For></div>
+            }}</For></div></TaskWorkspaceDock.Provider>
           </main>
-          <Show when={store.ready()}><Inspector /></Show>
+          <Show when={store.ready()}><Inspector taskWorkspaceDock={setTaskWorkspaceDock} taskWorkspaceVisible={taskWorkspaceVisible()} /></Show>
         </div>
         <Show when={phone && drawer()}>
           <div class="ws-drawer-layer">
@@ -595,7 +620,7 @@ export function Workspace(props: WorkspaceProps) {
           </div>
         </Show>
         <FrameMenus />
-        <TaskMenu taskId={menuTask()} ref={el => { taskMenu = el; }} />
+        <TaskMenu taskId={menuTask()} focusTrigger={() => rowTrigger?.isConnected && rowTrigger.focus({ preventScroll: true })} sprint={menuSprint() && store.state().sprints.find(s => s.id === menuSprint()!.id && s.projectId === menuSprint()!.projectId)} ref={el => { taskMenu = el; }} />
       </div>
       <ReasonTip />
       <Show when={!phone}><Tooltip /></Show>

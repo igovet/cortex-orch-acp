@@ -47,31 +47,19 @@ kind, rather than the role default: this includes layout, styling, markup,
 responsive layout, UI components and visual polish. Follow the live plan schema
 and routing menu for the field, eligibility and any conditional preference.
 
-## Specialist catalogue
+## Execution profiles
 
-- `accessibility-auditor`: Accessibility auditor for WCAG conformance, keyboard navigation, and assistive-technology risks.
-- `accessibility-fixer`: Accessibility remediation specialist for semantic UI, keyboard, focus, contrast, responsive, and assistive-technology fixes.
-- `architect`: System architect for component boundaries, data flow, API contracts, and architecture decisions.
-- `backend-dev`: Backend implementation specialist for APIs, business logic, persistence, and server-side tests.
-- `data-engineer`: Data engineering specialist for ETL, migrations, validation, rollbacks, and data integrity.
-- `database-architect`: Database architect for schemas, indexes, migrations, query plans, and compatibility risks.
-- `debugger`: Debugging specialist for reproducing failures, proving root cause, implementing focused fixes, and verifying regressions.
-- `devops-engineer`: Infrastructure specialist for CI/CD, containers, deployment safety, and operational diagnostics.
-- `explorer`: Codebase investigator for execution paths, ownership, dependencies, and relevant files.
-- `frontend-dev`: Frontend implementation specialist for components, state, styling, browser behavior, and UI tests.
-- `fullstack-dev`: Cross-layer implementation specialist for cohesive backend and frontend changes with end-to-end validation.
-- `general`: General-purpose agent for bounded research, analysis, or implementation when no specialty fits.
-- `mobile-dev`: Mobile implementation specialist for iOS, Android, React Native, Flutter, native APIs, and platform tests.
-- `performance-engineer`: Performance analyst for bottlenecks, query plans, resource usage, and safe optimization trade-offs.
-- `planner`: Planning specialist for work breakdown, dependencies, risks and verification.
-- `qa-engineer`: QA specialist for acceptance coverage, automated tests, reproduction scenarios, and quality-risk evidence.
-- `refactorer`: Refactoring specialist for safe structural improvements that preserve public behavior and contracts.
-- `security-auditor`: Security auditor for authentication, authorization, secrets, cryptography, dependencies, and data-protection risks.
-- `technical-writer`: Documentation specialist for project knowledge, feature docs, ADRs, and evidence-backed developer guidance.
-- `ux-designer`: UX designer for accessible layouts, component hierarchy, interaction flows, and responsive behavior.
+Use the read-only investigator for evidence, diagnosis and design options,
+and the implementer for work requiring writes. Give a coherent objective the
+competencies that apply to it. Use the live plan schema and routing menu for
+the current selectors.
+
+Choose competencies for the actual methods, risks and evidence the objective
+needs. When the base profile covers the work on its own, explain what makes
+that sufficient for this objective. Avoid decorative modules.
 
 ## Runtime-reserved (not plannable)
 
 `code-reviewer` and `build-verification` are runtime-reserved roles. The runtime adds independent review (whenever the planned work changed the project) and final verification; do not include either role in a plan proposal.
 
-`senior-consultant` is escalation-only: the runtime adds it, with the consultation packet it builds, after an `escalation_request`; do not include it in a plan proposal.
+Leave `senior-consultant` scheduling to the runtime. Reuse retained advice when it still applies and follow the [consultation guidance](senior-consultation.md) for an unresolved decision.

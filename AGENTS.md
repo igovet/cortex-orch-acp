@@ -15,7 +15,8 @@ Treat `docs/project/index.md`, `docs/features/index.md` and `SECURITY.md` as the
 Documentation never references tasks, assignments or task reports.
 
 The runtime owns the task lifecycle, dependency graph, scheduling, engine routes,
-permissions, mandatory independent review, verification and completion. Models
+permissions, mandatory independent review, verification and completion. Fast
+retains the current independent-review obligation when review is required. Models
 propose plans, analyze evidence and submit reports/results. Keep tool argument
 contracts in advertised schemas and property descriptions, never in skills or
 profile instructions. One narrow exception: the `codex-acp` tool cheat sheet
@@ -25,8 +26,10 @@ bounds and an example call, because it is rendered mechanically from the live
 channel tool schemas (`schema::catalogue` in `crates/cortex-engine/src/schema.rs`) at session start and appended only to `codex-acp`
 sessions, whose code mode lists nested tools by name and description only. It
 is derived output, not authored prose: never hand-edit contract text into it,
-and it does not reintroduce model-driven delegation. Preserve all 23 profiles (22 specialists and the consultant)
-and their shared report protocol. Do not reintroduce model-driven delegation,
+and it does not reintroduce model-driven delegation. Generate only the five canonical worker
+profiles. Compose worker instructions from a base and the selected competency
+modules. Retained roles keep their original access classes, routing and shared
+report protocol. Do not reintroduce model-driven delegation,
 acceptance or compatibility routes. Model-originated mutations require dispatched,
 channel-verified MCP tools/call; runtime-owned state transitions and events commit
 transactionally. Release readiness is decided only by the checks listed in
@@ -75,23 +78,27 @@ Apply these rules to ACP qualification evidence:
 
 
 Use one real `pipeline.md` per task, newest edition first with older editions
-below. Other reports are immutable real Markdown files. Both published task
-documents and the SQLite metadata/relations index live under the one
-project-local `.cortex` store (`<project>/.cortex/cortex.sqlite3`, published
-document bodies under `<project>/.cortex/` alongside it); there is no
-`.codex/cortex` anywhere. The store layer (`crates/cortex-core/src/store`) keeps exactly one
-`.cortex/cortex.sqlite3` per project in the default/release channel. Workspace Dev uses the separate `.cortex-dev/cortex.sqlite3` beside it: exactly one store per logical project per channel, including linked worktrees. Dev never imports, reads or migrates the release store. Both the newest-first catalogue and
-report content use bounded cursor reads. Workers select relevant reports rather
-than reading everything.
+below. Other reports are immutable real Markdown files. Each logical project
+and channel has one private SQLite database and published Markdown tree under
+the channel's XDG state root (default release `~/.local/state/cortex/projects/`).
+Linked worktrees share that store. Workspace Dev has its own state root and
+never reads, imports or migrates the release store. The project-side `.cortex`
+and `.cortex-dev` directories retain a location marker for their channel.
+Both the newest-first catalogue and report content use bounded cursor reads.
+Workers select relevant reports. See [storage and recovery](docs/project/storage.md).
+
 
 When the Rust store (`crates/cortex-core`) opens a project-local format-11
 database with `Store::open(.., OpenMode::Initialize)`, it automatically performs
-the verified format-11 to format-12 migration under the exclusive access lock
-and retains a private backup in `.migration-backups/`. An
-`OpenMode::InspectImmutable` (or `LiveReadOnly`) open must remain non-mutating
-and report `legacy_storage_migration_required`; format 10 and unknown formats
-remain fail-closed (`unsupported_storage`). No separate migration or rollback
-command ships. Read-path indexes and planner statistics are in-format additions, not a
+the verified format-11 to format-12 migration under the exclusive access lock,
+retains a private backup in `.migration-backups/`, and relocates eligible legacy
+storage with a verified location marker. For a format-11 input,
+`OpenMode::InspectImmutable` and `LiveReadOnly` leave the store untouched and
+report `legacy_storage_migration_required`. Format 10 and unknown formats
+remain fail-closed (`unsupported_storage`). The format upgrade runs automatically
+and format backup restore remains a library operation. The owner's
+`project-stores return-to-project` command returns a relocated format-12 store
+to its checkout. Read-path indexes and planner statistics are in-format additions, not a
 format change: every `OpenMode::Initialize` open of a format-12 store creates a
 missing additive index inside its `BEGIN IMMEDIATE` install transaction and runs
 SQLite's bounded `PRAGMA optimize` under the exclusive access lock; read-only and
@@ -149,7 +156,8 @@ owner". A request covers only the named work, mode and surface.
   [desktop procedure](docs/project/verification.md#standalone-cortex-workspace-desktop):
   real HOME, keyring and existing native/gh logins, private per-run Dev XDG
   roots, a private authenticated Xvfb (smoke alone may use the owner's display),
-  and a separate disposable project. There is no nested sandbox lab. The Dev
+  and a separate disposable project. The private XDG state root also isolates
+  the Dev project stores. There is no nested sandbox lab. The Dev
   archive is tested by extraction without `sudo`; installing it is only for a
   scenario that needs the installed package. Never install, modify or restart the release package or
   service, never touch production `~/.paseo`, and never change the owner's
@@ -271,7 +279,7 @@ evidence.
 Both modes run only on an explicit owner request naming the mode (see above).
 In `cli` mode, drive a Cortex agent headlessly through the guarded wrapper
 (`run`, `send`, `permit`, `wait`, `inspect`) and check outcomes against the
-disposable project's `.cortex` store; it establishes runtime and protocol
+disposable project's channel store; it establishes runtime and protocol
 behavior, not rendered GUI behavior. In `desktop` mode, use the Electron app as
 described below. See the dev Paseo environment guide for the `cli` commands.
 

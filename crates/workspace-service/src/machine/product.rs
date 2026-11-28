@@ -5,6 +5,7 @@ use super::{
     settings::{self, Lock},
 };
 use crate::native_driver::sprints::PlanningFailure;
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::path::Path;
 /// A sprint's saved files together: at most 8 references totaling 4 MiB.
@@ -153,7 +154,7 @@ mod tests {
         let state = std::env::temp_dir().join(format!("cw-sprint-close-{}", settings::unique()));
         std::fs::DirBuilder::new().mode(0o700).create(&state).unwrap();
         let path = product_path(&state, "p").unwrap();
-        let product = json!({"tasks":{"task":{"status":"done","title":"Merging member"}},
+        let product = json!({"tasks":{"task":{"status":"draft","title":"Merging member"}},
             "sprints":[{"id":"s","taskIds":["task"]}]});
         settings::write_json(&path, &product).unwrap();
         let claim = {
@@ -166,8 +167,9 @@ mod tests {
         assert!(refused.message.contains("Merging member (task): A merge is still running."));
         assert_eq!(settings::read_json(&path, Value::Null).unwrap(), product);
         drop(claim);
-        sprint(&state, "p", &request, None).unwrap();
-        assert_eq!(settings::read_json(&path, Value::Null).unwrap()["tasks"]["task"]["archive"]["previousStatus"], "done");
+        let refused = sprint(&state, "p", &request, None).unwrap_err();
+        assert!(refused.message.contains("task details could not be read"), "{refused:?}");
+        assert_eq!(settings::read_json(&path, Value::Null).unwrap(), product);
         std::fs::remove_dir_all(state).unwrap();
     }
 
@@ -289,6 +291,48 @@ mod tests {
             assert_eq!(sprint(&state, "p", &json!({"action":"patch","sprintId":id,"patch":{"runMode":mode,"title":"Not saved"}}), None).unwrap_err().code, "invalid_sprint");
         }
         assert_eq!(product(&state, "p").unwrap(), before);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn sprint_inputs_are_never_shortened_on_save() {
+        use std::os::unix::fs::DirBuilderExt;
+        let state = std::env::temp_dir().join(format!("cw-sprint-input-{}", settings::unique()));
+        std::fs::DirBuilder::new().mode(0o700).create(&state).unwrap();
+        let at_limit = "ж".repeat(32_000);
+        let too_long = format!("{at_limit}!");
+        assert_eq!(sprint(&state, "p", &json!({"action":"create","description":too_long}), None)
+            .unwrap_err().code, "invalid_sprint");
+        let created = sprint(&state, "p", &json!({"action":"create","description":at_limit}), None).unwrap();
+        let before = product(&state, "p").unwrap();
+        assert_eq!(before["sprints"][0]["description"], at_limit);
+        assert_eq!(
+            sprint(&state, "p", &json!({"action":"note","sprintId":created["sprintId"],
+                "kind":"answer","text":too_long}), None).unwrap_err().code,
+            "invalid_sprint"
+        );
+        assert_eq!(product(&state, "p").unwrap(), before);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn owner_edits_use_the_same_plan_bounds_and_preserve_history() {
+        use std::os::unix::fs::DirBuilderExt;
+        let state = std::env::temp_dir().join(format!("cw-sprint-edit-{}", settings::unique()));
+        std::fs::DirBuilder::new().mode(0o700).create(&state).unwrap();
+        let created = sprint(&state, "p", &json!({"action":"create","description":"Draft a plan"}), None).unwrap();
+        let edit = |plan: &Value| sprint(&state, "p", &json!({"action":"patch","sprintId":created["sprintId"],
+            "patch":{"plan":plan,"history":[plan],"planning":"ready"}}), None);
+        let task = json!({"key":"one","description":"Goal and acceptance","dependsOn":[]});
+        let oversized = json!({"version":1,"items":[{"key":"one","description":"x".repeat(32_001)}]});
+        assert_eq!(edit(&oversized).unwrap_err().code, "invalid_task");
+        let bad_edge = json!({"version":1,"items":[task,{"key":"two","description":"Related work","dependsOn":["one","one"]}]});
+        assert_eq!(edit(&bad_edge).unwrap_err().code, "invalid_dependencies");
+        let plan = json!({"version":1,"items":[task]});
+        edit(&plan).unwrap();
+        assert_eq!(edit(&plan).unwrap_err().code, "stale_plan");
+        let saved = product(&state, "p").unwrap();
+        assert_eq!(saved["sprints"][0]["history"], json!([plan]));
         std::fs::remove_dir_all(state).unwrap();
     }
 
@@ -768,7 +812,7 @@ pub(super) fn automatic_sprint(sprint: &Value) -> bool {
 impl crate::Service {
     // Internal driver writes share the same lock as owner changes. A diagnostic
     // and its conversation event are always persisted together.
-    async fn write_planning_state(
+    pub(crate) async fn write_planning_state(
         &self,
         project: &str,
         id: &str,
@@ -804,6 +848,51 @@ impl crate::Service {
                 .send(json!({"projectId":project,"type":"invalidation"}));
         }
         Ok(changed)
+    }
+
+    pub(crate) async fn publish_planning_state(
+        &self,
+        project: &str,
+        id: &str,
+        expected: Value,
+        next: &'static str,
+        items: Option<Vec<Value>>,
+        run: Value,
+    ) -> std::io::Result<()> {
+        self.write_planning_state(project, id, move |sprint| {
+            if !planning_open(sprint)
+                || !sprint["materializedVersion"].is_null()
+                || *sprint != expected
+                || (items.is_some() && sprint["planning"] == "ready")
+            {
+                return Ok(false);
+            }
+            if let Some(items) = items {
+                let version = sprint["plan"]["version"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or_else(|| refuse("invalid_plan", "The plan version cannot advance."))?;
+                let plan = json!({"version":version,"items":items});
+                sprint["history"]
+                    .as_array_mut()
+                    .ok_or_else(|| refuse("state_unreadable", "Saved sprint plan history is unreadable."))?
+                    .push(plan.clone());
+                sprint["plan"] = plan;
+            }
+            sprint["planning"] = json!(next);
+            sprint["planningRun"] = run;
+            let saved = sprint.as_object_mut().unwrap();
+            for key in ["planningAttempt", "planningFailure", "planningRetry"] {
+                saved.remove(key);
+            }
+            if next != "planning" {
+                saved.remove("planningLimitRetry");
+            }
+            Ok(true)
+        })
+        .await
+        .map(|_| ())
     }
 
     // Change links only while the same run is still being planned. A stopped or
@@ -1013,6 +1102,81 @@ pub(super) fn check_planning_recovery(sprint: &Value, action: &str) -> Result<()
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SprintCompletion {
+    Confirmed,
+    OwnerAcceptedUnverified,
+}
+
+/// Recheck a completed execution's retained evidence. Explicit owner closures
+/// are handled separately and never promote missing or failed checks to a pass.
+fn completed_sprint_member(
+    db: &rusqlite::Connection,
+    runtime: &str,
+) -> cortex_core::CoreResult<Option<SprintCompletion>> {
+    let (planned, synthesis): (bool, Option<String>) = db.query_row(
+        "SELECT plan_json IS NOT NULL,synthesis FROM runtime_tasks WHERE task_id=?",
+        [runtime], |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let boundary: i64 = db.query_row(
+        "SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=?
+         AND type IN ('TASK_REOPENED','PLAN_ACCEPTED','REVIEW_STARTED')",
+        [runtime], |r| r.get(0),
+    )?;
+    let Some(synthesis) = synthesis.filter(|text| !text.trim().is_empty()) else {
+        return Ok(None);
+    };
+    if !cortex_core::lifecycle::completion::pending_input_tx(db, runtime)?.is_empty()
+        || cortex_core::lifecycle::sprint_impact::pending(db, runtime)?.is_some()
+    {
+        return Ok(None);
+    }
+    let result: Option<(String, String, String)> = db.query_row(
+        "SELECT type,actor,payload_json FROM runtime_events WHERE task_id=? AND id>?
+         AND type IN ('ANSWER_SUBMITTED','SYNTHESIS_SUBMITTED','SYNTHESIS_RUNTIME_COMPOSED')
+         ORDER BY id DESC LIMIT 1",
+        (runtime, boundary), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional()?;
+    let mut direct_answer = false;
+    if let Some((kind, actor, raw)) = result {
+        let result: Value = serde_json::from_str(&raw)?;
+        if actor != "runtime" || result["text"] != synthesis
+            || !cortex_core::lifecycle::reconciliation::goal_met(db, runtime, &result)?
+        {
+            return Ok(None);
+        }
+        direct_answer = kind == "ANSWER_SUBMITTED";
+    } else if cortex_core::lifecycle::plan::task_outcomes(db, runtime)?.is_some() {
+        return Ok(None);
+    }
+    if !planned {
+        return Ok(direct_answer.then_some(SprintCompletion::Confirmed));
+    }
+    let latest: Option<(i64, String, String, String)> = db.query_row(
+        "SELECT id,type,actor,payload_json FROM runtime_events WHERE task_id=? AND id>?
+         AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED','VERIFICATION_REVISED')
+         ORDER BY id DESC LIMIT 1",
+        (runtime, boundary), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).optional()?;
+    let Some((event, kind, actor, raw)) = latest else { return Ok(None) };
+    if actor != "runtime" {
+        return Ok(None);
+    }
+    let payload: Value = serde_json::from_str(&raw)?;
+    if kind == "VERIFICATION_PASSED" {
+        return Ok(cortex_core::lifecycle::completion::retained_verification_pass(
+            db, runtime, event, &payload,
+        )?.then_some(SprintCompletion::Confirmed));
+    }
+    if kind == "VERIFICATION_REVISED" {
+        let explicit = cortex_core::lifecycle::completion::retained_verification_waiver(
+            db, runtime, event, &payload,
+        )?;
+        return Ok(explicit.then_some(SprintCompletion::OwnerAcceptedUnverified));
+    }
+    Ok(None)
+}
+
 /// Resolve and validate the entire membership before changing either the sprint
 /// or any task. Start admission and owner Git effects share the machine lock.
 fn close_sprint(
@@ -1023,10 +1187,7 @@ fn close_sprint(
     product: &mut Value,
     lock: &Lock,
 ) -> Result<Value> {
-    let index = product["sprints"]
-        .as_array()
-        .and_then(|sprints| sprints.iter().position(|s| s["id"] == p["sprintId"]))
-        .ok_or_else(|| refuse("unknown_sprint", "Unknown sprint."))?;
+    let index = super::sprint_live::sprint_index(product, project, string(p, "sprintId")?)?;
     if p["confirmed"] != true {
         return Err(refuse("confirmation_required", "Confirm before closing the sprint."));
     }
@@ -1037,13 +1198,26 @@ fn close_sprint(
     let id = string(sprint, "id")?;
     let mut members = std::collections::BTreeSet::new();
     for member in sprint["taskIds"].as_array().ok_or_else(invalid_sprint_members)? {
-        members.insert(member.as_str().ok_or_else(invalid_sprint_members)?);
+        let member = member.as_str().filter(|id| super::sprint_live::identity(id))
+            .ok_or_else(invalid_sprint_members)?;
+        if !members.insert(member) {
+            return Err(invalid_sprint_members());
+        }
     }
     let mut reverse_only = Vec::new();
     for (task, record) in product["tasks"].as_object().ok_or_else(invalid_sprint_members)? {
         if record["sprintId"] == id && record["purged"] != true && members.insert(task) {
+            if !super::sprint_live::identity(task) {
+                return Err(invalid_sprint_members());
+            }
             reverse_only.push(json!(task));
         }
+    }
+    if product["sprints"].as_array().into_iter().flatten().filter(|s| s["id"] != id)
+        .any(|s| s["taskIds"].as_array().into_iter().flatten()
+            .filter_map(Value::as_str).any(|member| members.contains(member)))
+    {
+        return Err(invalid_sprint_members());
     }
 
     // Board status may be runtime-derived, so a missing saved status alone is
@@ -1057,9 +1231,40 @@ fn close_sprint(
             context::owner_closed(&store, project, &mut current)?;
             let root = store.key().root().to_string_lossy();
             store.read(|db| {
+                let registered: Option<String> = db.query_row(
+                    "SELECT project_root FROM workspace_projects WHERE project_id=?",
+                    [project], |r| r.get(0),
+                ).optional()?;
+                if registered.as_deref().is_some_and(|path| path != root.as_ref()) {
+                    return Err(cortex_core::CoreError::Refused("project_context_conflict"));
+                }
                 for &task in &members {
-                    if let Some(fact) = cortex_core::projections::task_records(db, project, &root, task)? {
-                        facts.insert(task, fact);
+                    if let Some(mut fact) = cortex_core::projections::task_records(db, project, &root, task)? {
+                        let start_mismatch: bool = db.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM workspace_starts WHERE task_id=?1
+                             AND (project_id!=?2 OR execution_id IS NOT ?3
+                                  OR state NOT IN ('claimed','dispatched')))",
+                            (task, project, fact.execution_id.as_deref()), |r| r.get(0),
+                        )?;
+                        if start_mismatch {
+                            fact.warnings.push("contradictory_evidence".into());
+                        }
+                        let mut settled = true;
+                        let mut completion = None;
+                        if let Some(binding) = &fact.draft_binding {
+                            let runtime = &binding.runtime_task_id;
+                            settled = match super::task_lifecycle::settled(db, store.key().root(), project, task)
+                                .and_then(|()| cortex_core::lifecycle::automatic::require_settled_execution(db, runtime))
+                            {
+                                Ok(()) => true,
+                                Err(cortex_core::CoreError::Refused(_)) => false,
+                                Err(error) => return Err(error),
+                            };
+                            if settled && fact.runtime_state.as_deref() == Some("COMPLETED") {
+                                completion = completed_sprint_member(db, runtime)?;
+                            }
+                        }
+                        facts.insert(task, (fact, settled, completion));
                     }
                 }
                 Ok(())
@@ -1072,34 +1277,65 @@ fn close_sprint(
     let mut rework_pending = false;
     for task in members {
         let record = &current["tasks"][task];
-        let fact = facts.get(task);
-        if record["purged"] == true {
+        let evidence = facts.get(task);
+        let fact = evidence.map(|(fact, _, _)| fact);
+        if record["purged"] == true && fact.is_none() {
             continue;
         }
         let busy = settings::idle(state, project, task, lock).err();
+        let unresolved_git = !record["merge"].is_null() && record["merge"] != false
+            || !record["conflict"].is_null() && record["conflict"] != false
+                && !matches!(record["conflict"].as_str(), Some("" | "none"))
+            || !record["prAttempt"].is_null()
+                && (record["prAttempt"]["state"] != "confirmed"
+                    || record["integration"]["method"] != "pr"
+                    || !record["prAttempt"]["url"].is_string()
+                    || record["prAttempt"]["url"] != record["integration"]["url"]);
         let rework = super::task_rework::open_rework(record);
         rework_pending |= rework;
-        let disagrees = record["closedAs"] == "unconfirmed"
+        let disagrees = record["purged"] == true || record["closedAs"] == "unconfirmed"
             || fact.is_some_and(|fact| fact.warnings.iter().any(|warning| {
                 matches!(warning.as_str(), "contradictory_evidence" | "owner_closed_unconfirmed")
             }));
         let draft = (record["status"].is_null() || record["status"] == "draft")
-            && fact.is_none_or(|fact| fact.execution_id.is_none() && fact.phase == "not_started");
+            && fact.is_some_and(|fact| fact.execution_id.is_none() && fact.phase == "not_started");
+        let done = record["status"] == "done";
+        let owner_closed = done && record["doneAt"].as_u64().is_some()
+            && (record["closedAs"] == "cancel"
+                || matches!(record["closedAs"].as_str(), Some("as_is" | "external"))
+                    && record["notVerifiedByCortex"] == true);
+        let completion = evidence.and_then(|(_, _, completion)| *completion);
         let reason = if !record["sprintId"].is_null() && record["sprintId"] != id {
             Some("membership changed; refresh the sprint")
         } else if rework {
             Some("returned for rework and not closed")
         } else if let Some(busy) = &busy {
             Some(busy.message.as_str())
+        } else if unresolved_git {
+            Some("a merge or pull request has an unresolved outcome")
         } else if disagrees {
             Some("task records disagree")
-        } else if !record.is_object() && fact.is_none() {
-            Some("task details could not be read")
-        } else if record["status"] != "done" && !draft {
+        } else if fact.is_none() {
+            Some(if done { "task completion could not be confirmed" } else { "task details could not be read" })
+        } else if !done && !draft {
             Some("started but not done")
+        } else if evidence.is_some_and(|(_, settled, _)| !settled)
+            || done && fact.is_some_and(|fact| {
+                fact.execution_id.is_some()
+                    && (fact.draft_binding.is_none()
+                        || !matches!(fact.runtime_state.as_deref(), Some("COMPLETED" | "CANCELLED" | "FAILED" | "PAUSED")))
+            })
+        {
+            Some("execution or its effects have not settled")
+        } else if done && !owner_closed && completion.is_none() {
+            Some("missing or unsuccessful checks for this result")
         } else {
             if record["archive"].is_null() {
-                eligible.push((task.to_owned(), draft));
+                eligible.push((
+                    task.to_owned(),
+                    draft,
+                    completion == Some(SprintCompletion::OwnerAcceptedUnverified),
+                ));
             }
             None
         };
@@ -1119,7 +1355,7 @@ fn close_sprint(
     let at = now_ms();
     let archive_days = settings::machine(state)?["autoArchiveDays"].as_u64()
         .filter(|days| (1..=3650).contains(days));
-    for (task, draft) in eligible {
+    for (task, draft, unverified) in eligible {
         let record = &mut product["tasks"][&task];
         if !record.is_object() {
             *record = json!({});
@@ -1129,6 +1365,9 @@ fn close_sprint(
             for key in ["status", "closedAs", "doneAt", "notVerifiedByCortex"] {
                 record[key] = current["tasks"][&task][key].clone();
             }
+        }
+        if unverified {
+            record["notVerifiedByCortex"] = json!(true);
         }
         super::task_lifecycle::archive(record, at, if draft { "draft" } else { "done" });
         if !draft {
@@ -1189,12 +1428,7 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
     }
     let before = files::held(&product);
     if action == "create" {
-        let description = p["description"]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .take(32000)
-            .collect::<String>();
+        let description = p["description"].as_str().unwrap_or("");
         let mode = p
             .get("runMode")
             .map(sprint_run_mode)
@@ -1202,6 +1436,9 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
             .unwrap_or("manual");
         if description.trim().is_empty() {
             return Err(refuse("invalid_sprint", "Describe the sprint first."));
+        }
+        if description.chars().count() > 32_000 {
+            return Err(refuse("invalid_sprint", "Describe the sprint in at most 32,000 characters."));
         }
         let id = format!("sp_{}", settings::unique());
         let mut sprint = json!({"id":id,"projectId":project,"description":description,"title":null,"runMode":mode,
@@ -1297,8 +1534,6 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
                 "queueState",
                 "pauseReason",
                 "settings",
-                "planningTaskId",
-                "planningRun",
                 "taskRoute",
                 "checkout",
             ]
@@ -1308,6 +1543,37 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
                 "invalid_sprint",
                 "That sprint change is not supported.",
             ));
+        }
+        if !sprint["materializedVersion"].is_null()
+            && ["planning", "plan", "history", "materializedVersion", "taskIds", "planningTaskId", "planningRun"]
+                .iter()
+                .any(|key| patch.get(*key).is_some_and(|value| value != &sprint[*key]))
+        {
+            return Err(refuse("sprint_started", "The materialized plan is read-only."));
+        }
+        if (sprint["plan"].is_object() || patch.contains_key("plan"))
+            && (patch.contains_key("materializedVersion") || patch.contains_key("taskIds")
+                || patch.get("planning") == Some(&json!("created")))
+        {
+            return Err(refuse("invalid_sprint", "Create the plan's tasks with the materialize action."));
+        }
+        if let Some(plan) = patch.get("plan") {
+            let next = sprint["plan"]["version"].as_u64().unwrap_or(0).checked_add(1);
+            let mut history = sprint["history"].as_array().cloned().unwrap_or_default();
+            history.push(plan.clone());
+            if next.is_none() || plan["version"].as_u64() != next || patch.get("history") != Some(&json!(history)) {
+                return Err(refuse("stale_plan", "The sprint plan changed. Refresh before editing it."));
+            }
+            crate::native_driver::sprints::check_tasks(&plan["items"], true)
+                .map_err(|error| refuse(error.code, error.detail))?;
+            super::sprint_materialize::validate_items(&plan["items"])?;
+            for item in plan["items"].as_array().into_iter().flatten() {
+                if let Some(checkout) = item.get("checkout").filter(|checkout| !checkout.is_null()) {
+                    sprint_checkout(checkout)?;
+                }
+            }
+        } else if patch.contains_key("history") {
+            return Err(refuse("invalid_sprint", "Plan history changes require a new plan version."));
         }
         if let Some(checkout) = patch.get("checkout") {
             let next = sprint_checkout(checkout)?;
@@ -1359,13 +1625,12 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
             if !(next == "cancelled" && sprint["planning"] == "cancelled" && change_required) {
                 let retry = next == "planning"
                     && (sprint["planning"] == "cancelled" || sprint["planningRetry"] == true)
-                    && sprint["planningTaskId"].is_string()
-                    && !patch.contains_key("planningTaskId");
+                    && sprint["planningTaskId"].is_string();
                 let saved = sprint.as_object_mut().unwrap();
                 for key in ["planningAttempt", "planningFailure", "planningRetry"] {
                     saved.remove(key);
                 }
-                if next != "planning" || patch.contains_key("planningTaskId") {
+                if next != "planning" {
                     saved.remove("planningLimitRetry");
                 }
                 if retry {
@@ -1442,8 +1707,12 @@ pub fn sprint(state: &Path, project: &str, p: &Value, root: Option<&Path>) -> Re
     } else if action == "note" {
         let items = p.get("attachments").cloned().unwrap_or_else(|| json!([]));
         files::checked_references(state, &items)?;
+        let text = p["text"].as_str().unwrap_or("");
+        if text.chars().count() > 32_000 {
+            return Err(refuse("invalid_sprint", "Send a planning note of at most 32,000 characters."));
+        }
         let mut note = json!({
-            "kind":p.get("kind").cloned().unwrap_or_else(||json!("note")),"text":p["text"].as_str().unwrap_or("").chars().take(32000).collect::<String>(),
+            "kind":p.get("kind").cloned().unwrap_or_else(||json!("note")),"text":text,
             "at":now_ms(),"attachments":items});
         // A planner question keeps its answer choices as selectable options,
         // with Python planning_jobs' bounds (at most 12 non-blank, <=500 chars).

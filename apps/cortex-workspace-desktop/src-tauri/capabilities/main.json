@@ -7,6 +7,9 @@
   ],
   "permissions": [
     "allow-workspace-request",
+    "allow-workspace-history-open",
+    "allow-workspace-history-next",
+    "allow-workspace-history-close",
     "allow-workspace-notify",
     "allow-workspace-open-result-target",
     "allow-workspace-close",

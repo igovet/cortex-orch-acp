@@ -232,9 +232,10 @@ describe.each(ANSWERERS)("$name: an answer", f => {
 
 it("keeps the place Answer scrolled to: the following feed does not take it back", async () => {
   const { box, g, pill } = await feedOf(FEEDS[0], { asking: true });
-  const card = box.querySelector<HTMLElement>(".dc")!;
-  card.scrollIntoView = () => { g.top = 700; };
+  const option = box.querySelector<HTMLElement>(".conversation-actions .dc button[role=radio]")!;
+  option.scrollIntoView = () => { g.top = 700; };
   [...document.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Answer")!.click(); await settle();
+  expect(document.activeElement).toBe(option);
   scrolled(box); await settle();
   expect(g.top).toBe(700); expect(pill()?.textContent).toBe("Latest");
   // Later, with no input, content grows and the engine reports a scroll: the reader is still at the card.

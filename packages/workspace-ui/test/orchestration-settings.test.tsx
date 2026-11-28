@@ -253,6 +253,12 @@ describe("orchestration settings, organised as the Cortex settings panel", () =>
   it("Routing: shows its groups in the panel's order, and the writer's ladder follows complexity", async () => {
     await open(`${M}/orchestration/routing`);
     expect(all(".set-in > .set-grp").map(g => g.id)).toEqual(["set-files", "set-policy", "set-roles", "set-kinds", "set-quota", "set-deny", "set-router"]);
+    const labels = all("#set-roles .ws-group").map(el => el.textContent);
+    expect(labels).toEqual(["New plan nodes", "Runtime stages", "Retained roles from earlier plans"]);
+    const planRows = all("#set-roles .ws-group")[0];
+    expect(planRows.nextElementSibling?.textContent).toContain("General");
+    expect(planRows.nextElementSibling?.nextElementSibling?.textContent).toContain("ExplorerRead-onlyInvestigationLow: Light, normal: Standard, high: Deep");
+    expect(planRows.nextElementSibling?.nextElementSibling?.nextElementSibling?.textContent).toBe("Runtime stages");
     const writer = all(".gr.orrow").find(r => r.textContent?.includes("Technical Writer"))!;
     expect(writer.textContent).toContain("Low: Light, normal: Standard, high: Deep");
     expect(button("Pin: Technical Writer")?.textContent).toBe("Pin…");

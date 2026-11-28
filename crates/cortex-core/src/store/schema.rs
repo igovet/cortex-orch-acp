@@ -182,7 +182,9 @@ pub fn install(db: &Connection) -> CoreResult<()> {
         db.execute_batch(&format!("DROP TRIGGER {name};"))?;
     }
     db.execute_batch(SQL)?;
+    super::open_commands::install(db)?;
     db.execute_batch(crate::workspace::worktrees::SCHEMA)?;
+    db.execute_batch(crate::workspace::worktrees::assignments::SCHEMA)?;
     db.execute_batch(super::owner_file_leases::SCHEMA)?;
     for (t, c, d) in [
         (

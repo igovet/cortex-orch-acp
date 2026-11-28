@@ -778,7 +778,9 @@ tree, so Git control files inside it are not separately protected:
 | The checkout's `.git` (data and control files) | writable | denied |
 | A linked worktree's common Git directory outside the checkout | read-only (linked-worktree commands are read-only) | denied |
 | The project's `.git` for reviewers and read-only roles | read-only | denied |
-| `.cortex`, `.cortex-dev` | hidden outside a writer's checkout; inside it the live store files (`cortex.sqlite3`, `-wal`, `-shm`, `-journal`, `.*.lock`) are sealed by the argv check (`cortex_live_store`) in Guarded and Development only; an unscoped Auto `command_run` runs directly on the host and is not sealed | allowed on request (Auto allows, others ask); live store files refused in Guarded and Development, but admitted by the gateway in Auto (`native_access.rs`) |
+| Release and Dev home store roots | masked by isolated profiles; an unscoped Auto `command_run` runs as the owner on the host | native requests identify the database, sidecars and lock files as live-store targets; direct writes to the live home database are refused |
+| Project `.cortex`, `.cortex-dev` marker and legacy directories | hidden outside a writer's checkout; inside the checkout the existing argv check protects declared live store targets in Guarded and Development | private paths follow the access-mode decision; project gateway writes, edits and deletions refuse live-store names in every mode |
+| Project-side migration backups | hidden in isolated profiles, including within an open write grant | private paths follow the access-mode decision |
 | The Dev owner and workspace state files | hidden for read-only roles | denied |
 | The project's `.codex`, `.claude`, `.agents`, `.github` | writable subject to grants | ordinary project file rules (see also [Project skill links](#project-skill-links)) |
 | Tool state in the project (`.venv`, `node_modules/.cache`, `target/`, `build/`, ...) | writable | allowed (ordinary project files) |

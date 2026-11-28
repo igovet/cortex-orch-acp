@@ -383,6 +383,14 @@ fn only_overlapping_writer_scope_waits_for_owner_lease() {
         activate_editor_tx(db, &epoch)?;
         acquire_tx(db, owner, &root, &file)
     }).unwrap();
+    let plan = json!({"tasks":[
+        {"id":"writer","role":"worker-backend-dev","scope":["owner.txt"],"dependencies":[]},
+        {"id":"reader","role":"worker-qa-engineer","read_only":true,"scope":["owner.txt"],"dependencies":[]}
+    ]});
+    assert_eq!(
+        s.read(|db| cortex_core::scheduler::policy::plan_scope_warnings(db, "t", &plan)).unwrap(),
+        vec![json!({"reason":"owner_file_lease_held","node":"writer","paths":["owner.txt"]})]
+    );
     assert_eq!(
         claim_ready(&s, "t", &o, "c", &NativePolicy::default())
             .unwrap()

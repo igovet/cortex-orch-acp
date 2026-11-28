@@ -145,6 +145,9 @@ describe("the fields that grow", () => {
     expect(box.dataset.grow).toBe("");
     box.value = "two\nlines"; box.dispatchEvent(new Event("input", { bubbles: true }));
     box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }));
+    box.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    box.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
     expect(send).not.toHaveBeenCalled();
     box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     expect(send).toHaveBeenCalledWith("two\nlines", []);

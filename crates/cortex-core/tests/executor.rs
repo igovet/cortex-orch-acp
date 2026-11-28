@@ -432,7 +432,6 @@ async fn grouped_writes_fail_alone_reply_after_commit_and_never_block_reads() {
 /// is back at FULL after a relaxed commit.
 #[tokio::test]
 async fn deferred_rows_alone_commit_relaxed_and_everything_else_full() {
-    use std::time::Duration;
     let p = Project::new();
     let executor = StoreExecutor::open(p.key()).unwrap();
     let level = |db: &rusqlite::Transaction<'_>| -> cortex_core::CoreResult<i64> {
@@ -447,28 +446,41 @@ async fn deferred_rows_alone_commit_relaxed_and_everything_else_full() {
         .await
         .unwrap()
         .unwrap();
+    let signal = p.key().commit_signal();
     executor
         .write_deferred(move |db| {
             db.execute("INSERT INTO durability VALUES ('deferred alone', ?)", [level(db)?])?;
             Ok(())
         })
         .unwrap();
-    tokio::time::sleep(cortex_core::store::executor::DEFER_WINDOW + Duration::from_millis(250)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), signal.notified())
+        .await
+        .unwrap();
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let blocker = executor
+        .publication(move |_| {
+            entered.send(()).unwrap();
+            gate.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    observed.await.unwrap();
     executor
         .write_deferred(move |db| {
             db.execute("INSERT INTO durability VALUES ('deferred before a write', ?)", [level(db)?])?;
             Ok(())
         })
         .unwrap();
-    executor
+    let write = executor
         .write(move |db| {
             db.execute("INSERT INTO durability VALUES ('write', ?)", [level(db)?])?;
             Ok(())
         })
-        .unwrap()
-        .await
-        .unwrap()
         .unwrap();
+    release.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    write.await.unwrap().unwrap();
     executor
         .publication(move |store| {
             store.write(|db| {

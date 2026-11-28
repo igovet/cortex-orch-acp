@@ -32,7 +32,8 @@ release path. Existing configuration is not copied or migrated across channels.
 | Engine-native state and catalog snapshots | `$XDG_STATE_HOME/cortex/connections/<id>/...` or `~/.local/state/cortex/...` | User-wide mutable state, separate from configuration. |
 | Paseo launch record | `$XDG_CONFIG_HOME/cortex/paseo-plugin-launch.json` or `~/.config/cortex/paseo-plugin-launch.json` | Owner-private non-secret command, environment and shim metadata written by the setup helper in the environment it describes. A Paseo instance with its own `XDG_CONFIG_HOME` (such as the isolated dev daemon) has its own record and does not use another instance's `~/.config` record. |
 | ssh password dialog (optional, off) | `$XDG_CONFIG_HOME/cortex/ssh-askpass.json` | User-wide, written by hand. See [ssh from workers](#ssh-from-workers). |
-| Task and report store | `<project>/.cortex/cortex.sqlite3` and sibling published Markdown | Project data, not operator configuration. |
+| Worker concurrency | `CORTEX_WORKER_LIMIT` in the runtime process environment | Optional per-task worker ceiling from one to four, with four as the default and hard cap. See [worker scheduling](features/task-lifecycle/index.md#worker-scheduling). |
+| Task and report store | `$XDG_STATE_HOME/cortex/projects/` for Release and the separate Workspace Dev state root | Per-project SQLite and published Markdown. See [channel paths](project/storage.md#where-the-database-lives-and-how-it-moves). |
 
 Workspace's `project.config.read` editor now reads project routing and the saved project ceiling in Rust, with unchanged editor fields and revision tokens. It never substitutes user/environment routing for an absent project override or initializes a missing store. Pre-save MCP discovery (`config.mcp.discover`) now lists tools through a contained Rust subprocess without saving a server or invoking a tool. Project saves (`project.config.save`) now also run in Rust, retaining revision conflicts, aggregated validation, routing bytes and project-default-preserving ceiling transactions. Machine-wide saves and the selected metadata/profile/reset actions now also run in Rust; unqualified activation/preset shapes and unported setup/catalog/keyring producers retain Python; see the [native machine boundary](cortex-workspace/local-task-execution.md#native-machine-boundary).
 
@@ -122,41 +123,14 @@ unknown writes do not clean up or replay. A further immutable 36-case capture
 covers Unicode boundaries, install failures, private-write/validation failures and
 fake-keyring validation. Eight injected failure cases compare complete replies,
 configuration effects and write sequences in native units; the other 28 compare
-at the socket. Valid keyring-reference cases retain their Python provider and compare exact fake
-lookup sequences (including absent, empty, present and unavailable cases);
-stale-revision refusals are native and never look up the backend; malformed keyring identifiers refuse natively before any lookup. Only
+at the socket. The former runtime's fake-keyring cases are historical captures. Unsupported keyring validation is refused. Only
 validated generated IDs/timestamps and trusted host paths are rebound;
 trust fingerprints are checked before rebinding. No real keyring, account, engine
 download or installed application is qualified by these offline checks.
 
 ### Native machine actions
 
-Machine `config.action` selects Rust for connection rename, session-limit edits
-and confirmed default-preset reset, plus profile read/create/save/update/delete/
-deactivate, qualified four-section activation/preset apply, filesystem-backed
-connection validation and connection removal
-on the bounded action lane. Other variants retain Python. Provider selection
-happens before native admission, never after a failed or partially executed native
-action. Unported working workflows keep their existing provider; a changed credential
-shape after native admission refuses without replay.
-
-| Action | Current provider and preserved behavior |
-| --- | --- |
-| `connection_update` / `rename` | Rust; exact-revision metadata edit; 1–120 printable characters, retaining whitespace. |
-| `connection_update` / `set_max_concurrent_sessions` | Rust; exact-revision metadata edit; integer 1–64, never a boolean. |
-| `connection_update` / `validate` | Rust for filesystem references: canonical/collision checks and metadata-only state derivation; keyring-backed validation retains Python for valid requests. Stale-revision refusals are native and never look up the backend; an unavailable provider refuses without changing credential state. No fingerprint approval or credential-byte read. |
-| `connection_update` / `remove` | Rust: registry/history deletion, engine opt-out and default-route note; canonical owned regular single-link secret files are unlinked without reading bytes. Native directories/keyring entries are untouched. Unsupported defaults documents retain Python before admission. |
-| `apply_default_preset` | Rust for absent/public-payload backing files (also empty-object routing) and a valid connection registry; absent-only seeding including conditional default-profile capture. Other existing documents retain Python diagnostic behavior. Existing profiles, even malformed, are never overwritten. |
-| `reset_default_preset` | Rust; literal confirmation, freshly observed pair revision, private backups and in-process rollback. |
-| `refresh` | Rust for the prelaunch subset and qualified Codex/Claude native-account or secret-file launches, including qualified two-argument Codex/Claude installs, [described below](#native-launch-capable-catalog-producer). These observe without prompts and publish immutable snapshots. Unqualified Codex installs, OpenCode, keyrings, missing locks and unqualified roots/projections retain the whole Python request before effects. |
-| `install_engine` | Rust for every Codex/Claude request and the pre-effect refusals (unsupported engine; OpenCode needs its native installer). It installs only the manifest pin from `pinned-dependencies.json`, [described below](#native-pinned-engine-install). Python is kept before any effect only when an OpenCode binary candidate exists (its version probe in the reply runs in the namespace sandbox), a native login marker is not projectable, or the connection registry does not parse. |
-| `onboard_opencode` | Rust for the pre-effect refusals (missing `explicit_opt_in`, invalid `expected_revision` or `name`) and, when no OpenCode binary candidate exists, for the owner-lock and revision check followed by the retained `opencode_not_found` refusal. With a candidate (`~/.opencode/bin/opencode` or `opencode` on PATH) the request keeps Python: discovery runs the binary's version probe in a network-less namespace sandbox, then verification, registration and a catalog refresh follow. |
-| `profile` / `read`, `create`, `save`, `update`, `delete`, `deactivate` | Rust; complete snapshot reads, revision-locked capture/metadata/selection, format-1 backup/migration and verified deletion. `update` implements rename and description editing. |
-| Wider profile numbers | Rust for ignored top-level document metadata (including nested arrays/objects), with exact integers and Python-normalized nonfinite/overflowing floats. Wider modeled fields, all backing files and numeric tokens over 4,300 bytes retain Python before admission. |
-| `profile` / `activate` | Rust for qualified format-1/2 profiles and any subset of routing, defaults/ceiling, MCP usage policy and connection limits, including all four. Pending journal, four revision checks, modification/discard/recovery and installed-definition preservation remain. Unqualified/malformed backing documents retain Python. Routing activation still requires integer model-policy version 2; the current Python implementation rejects missing/other versions too. Those refusal shapes retain Python. |
-| `profile` / unknown verb | Rust: `unsupported_action` naming the verb with Python `repr` (`None`, `True`/`False`, integers, ASCII strings); a list/object verb is Python's `machine_tool_failed`/`TypeError` reply. A float or non-ASCII verb keeps Python: the socket's JSON parser loses the float literal, and non-ASCII escaping needs Unicode printability. |
-| `connection_update` / other operation | Rust: revision syntax, connection id, then `unsupported_operation`, in Python's order. |
-| Unknown/missing action | Rust: `unsupported_action` ("This machine does not support that yet."); a list/object action is `machine_tool_failed`/`TypeError`; truthy non-object params answer the `machine_tool_failed` RPC error. |
+Machine `config.action` dispatches inside the Rust service. It supports connection edits, validation and removal, preset apply/reset, profile operations, catalog refresh, pinned engine installation and OpenCode onboarding. Each handler validates its own input and returns an explicit refusal when it cannot proceed. The installed machine never starts a helper for unsupported configuration. See the [dispatcher](../crates/workspace-service/src/machine/config_action.rs) and [Paseo Settings adapter](../crates/workspace-service/src/machine/settings_api.rs).
 
 #### Native pinned engine install
 
@@ -211,9 +185,7 @@ The recorded capture `crates/workspace-service/tests/fixtures/config-catalog-ref
 holds 21 cases recorded without processes, network or keyring access (its Python generator was removed and the capture can no longer be reproduced). Socket tests
 compare complete replies and complete configuration/home/catalog trees and modes;
 19 admitted cases require zero helper calls, two retained cases exactly one.
-The additional launch-capable boundary is described next. Installer and OpenCode
-onboarding requests outside the pre-effect refusals, and valid keyring-backed validation, still retain Python.
-**Settings still routes unported actions to the lazy Python provider.**
+The additional launch-capable boundary is described below.
 
 #### OpenCode pre-probe rejection
 
@@ -221,7 +193,7 @@ The native prelaunch subset also rejects OpenCode commands whose nonempty,
 absolute, NUL-free argv cannot resolve an install before any version probe:
 wrong arity/subcommand, absent binary, noncanonical path, known untrusted
 codeg root, nonregular/nonexecutable binary, or binary ownership/write-mode
-rejection. Metadata/I/O cases outside this classifier retain Python. The shared
+rejection. Other metadata and I/O cases may return a refusal. The shared
 owner lock, registry-byte fences and qualified cached projection still apply.
 These are failed attempts (`engine_unreachable:PortableError`, or the existing
 read-only-home classification), not successful install/version observations.
@@ -307,9 +279,8 @@ are reused. Unsafe leaves are not followed, and an uncertain write never retries
 or switches providers. A missing/relocated service executable cannot run the
 artifact; a subsequent qualified refresh regenerates its absolute interpreter
 path. Unsupported interpreter paths (whitespace/non-ASCII or a shebang longer
-than 255 bytes) retain Python before effects. The preexisting bundled-binary
-path restrictions still apply. This removes the launcher dependency for the
-qualified catalog slice, not the retained Python engine/session or Settings paths.
+than 255 bytes) refuse launcher creation. The preexisting bundled-binary
+path restrictions still apply.
 
 39 actual native/Python execution comparisons use allowlisted native fake peers
 in disposable roots, with no Python on the native launcher's PATH. They cover
@@ -321,8 +292,7 @@ replies and transcripts remain compared unchanged.
 `timeout 90 cargo test --locked --offline -p workspace-service --test codex_launcher`
 runs the launcher execution comparisons.
 Package candidates outside canonical regular/matching-bin/size bounds, non-ASCII
-or control-bearing bundled-binary paths and unsafe existing artifact state retain
-the whole Python request. Existing connection-state ancestors may be owner-owned
+or control-bearing bundled-binary paths and unsafe existing artifact state refuse before unsafe launch. Existing connection-state ancestors may be owner-owned
 0755, matching Python's parent creation beneath the private Cortex state root;
 private adapter directories and files remain 0700/0600.
 
@@ -342,8 +312,7 @@ Model names/descriptions and original model identities remain unchanged.
 Config/state parents must exist as real directories; existing Cortex roots must
 be private and outside project Git trees (the home-dotfiles exception remains).
 Conflicting ignore files, credential-path collisions, missing private owner locks,
-unsafe secret parents or unqualified cached projections retain the whole Python
-request before effects.
+unsafe secret parents or unqualified cached projections refuse before unsafe launch.
 
 The producer uses a private disposable empty workspace, a fixed environment
 allowlist and only registered argv. It sends `initialize` and `session/new`,
@@ -380,19 +349,7 @@ explicitly bound before normalization. Failed outcomes and terminal exit codes
 are not normalized into success. Unicode tables and the former Python normalization/label
 vectors are recorded in `crates/workspace-service/tests/fixtures/catalog-unicode-python.json` (its generator was removed).
 
-**Remaining boundary:** unqualified Codex/Claude package candidates (including verifier-dependent
-Codex installs, unresolvable Claude packages and other Codex platforms),
-all potentially usable OpenCode launch/verified-install/jail/version/provider/config/mode
-paths (apart from the metadata-only pre-probe rejections above), OS-keyring launches,
-other auth/reference combinations, unsafe names/roots, missing locks and
-unqualified projections keep Python before effects. Claude same-name models
-without observed efforts still refuse after observation without replay.
-Finite captures do not prove universal malformed/noisy transport parity.
-Installer/onboarding requests outside the pre-effect refusals, valid OS-keyring validation, custom-document preset apply,
-unsupported removal-default documents, wider modeled/backing-file profile
-numbers or over-bound tokens, unqualified activation documents and unknown
-actions/verbs still use the lazy Python Settings provider.
-This is not the completed Settings migration.
+The launch-capable producer requires a supported engine, an admitted credential reference, a valid candidate and qualified storage. It returns an explicit refusal or failed observation if these requirements are unavailable. For OpenCode, see the [current Rust launch boundaries](features/opencode-engine/index.md#current-rust-launch-boundaries).
 
 Native metadata edits retain canonical registry bytes, omitted-field normalization,
 sorted opt-outs and arbitrary numeric history, including large integers, floating
@@ -451,10 +408,9 @@ revision is rechecked. Unlike the retained two-lock wrapper, native admission ho
 the same owner lock through revision checking, derivation and replacement; this
 closes its intervening writer race without weakening the revision fence. Only
 representable defaults documents are admitted for native removal; malformed or
-unsupported defaults keep their Python behavior. Private-file/reply limits still
+unsupported defaults are refused. Private-file/reply limits still
 fail closed. Pre-commit failure preserves registry bytes; post-replacement uncertainty
-never rolls back by guess, delegates or retries. Valid keyring validation remains a separate Python workflow with unchanged backend policy (stale-revision refusals are native);
-API-key creation uses the native workflow described above. Secret removal now uses descriptor-relative metadata and
+never rolls back by guess, delegates or retries. Keyring validation can refuse without reading the backend. API-key creation uses the native workflow described above. Secret removal now uses descriptor-relative metadata and
 unlink, never opening credential contents. A linked/public parent refuses; leaf
 links, directories, multi-link files and noncanonical references are not deleted.
 Deletion still precedes registry replacement, as in Python: there is no secret
@@ -474,9 +430,7 @@ falls back or replays. Backup-name collisions refuse. Private-file/reply bounds
 fail closed. Wider numeric metadata in ignored top-level profile-document keys is
 preserved natively, including nested values, without rounding. It is not a modeled
 setting and never enters a reply as a numeric surrogate. Wider numbers in modeled
-fields/backing files or tokens over 4,300 bytes still select Python passively. If a
-file changes into an unqualified numeric shape after admission, the locked parser
-refuses rather than rounding or replaying.
+fields or backing files can be refused. The locked parser refuses unqualified numeric shapes.
 
 The two recorded captures `config-profiles-python.json` and `config-profiles-edges-python.json` (under `crates/workspace-service/tests/fixtures/`; their Python generators were removed) retain 125
 cases, including success, refusal, interrupted selection, format-1 migration,
@@ -495,8 +449,7 @@ connection limits change without validating accounts, and missing connections pr
 notes. Format-1 journal publication is backed up and verified before backing writes.
 A known backing failure restores earlier completed writes in reverse order and clears
 pending best-effort. Unknown writes, failed rollback or finalization stay interrupted/
-unknown without replay. Missing/other routing model-policy versions are rejected by
-current Python, not silently migrated; their existing provider is retained.
+unknown without replay. Activation rejects missing or unsupported routing model-policy versions.
 
 Three additional immutable recorded captures cover 19 preset-apply, 24 routing-only
 activation and 12 secret-removal cases:
@@ -511,8 +464,7 @@ Additional immutable recorded captures are `config-activate-full-python.json` (i
 `config-activate-materialize-python.json` (valid four-section materialization)
 and `config-profiles-wide-python.json` (wider ignored metadata and bound-route
 activation), recorded from the former Python implementation (the generators were removed). The socket compares full replies,
-file bytes/modes and backup directories, with zero helper calls for every admitted
-case; separately retained policy/malformed-document refusals call Python once.
+file bytes/modes and backup directories. Unsupported policy or malformed documents can be refused by the Rust handler.
 
 Preset apply uses complete private temporary inodes and no-replace hard-link
 publication under the owner lock. It never repairs/replaces existing files. Its
@@ -628,7 +580,7 @@ defaults, routing, profiles, MCP servers, connections, the project ceiling, the
 default preset, model-list refresh, engine discovery, onboarding and download. It
 uses the owner's configuration lock and revision checks, writes the same files as
 the Python launch, and does not write Workspace-specific defaults. Plugin activation
-runs its native automatic setup. A few shapes only the Python provider can answer
+runs its native automatic setup. Some unsupported shapes
 (an OS-keyring connection check, an installed OpenCode binary's version probe, a
 model-list refresh for an engine with no qualified native catalogue producer) refuse
 with `config_api_unavailable` and say why; nothing is changed. See
@@ -650,7 +602,7 @@ The API is intentionally closed rather than a general JSON editor. It patches su
 
 OpenCode v2 discovery is read-only. Onboarding requires an explicit opt-in and registers the existing owner login only; it does not copy credentials or enable automatic routing. Routing remains excluded unless the owner separately configures an exact OpenCode route under the supported routing rules. See [OpenCode adapter](features/opencode-engine/index.md#onboarding).
 
-The **Engines: download and connect** group under Connections shows installed/login/connection state and automatic setup progress, polling every three seconds while mounted. Plugin or agent startup runs one background pass: download Cortex-owned pinned Codex and Claude adapters, register missing native-account connections when a login marker exists, then observe models immediately without a model prompt. Existing connections are not replaced. Removing a connection atomically records its engine in `connections.json`'s optional `auto_connect_disabled` list, preventing automatic recreation, including a concurrent startup. **Add connection** can restore it explicitly with the opt-in switch, current revision, qualified installed adapter and native login marker. **Download engine** remains a manual retry. These actions accept no key, path, command or version. `opencode` stays manual through **Enable OpenCode v2**; Cortex never downloads or automatically registers it. A login marker is only an existence check, not verified authentication; **Validate** checks connection state and model discovery can still fail. A failed model discovery retains the connection and previous catalogue; use **Refresh model lists** to retry. API-key connections remain setup-command only.
+The **Engines: download and connect** group under Connections shows installed/login/connection state and automatic setup progress, polling every three seconds while mounted. Active progress and the last retained outcome have distinct labels. The last failure or interruption appears alongside the currently observed adapter and connection state. A recorded failure can include its stage and a safe diagnostic. Plugin or agent startup runs one background pass: download Cortex-owned pinned Codex and Claude adapters, register missing native-account connections when a login marker exists, then observe models immediately without a model prompt. Existing connections are not replaced. Removing a connection atomically records its engine in `connections.json`'s optional `auto_connect_disabled` list, preventing automatic recreation, including a concurrent startup. **Add connection** can restore it explicitly with the opt-in switch, current revision, qualified installed adapter and native login marker. **Download engine** remains a manual retry. These actions accept no key, path, command or version. `opencode` stays manual through **Enable OpenCode v2**; Cortex never downloads or automatically registers it. A login marker is only an existence check, not verified authentication; **Validate** checks connection state and model discovery can still fail. A failed model discovery retains the connection and previous catalogue; use **Refresh model lists** to retry. API-key connections remain setup-command only.
 
 Connections polls retain mounted rows, pending input and removal confirmation; surviving rows keep their order, and new connections are appended. Structurally unchanged reads do not update client state. Failed background reads retain last known connections/engine status with a visible warning and retry controls; they do not clear save conflicts or retry writes. Explicit conflict reload still discards edits.
 
@@ -781,9 +733,9 @@ The
 project registry, routes, settings and socket are separate from the persistent
 Dev installation. The package's adjacent `engines` and `voice` trees still
 supply its bundled assets. Verify archive identity and contents separately:
-startup validates layout, not provenance. HOME and the project-local
-`.cortex-dev` naming rule are unchanged; use a separate disposable project and
-do not copy native account files. This is not a sandbox for untrusted packages.
+startup validates layout, not provenance. The Dev store derives from the
+isolated state root, while the checkout retains its `.cortex-dev` location
+marker. Use a disposable project with the same HOME and native accounts.
 
 ### Engine install records
 
@@ -808,8 +760,8 @@ Accepted adapter versions: Codex exactly `1.12.0`, `1.13.0`, `2.0.1`, `2.1.1`, `
 
 An existing file is left unchanged even when it is malformed or from an older schema; Cortex does not repair it, merge MCP entries into it, or rename/overwrite saved profiles. If the profile registry is absent, `default` is captured only when routing, defaults and MCP usage policy still match the bundled preset; customized settings are never relabeled as an applied default. This also lets an interrupted first install finish on retry. Preset seeding never adds an engine connection.
 
-The preset includes the refreshed portable profile, with `sonnet` as the only
-Sonnet model ID. See the [routing details](#fresh-install-owner-default-snapshot).
+The portable profile enables `sonnet` and defines a disabled
+`claude-sonnet-5` entry. See the [routing details](#fresh-install-owner-default-snapshot).
 
 The MCP examples are `codebase-memory-mcp`, `playwright` (workers, no engine restriction), and `vivaldi` (workers). All start with `enabled: false`; the runtime loader excludes them before launch. Settings lists them as disabled, editable and toggleable. Commands, arguments and filesystem grants contain only `/path/to/...` examples; environment maps are empty. Registering these definitions does not install binaries or browser extensions. Install the corresponding tools, replace example paths and review grants before enabling. The named profile captures only MCP usage policy, never commands, arguments or environment values.
 
@@ -1240,7 +1192,7 @@ Reads never rewrite the source file or profile; the policy version remains 2. Th
 The schema-version-1 install snapshot copies the model, tier, effort and
 routing settings of the owner's production `default` profile and adds the
 owner's coordinator models (`coordinator_models`). It ships
-`codex-acp/gpt-6.2-sol` at `thought_level: high` as the coordinator default and
+`claude-agent-acp/opus` at `thought_level: medium` as the coordinator default and
 `language: ru`, without a mode override. The unrestricted user ceiling needs
 no explicit override. Route/connection bindings, account limits and
 machine-specific executable paths, environment values and grants are not
@@ -1249,10 +1201,11 @@ registrations and saved profiles are not replaced by seeding.
 
 | Engine / model ID | Automatic tiers | Worker effort range per tier (`tier_efforts`) | Effort floor → maximum (other tiers) | Preference |
 | --- | --- | --- | --- | --- |
-| Claude `opus` (Opus 5.5) | flagship | none | medium → xhigh | Design, planning, frontend design implementation, review, backend and frontend implementation, senior consultation |
+| Claude `opus` (Opus 5.5) | flagship, deep | none | medium → xhigh | Design, planning, frontend design implementation, review, backend and frontend implementation, senior consultation |
 | Claude `fable` | flagship | none | low → high | Design (enabled list off) |
 | Claude `haiku` | light | none | high → max | Investigation only |
 | Claude `sonnet` (Sonnet 5.5) | deep, standard, light | Deep high → xhigh; Standard medium → xhigh; Light medium → high | medium → xhigh | Backend and frontend implementation, operations, debugging, planning, analysis, review, testing, writing and frontend design implementation |
+| Claude `claude-sonnet-5` (disabled) | standard, light | Global range | medium → xhigh | Frontend and backend implementation, investigation, review, analysis, operations, writing, debugging, testing, design and planning |
 | Codex `gpt-6.2-sol` (Sol 6.2) | deep, standard | Deep high → xhigh; Standard medium → xhigh | medium → xhigh | All work kinds except design |
 | Codex `gpt-6.2-astra` (Astra 6.2) | flagship | none | low → high | Design, planning, review, frontend design implementation, backend and frontend implementation, senior consultation |
 | Codex `gpt-6-luna` | light | none | high → max | Investigation only |
@@ -1270,8 +1223,10 @@ The coordinator models, apart from those worker tiers:
 Claude and Codex are the configured providers. Claude enables `opus`,
 `haiku` and `sonnet`; `fable` stays in its automatic list but is off, as in
 production. `opencode/*` is the only deny entry and OpenCode has no enabled
-models. The four exact Claude quota windows remain; `seven_day_sonnet`
-applies to `sonnet`. Haiku and Luna retain their high/xhigh/max ladders and do
+models. `claude-sonnet-5` appears in the automatic candidate list and has
+standard and light policies. It becomes eligible only if the owner enables
+that exact ID. The `seven_day_sonnet` window maps to `claude-sonnet-5`.
+Haiku and Luna retain their high/xhigh/max ladders and do
 not stretch into standard testing. Opus and Astra carry no conditional
 `preferred_when` text, so flagship work reaches them by escalation, an
 explicit request, a `high`-complexity sprint task or a pin.

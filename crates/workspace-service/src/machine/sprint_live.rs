@@ -282,7 +282,8 @@ pub(super) fn load(
                 let record = &projected["tasks"][task];
                 let (outcome, closed) = crate::native_driver::sprints::member_disposition(record, Some(&value));
                 graph_facts.push(json!([task, status, &dependencies, draft, &value["executionId"],
-                    if draft { &value["version"] } else { &Value::Null }, outcome, closed, &record["archive"], &record["archiveHold"]]));
+                    if draft { &value["version"] } else { &Value::Null }, outcome, closed, &record["archive"], &record["archiveHold"],
+                    &record["produces"], &record["consumes"], &record["corrects"]]));
                 // Activity on a skipped member is not an input to the queue
                 // decision (a cancelled runtime may still publish late updates).
                 let skipped = !record["archive"].is_null() || !record["archiveHold"].is_null()
@@ -299,6 +300,23 @@ pub(super) fn load(
                 graph_facts.push(json!([task, status, &dependencies]));
             }
             members.push(Member {id:task.clone(), status, dependencies, draft, claim_order, checkout});
+        }
+        for member in members.iter().filter(|member| member.draft) {
+            let task = &member.id;
+            if projected["tasks"][task].get("consumes").is_none_or(|inputs| {
+                inputs.as_array().is_some_and(Vec::is_empty)
+            }) {
+                continue;
+            }
+            match cortex_core::deliverables::ready(store, db, project, task)? {
+                Ok(bindings) if !bindings.is_empty() => queue_facts.push(json!([task, "typed", bindings])),
+                Ok(_) => {}
+                Err(issue) => {
+                    let blocker = json!({"code":issue.code,"requirement":issue.requirement});
+                    queue_facts.push(json!([task, "typed", blocker]));
+                    projected["tasks"][task]["deliverableBlocker"] = blocker;
+                }
+            }
         }
         Ok(())
     }).map_err(context::core)?;
@@ -537,6 +555,7 @@ pub(super) fn owner_action(root: &Path, state: &Path, project: &str, p: &Value, 
     // replace the exact saved object, changing only the requested field.
     let path = product_path(state, project)?;
     let mut product = settings::read_json(&path, json!({"tasks":{}, "sprints":[]}))?;
+    sprint_materialize::resolve_publication(project, &mut product)?;
     let index = sprint_index(&product, project, id)?;
     let store = context::open(root, OpenMode::LiveReadOnly)?.ok_or_else(|| {
         refuse(
@@ -614,6 +633,13 @@ pub(super) fn owner_action(root: &Path, state: &Path, project: &str, p: &Value, 
                 }
                 replacement.push(predecessor.to_owned());
             } else {
+                let record = &product["tasks"][task];
+                if record["corrects"] == predecessor || record["consumes"].as_array().into_iter().flatten()
+                    .any(|entry| entry["from"] == predecessor)
+                {
+                    return Err(refuse("artifact_dependency_required",
+                        "This prerequisite supplies a declared artifact or names the execution this card corrects."));
+                }
                 replacement.retain(|d| d != predecessor);
             }
             validate_candidate(&snapshot, &product["tasks"], task, &replacement)?;

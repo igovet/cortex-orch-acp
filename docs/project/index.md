@@ -2,7 +2,7 @@
 
 Cortex is an ACP v1 stdio agent. The runtime owns lifecycle, scheduling, routes,
 permissions, independent review, verification and completion. Models propose plans,
-perform bounded assignments and submit reports. The one project-local store per channel (`.cortex` by default, `.cortex-dev` for Workspace Dev)
+perform bounded assignments and submit reports. The [private home store](storage.md#where-the-database-lives-and-how-it-moves) for each logical project and channel
 retains task metadata, immutable reports and newest-first pipeline editions.
 
 Feature behavior is documented one page per feature in the [feature index](../features/index.md).
@@ -15,6 +15,7 @@ Task conversations, sprint planning conversations and worker activity follow the
 
 - [Cortex Workspace (desktop application)](../cortex-workspace/index.md)
 - [Architecture overview](architecture.md)
+- [Adaptive worker profiles](adaptive-profiles.md)
 - [Conventions](conventions.md)
 - [Decisions](decisions.md)
 - [Gotchas](gotchas.md)

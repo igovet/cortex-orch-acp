@@ -106,6 +106,7 @@ fn safe_id(id: &str) -> CoreResult<()> {
     Ok(())
 }
 pub(crate) fn quiet(db: &Connection, task: &str) -> CoreResult<()> {
+    crate::workspace::worktrees::assignments::require_integrated(db, task)?;
     let row: Option<String> = db
         .query_row(
             "SELECT state FROM runtime_tasks WHERE task_id=?",
@@ -516,7 +517,7 @@ impl Store {
         }
         for (path, device, inode, sha, _, _) in sources {
             remove_source(
-                self.key.root(),
+                &self.key.directory(),
                 Path::new(&path),
                 device,
                 inode,

@@ -26,10 +26,10 @@ export type StoreReaderRoute =
   | { kind: "rust"; binary: string }
   | { kind: "refused"; message: string };
 
-type LaunchTarget = { argv: string[] } | undefined;
+type LaunchTarget = { argv: string[]; env?: Record<string, string> } | undefined;
 
 /** True for the Rust `cortex-acp` launch shape. */
-export function isRustLaunch(target: LaunchTarget): target is { argv: [string] } {
+export function isRustLaunch(target: LaunchTarget): target is { argv: [string]; env?: Record<string, string> } {
   return target !== undefined && target.argv.length === 1 && isAbsolute(target.argv[0])
     && !target.argv[0].includes("\0") && basename(target.argv[0]) === RUST_ACP_BINARY;
 }
@@ -54,9 +54,15 @@ export async function runStoreReader(
   args: readonly string[],
   options: { timeoutMs: number; maxBuffer?: number },
 ): Promise<StoreReadResult> {
-  const route = storeReaderRoute();
+  const launch = cortexLaunchTarget();
+  const route = storeReaderRoute(launch);
   if (route.kind === "refused") return { status: 1, stdout: "", refusal: route.message };
-  // A fixed root working directory and an empty environment: the tool
-  // needs neither, and no inherited variable can change what it reads.
-  return runProcess(route.binary, [reader, ...args], { ...options, cwd: STORE_READER_CWD, env: {} });
+  // The reader shares ACP's host-selected state root. No client fields or
+  // unrelated inherited variables influence its environment.
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of ["HOME", "XDG_STATE_HOME"] as const) {
+    const value = launch?.env?.[name] ?? process.env[name];
+    if (value !== undefined) env[name] = value;
+  }
+  return runProcess(route.binary, [reader, ...args], { ...options, cwd: STORE_READER_CWD, env });
 }

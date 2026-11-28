@@ -169,6 +169,11 @@ impl Sandbox {
         let controls = Instant::now();
         let mut read_only = policy::expand(&root, protected)?;
         let controls_paths = policy::controls(&root, &environment)?;
+        let store_roots = crate::native_store_policy::roots(&environment)
+            .map_err(|_| unavailable("invalid_control_path"))?;
+        if store_roots.iter().any(|store| root.starts_with(store)) {
+            return Err(unavailable("invalid_project_mount"));
+        }
         timings.insert("controls_ms", millis(controls));
         // The project write grants are open trees: Landlock cannot protect an entry
         // inside them without breaking files created directly in them.
@@ -182,6 +187,9 @@ impl Sandbox {
             };
             if !p.starts_with(&root) {
                 return Err(unavailable("write_grant_outside_project"));
+            }
+            if store_roots.iter().any(|store| store.starts_with(&p)) {
+                return Err(unavailable("write_grant_contains_store_root"));
             }
             project.push(p);
         }
@@ -197,6 +205,7 @@ impl Sandbox {
         }
         grants.extend(native_sandbox::devices());
         let mut hidden = native_sandbox::live_stores(&root);
+        let strict_hidden = native_sandbox::store_backups(&hidden);
         if profile == Profile::Auto {
             // The store directories are writable; their live files stay hidden.
             let dirs: Vec<PathBuf> = hidden
@@ -235,6 +244,7 @@ impl Sandbox {
                 timings.insert("secrets_ms", millis(indexed));
             }
         }
+        hidden.extend(store_roots);
         // The scratch is this preparation's only mutation; it needs live authority.
         before_write()?;
         let scratch = std::env::temp_dir().join(format!(
@@ -251,6 +261,7 @@ impl Sandbox {
             open_writes: if profile == Profile::Auto { Vec::new() } else { project },
             read_only,
             hidden,
+            strict_hidden,
         });
         timings.insert("rules_ms", millis(ruled));
         let rules = match rules {
@@ -806,6 +817,61 @@ for d in "$3" "$4"; do
 done"#,
             &[&root, &f.0.join("home"), &shared[0], &shared[1]],
         );
+    }
+
+    #[test]
+    fn isolated_profiles_hide_dev_home_stores() {
+        let f = Fixture::new();
+        let root = f.root();
+        let home = f.0.join("home");
+        fs::set_permissions(root.join(".cortex-dev"), fs::Permissions::from_mode(0o700)).unwrap();
+        let state = crate::native_routes::RouteEnvironment::workspace_dev_state(
+            &workspace_protocol::channel::dev().state_dir(&home.join(".local/state")),
+            None,
+        );
+        let store_root =
+            cortex_core::store::StoreRoot::new(&state, cortex_core::StoreChannel::Dev).unwrap();
+        let store = cortex_core::Store::open(
+            store_root.project_key(&root).unwrap(),
+            cortex_core::OpenMode::Initialize,
+        )
+        .unwrap();
+        let database = store.key().database();
+        drop(store);
+        let original = fs::read(&database).unwrap();
+        for profile in [Profile::Development, Profile::Guarded, Profile::ReadOnly, Profile::Auto] {
+            let Ok(s) = f.prepare(profile, &[], &[]) else {
+                assert!(!capability());
+                eprintln!("Landlock unavailable: Dev home-store rule check not run");
+                return;
+            };
+            run(&s, "deny cat \"$1\"; deny put \"$1\"; deny rm \"$1\"", &[&database]);
+            assert_eq!(fs::read(&database).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn migration_backups_stay_hidden_inside_an_open_checkout() {
+        let f = Fixture::new();
+        let root = f.root();
+        let backups = root.join(".cortex-dev/.migration-backups/relocated-fixture");
+        fs::create_dir_all(&backups).unwrap();
+        let original = backups.join("original-fixture.txt");
+        fs::write(&original, "retained").unwrap();
+        for profile in [Profile::Guarded, Profile::Development, Profile::Auto] {
+            let Ok(s) = f.prepare(profile, &[root.clone()], &[]) else {
+                assert!(!capability());
+                eprintln!("Landlock unavailable: relocation backup rule check not run");
+                return;
+            };
+            run(
+                &s,
+                "deny cat \"$1\"; deny put \"$1\"; deny rm \"$1\"; put \"$2/src/ordinary\"",
+                &[&original, &root],
+            );
+            assert_eq!(fs::read_to_string(&original).unwrap(), "retained");
+            assert_eq!(fs::read_to_string(root.join("src/ordinary")).unwrap(), "x\n");
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 Quiet, task-first tooling: neutral surfaces, restrained motion, readable state labels alongside color, no focus or press highlight for the pointer, and one quiet focus line for keyboard movement, which a dialog or panel also draws on the control it focuses as it opens, until the next pointer press. Keep at most two primary work areas visible. Never switch a user's active view automatically. Emphasize blocking decisions and concrete evidence rather than false progress percentages. Preserve observed, reported, estimated and unknown distinctions.
 
-The sidebar's **Projects / Active work** segmented control uses the existing neutral tokens and native buttons with a pressed state. It remembers the choice and replaces the list in place; Pinned stays above the control. Projects keeps its project trees. Active work puts **Needs you** first for confirmed owner pauses, open questions and live permissions, and failed or cancelled tasks. A task under its running or paused sprint carries the **Needs you** status there instead of appearing again. See [Sidebar views](SCREENS.md#sidebar-views) for the full grouping rules.
+**Projects** and **Active work** share the same project tree, sort order, disclosure controls, sprint nesting and row actions. The toggle remembers the selected view. Active work filters the tree to ongoing tasks and outstanding actions. Pinned shortcuts stay above the toggle. See [Sidebar views](SCREENS.md#sidebar-views).
 
 The tab strip uses the same quiet surfaces as the editor's tabs: a 36 px band on the sidebar surface, the active tab on the canvas surface, hairline separators and an always visible close control. A tab that is not on view keeps its layout and stops its work; the strip never animates and never switches tabs by itself.
 

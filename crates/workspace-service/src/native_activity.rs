@@ -551,9 +551,7 @@ fn record_tx(
                 // A chunk continues the previous message only within the same engine
                 // turn: a turn this channel settled after that chunk starts a new one.
                 let previous: Option<Option<String>> = db.query_row(
-                    "SELECT h.message_id FROM host_transcript h WHERE h.session_id=? AND h.seq=? AND h.kind='agent_message'
-                     AND NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=? AND e.type='NATIVE_TURN_SETTLED'
-                         AND json_extract(e.payload_json,'$.channel_id')=? AND e.created_at>=h.created_at)",
+                    PREVIOUS_MESSAGE_SQL,
                     (session, seq - 1, task, &credential.channel_id), |r| r.get(0)).optional()?;
                 let message_id = match (engine_id, previous.flatten()) {
                     (Some(id), _) => format!("{own}{id}"),
@@ -576,9 +574,68 @@ fn record_tx(
     Ok(receipt)
 }
 
+const PREVIOUS_MESSAGE_SQL: &str =
+    "SELECT h.message_id FROM host_transcript h WHERE h.session_id=? AND h.seq=? AND h.kind='agent_message'
+     AND coalesce((SELECT max(e.created_at) FROM runtime_events e
+        WHERE e.task_id=? AND e.type='NATIVE_TURN_SETTLED'
+        AND json_extract(e.payload_json,'$.channel_id')=?) < h.created_at, 1)";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_settled_turn_maximum_matches_exists_with_or_without_index() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(cortex_core::store::schema::SQL).unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             INSERT INTO host_transcript(session_id,seq,kind,text,message_id,created_at) VALUES
+                ('s',1,'agent_message','x','old','000001'),
+                ('s',2,'agent_message','x','equal','001500'),
+                ('s',3,'agent_message','x','new','002001'),
+                ('s',4,'user_message','x','user','002001'),
+                ('s',5,'agent_message','x',NULL,'002001');
+             WITH RECURSIVE sample(n, seed) AS (
+                VALUES (1, 71) UNION ALL
+                SELECT n+1, (seed*48271)%2147483647 FROM sample WHERE n<2000
+             )
+             INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+             SELECT CASE n%3 WHEN 0 THEN 'other' ELSE 't' END,
+                CASE n%7 WHEN 0 THEN 'NOISE' ELSE 'NATIVE_TURN_SETTLED' END,
+                'runtime',json_object('channel_id','c'||(seed%9)),printf('%06d',n)
+             FROM sample;
+             INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+             VALUES ('t','NATIVE_TURN_SETTLED','runtime',json_object('channel_id','exact'),'001500');
+             ANALYZE;",
+        ).unwrap();
+        let original = "SELECT h.message_id FROM host_transcript h
+            WHERE h.session_id=? AND h.seq=? AND h.kind='agent_message'
+            AND NOT EXISTS(SELECT 1 FROM runtime_events e
+                WHERE e.task_id=? AND e.type='NATIVE_TURN_SETTLED'
+                AND json_extract(e.payload_json,'$.channel_id')=? AND e.created_at>=h.created_at)";
+        let assert_equivalent = || {
+            for task in ["t", "other", "missing"] {
+                for channel in (0..10).map(|n| format!("c{n}")).chain(["exact".into()]) {
+                    for seq in 0..=5 {
+                        let query = |sql| -> Option<Option<String>> {
+                            db.query_row(sql, ("s", seq, task, &channel), |r| r.get(0))
+                                .optional().unwrap()
+                        };
+                        assert_eq!(query(PREVIOUS_MESSAGE_SQL), query(original), "{task}/{channel}/{seq}");
+                    }
+                }
+            }
+        };
+        let plan = db.prepare(&format!("EXPLAIN QUERY PLAN {PREVIOUS_MESSAGE_SQL}")).unwrap()
+            .query_map(("s", 1, "t", "c1"), |r| r.get::<_, String>(3)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(plan.iter().any(|row| row.contains("runtime_events_settled_channel_time")
+            && row.contains("task_id=? AND <expr>=?")), "{plan:?}");
+        assert_equivalent();
+        db.execute_batch("DROP INDEX runtime_events_settled_channel_time").unwrap();
+        assert_equivalent();
+    }
     /// The next chunk number is two indexed maxima; it equals the former scan of both tables.
     #[test]
     fn next_chunk_number_equals_the_whole_session_scan() {

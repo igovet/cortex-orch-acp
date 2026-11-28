@@ -163,9 +163,28 @@ fn review_and_fix_nodes_are_routed_with_stored_fields_not_defaults() {
     s.write(|db| review::advance_tx(db, "t")).unwrap();
     assert_eq!(
         plan::node_routing(&plan_json(&s), "_fix_1_n"),
-        json!({"complexity":"high","work_kind":"debugging","provider":"codex-acp","model":"gpt-x","model_reason":"hard"})
+        json!({"complexity":"high","work_kind":"debugging","provider":"codex-acp","model":"gpt-x","model_reason":"hard","competencies":["backend"],
+            "competency_decision_source":"runtime_review_repair"})
     );
     assert_eq!(state(&s), "EXECUTING");
+    s.write(|db| {
+        db.execute(
+            "INSERT INTO runtime_nodes VALUES
+             ('t',1,'_review_2','worker-code-reviewer','Review','[\"_fix_1_n\"]',
+              '[\"**\"]','review','pending',NULL,NULL)",
+            [],
+        )?;
+        let packet = cortex_core::lifecycle::reconciliation::review_packet_tx(
+            db, "t", "_review_2", None, None, &Default::default(),
+        )?;
+        let decisions = packet["competency_decisions"].as_array().unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0]["node"], "_fix_1_n");
+        assert_eq!(decisions[0]["role"], "worker-general");
+        assert_eq!(decisions[0]["competencies"], json!(["backend"]));
+        assert_eq!(decisions[0]["source"], "runtime_review_repair");
+        Ok(())
+    }).unwrap();
 }
 
 #[test]

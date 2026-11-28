@@ -833,8 +833,12 @@ directory bound.
   verb in the same user message governs every exact identity, not labels.
   Negation, exact case/boundaries, source provenance and hard routing checks
   remain. See [routing](../features/routing-and-fallback/index.md#settings-only-routing).
-- **Scope is a write reservation.** Do not list read-only dependencies in a
-  writing node's scope: they unnecessarily serialize parallel writers.
+- **Scope controls writer scheduling and check evidence.** A writing node's
+  scope lists its write reservation. A declared read-only node's scope identifies
+  the inputs its checks depend on. At acceptance the runtime reports current
+  write-lease blockers and overlapping scopes of independent writers, including
+  nested scopes such as `.cache/x/**` and `.cache/x/legal/**`. Claiming a node
+  still rechecks leases transactionally.
 - **Worker capsule routes have separate evidence.** `task_configuration` is the
   task/coordinator snapshot. `own_worker_route` contains only this attempt's
   dispatch audit and engine-confirmed event/reference; missing confirmation

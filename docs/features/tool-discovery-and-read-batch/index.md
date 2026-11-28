@@ -13,7 +13,7 @@ For external tools, consult the engine's session tool list or search if offered.
 Use the name, description and schema advertised there, not the Cortex namespace
 or a tool's display title. An absent code-index tool calls for the applicable
 project-read fallback, not a guessed alias.
-Existing individual tools, all 23 profiles and ordinary engine loading remain.
+Existing individual tools and ordinary engine loading remain available to the authenticated role.
 This is not a Cortex-owned Code Mode sandbox or a two-tool replacement for MCP.
 
 A direct gateway call with an unexpected property in a closed argument object

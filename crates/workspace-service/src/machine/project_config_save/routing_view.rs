@@ -708,14 +708,13 @@ pub(super) fn routing(
     replacement: Option<&[u8]>,
 ) -> Result<Value> {
     let folder = reader::owner_folder(config)?;
-    let path = super::super::context::key(root)
+    let path = super::super::context::directory(root)
         .map_err(|_| {
             refuse(
                 "project_context_conflict",
                 "The project store refused the request.",
             )
         })?
-        .directory()
         .join("routing.json");
     // The retained service's fixed child environment does not forward CORTEX_ROUTING.
     let sources = vec![

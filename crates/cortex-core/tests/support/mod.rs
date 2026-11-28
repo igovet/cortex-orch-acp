@@ -1,4 +1,8 @@
 use cortex_core::{OpenMode, ProjectKey, Store, StoreChannel};
+#[path = "../../../../tests/fixtures/plan-choice-defaults.rs"]
+mod fixture_choices;
+pub use fixture_choices::fill_plan_choices;
+
 use std::{os::unix::fs::DirBuilderExt, path::PathBuf};
 pub struct Project(pub PathBuf);
 impl Project {
@@ -34,6 +38,7 @@ pub fn count(store: &Store, table: &str) -> i64 {
 #[allow(dead_code)]
 pub fn with_goal(plan: &serde_json::Value) -> serde_json::Value {
     let mut plan = plan.clone();
+    fixture_choices::fill_plan_choices(&mut plan);
     if plan["outcomes"].is_null() {
         plan["outcomes"] =
             serde_json::json!([{"id":"goal","statement":"The requested work is done"}]);

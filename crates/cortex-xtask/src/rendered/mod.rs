@@ -168,6 +168,10 @@ mod baseline_flag_tests {
 }
 
 fn peer_timing_requested(cli: &Cli) -> Res<bool> {
+    if let Some(arm) = cli.flag("history-delivery") {
+        require(matches!(arm, "pull" | "push") && cli.flag("peer-timing") == Some("yes"),
+                "--history-delivery pull|push requires --peer-timing yes")?;
+    }
     let Some(mode) = cli.flag("peer-timing") else {
         return Ok(false);
     };
@@ -278,6 +282,9 @@ fn host(cli: &Cli) -> Res<i32> {
     }
     if peer_timing {
         argv.extend(["--peer-timing".into(), "yes".into()]);
+        if let Some(arm) = cli.flag("history-delivery") {
+            argv.extend(["--history-delivery".into(), arm.into()]);
+        }
     }
     if let Some(only) = cli.flag("only") {
         argv.extend(["--only".into(), only.into()]);

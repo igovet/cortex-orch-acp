@@ -104,7 +104,7 @@ it("closes a sprint only after clear confirmation, hides it in active lists and 
   expect(confirmation.note).toContain("Nothing is discarded");
   expect(confirmation.note).toContain("unmerged work are kept");
   f.succeed(); await confirmation.go();
-  expect(f.commands[0]).toEqual({type:"close_sprint",sprintId:"s",confirmed:true});
+  expect(f.commands[0]).toEqual({type:"close_sprint",projectId:"p",sprintId:"s",confirmed:true});
   dispose!(); dispose=undefined; document.body.innerHTML="";
   f.set({...f.state,sprints:[{...sprint,archivedAt:10,queueState:"paused"}],
     tasks:[{...f.state.tasks[0],archive:{at:10,previousStatus:"draft"}}]});

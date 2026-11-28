@@ -5,7 +5,7 @@
 use super::{routing::view::Ordered, user_defaults::ceiling_patch, validation::Errors, *};
 use crate::config_read_model::{mcp, ConfigurationReader};
 use crate::native_routes::RouteEnvironment;
-use cortex_core::{OpenMode, ProjectKey, Store, StoreChannel};
+use cortex_core::{store::{locks::AccessLock, StoreRoot}, OpenMode, ProjectKey, Store, StoreChannel};
 use std::path::{Component, PathBuf};
 
 pub type Answer = std::result::Result<Value, Value>;
@@ -139,7 +139,11 @@ fn parse(text: &str) -> std::result::Result<(Value, Ordered), Value> {
 // --- routing -----------------------------------------------------------------
 
 /// `_project_routing_path`.
-fn project_routing_path(project: &Value, store: &str) -> std::result::Result<PathBuf, Value> {
+fn project_routing_path(
+    environment: &RouteEnvironment,
+    project: &Value,
+    store: &str,
+) -> std::result::Result<(PathBuf, AccessLock), Value> {
     let Some(raw) = project.as_str().filter(|s| s.starts_with('/')) else {
         return Err(error(
             "invalid_project",
@@ -150,8 +154,6 @@ fn project_routing_path(project: &Value, store: &str) -> std::result::Result<Pat
     let Some(root) = canonical(raw) else {
         return Err(store_error("invalid_project"));
     };
-    channel(store)?;
-    let directory = root.join(store);
     let missing = || {
         error(
             "project_store_missing",
@@ -162,6 +164,21 @@ fn project_routing_path(project: &Value, store: &str) -> std::result::Result<Pat
     if root.as_os_str() != raw {
         return Err(missing());
     }
+    let key = routing_key(environment, &root, store).map_err(from_store)?;
+    let anchor = key.anchor_directory();
+    // Serialize writes of legacy config-only folders with the first store
+    // initialization that copies their routing. The same lock fences an
+    // existing local database's relocation.
+    cortex_core::store::locks::private_directory(&anchor, false).map_err(|error| {
+        if crate::local::store_missing(&key, &error) { missing() } else { from_store(error) }
+    })?;
+    let lease = AccessLock::acquire(
+        &anchor.join(".access.lock"),
+        true,
+        false,
+        std::time::Duration::ZERO,
+    ).map_err(from_store)?;
+    let directory = crate::store_locations::directory(key).map_err(from_store)?;
     let meta = fs::symlink_metadata(&directory).map_err(|_| missing())?;
     if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != unsafe { libc::getuid() } {
         return Err(error(
@@ -170,13 +187,36 @@ fn project_routing_path(project: &Value, store: &str) -> std::result::Result<Pat
             Some("project_root"),
         ));
     }
-    Ok(directory.join("routing.json"))
+    Ok((directory.join("routing.json"), lease))
 }
 /// The read view's project pair: the trusted root and its routing file.
-fn view_project(project: &Value, store: &str) -> Option<(PathBuf, PathBuf)> {
-    let root = PathBuf::from(project.as_str().filter(|s| s.starts_with('/'))?);
-    let routing = root.join(store).join("routing.json");
-    Some((root, routing))
+pub fn view_project(
+    environment: &RouteEnvironment,
+    project: &Value,
+    store: &str,
+) -> std::result::Result<Option<(PathBuf, PathBuf)>, Value> {
+    let Some(project) = project.as_str().filter(|s| s.starts_with('/')) else {
+        return Ok(None);
+    };
+    let root = PathBuf::from(project);
+    let key = routing_key(environment, &root, store).map_err(from_store)?;
+    let routing = crate::store_locations::directory(key).map_err(from_store)?
+        .join("routing.json");
+    Ok(Some((root, routing)))
+}
+
+fn routing_key(
+    environment: &RouteEnvironment,
+    root: &Path,
+    store: &str,
+) -> cortex_core::CoreResult<ProjectKey> {
+    let channel = channel(store)
+        .map_err(|_| cortex_core::CoreError::Refused("project_storage_channel_invalid"))?;
+    let key = StoreRoot::new(&environment.state, channel)?.project_key(root)?;
+    if key.root() != root {
+        return Err(cortex_core::CoreError::Refused("project_context_conflict"));
+    }
+    Ok(key)
 }
 
 /// `update_routing`. `rules` is the request's JSON text (its key order is kept).
@@ -209,11 +249,13 @@ pub fn update_routing(
         .iter()
         .filter_map(|k| member(&ordered, k).map(|v| (k.to_string(), v.clone())))
         .collect();
-    let project_path = if target == "project" {
-        Some(project_routing_path(project, store)?)
+    let (project_path, _project_lease) = if target == "project" {
+        let (path, lease) = project_routing_path(environment, project, store)?;
+        (Some(path), Some(lease))
     } else {
-        None
+        (None, None)
     };
+    let pair = view_project(environment, project, store)?;
     let folder = owner(environment)?;
     let path = project_path.unwrap_or_else(|| folder.join("routing.json"));
     let (body, before) = {
@@ -243,7 +285,6 @@ pub fn update_routing(
     } else {
         Value::Null
     };
-    let pair = view_project(project, store);
     let mut view = reader
         .routing_management(pair.as_ref().map(|(a, b)| (a.as_path(), b.as_path())))
         .map_err(native_read)?;
@@ -598,6 +639,7 @@ fn problem_code(problem: &Value) -> &'static str {
 
 /// `_open_project_store`: the canonical root and its opened store.
 fn project_store(
+    environment: &RouteEnvironment,
     project: &Value,
     store: &str,
     write: bool,
@@ -620,7 +662,9 @@ fn project_store(
             Some("project"),
         )
     };
-    let key = ProjectKey::new(&root, channel).map_err(from_store)?;
+    let key = StoreRoot::new(&environment.state, channel)
+        .and_then(|state| state.project_key(&root))
+        .map_err(from_store)?;
     if key.root() != root && !root.join(store).join("cortex.sqlite3").is_file() {
         return Err(missing());
     }
@@ -668,7 +712,7 @@ pub fn read_project_ceiling(
     store: &str,
     project: &Value,
 ) -> Answer {
-    let (root, opened) = project_store(project, store, false)?;
+    let (root, opened) = project_store(environment, project, store, false)?;
     let row = opened
         .read(|db| ceiling::row(db, &root))
         .map_err(from_store)?;
@@ -683,7 +727,7 @@ pub fn update_project_ceiling(
     expected: &Value,
     candidate: &Value,
 ) -> Answer {
-    let (root, opened) = project_store(project, store, true)?;
+    let (root, opened) = project_store(environment, project, store, true)?;
     let expected = expected_revision(expected)?;
     let candidate = if candidate.is_null() {
         None

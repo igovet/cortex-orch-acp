@@ -1,10 +1,29 @@
 # Project scope and filesystem effects
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
+Linked worktrees share the logical project's [private home store](../../project/storage.md#where-the-database-lives-and-how-it-moves) for their channel.
+
+> Project binding and integration below are grounded in the Rust source. Detailed claims about host behavior still need independent verification where no source or recorded observation is cited.
 
 
-Worker changes target the canonical project root for incoming ACP or project-folder execution. In Workspace's [separate worktree mode](../../cortex-workspace/local-task-execution.md#separate-worktrees), they target the verified linked checkout instead. File and command evidence cannot cross checkout roots, even when the file bytes match.
+Worker changes normally target the canonical project root for incoming ACP or project-folder execution. The Workspace service can also select an [assignment-level worktree](#assignment-level-worktree-custody) for eligible work. In Workspace's [separate worktree mode](../../cortex-workspace/local-task-execution.md#separate-worktrees), they target the verified linked checkout instead. File and command evidence cannot cross checkout roots, even when the file bytes match.
 There are no hidden candidate copies or model-controlled integration operations.
+Workspace can dispatch a writer in its own linked checkout while another task's
+independent review reserves the project folder. The runtime requires disjoint,
+literal scopes on existing files, a clean committed project checkout, a supported
+engine route and retained duration estimates. The predicted overlap must exceed
+the conservative checkout cost derived from observed worktree provisioning and
+completed worktree verification. Small nodes and cases without enough evidence
+use the selected execution checkout when its reservation allows.
+
+The assignment worktree journal stays in the logical project's existing channel
+store. It
+records an intent before Git provisioning and retains the verified checkout
+identity. Its bounded integration operation applies modifications of tracked
+regular files to the canonical checkout only after the engine exit is confirmed.
+It rechecks the write scope, target state and file leases, and records success
+only after reading back the resulting files. Conflicts keep both checkouts intact.
+Unresolved effects block dependents, review, verification and completion. Final
+review and verification run on the canonical checkout with the integrated changes.
 In Workspace, [closing a sprint](../../cortex-workspace/local-task-execution.md#editing-saved-tasks-and-closing-sprints) archives the sprint and its tasks without changing checkout files or branches. Incomplete started work, disputed completion and an ongoing merge or pull-request operation block closure. Drafts can be archived without starting, and existing purge safeguards still protect unmerged work.
 
 Creating a sprint task first saves the draft, then links that same task to the
@@ -73,12 +92,7 @@ workers may write only within their assigned scopes. File replacement checks an
 expected hash or absence and rejects private paths and symlinks. A hard-linked regular file inside the project reads normally and a write replaces its directory entry atomically without touching the shared inode. `project_write` also takes `encoding: "base64"` for binary content (decoded size at most 750000 bytes); command `changed_paths` are attributed project writes too, and `project_edit` treats an unchanged result as success and applies when the old text still matches uniquely.
 Direct private/Git/denied-path overlays are not a guarantee against arbitrary host
 code, outside aliases or Docker. A project digest does not cover outside resources.
-Writing-worker commands in Development and Auto use host-writable mounts through the
-broker; Guarded keeps them restricted. Read-only and reviewer commands use the read-only host-visible profile in every
-mode. Automatic verification uses the same host-visible read-only profile with
-networking disabled, private scratch and the existing writable grants for eligible
-ignored checkout directories. Other checkout writes are discarded where supported
-or refused. Command environments filter Cortex/credential variables but
+Auto grants writing workers full host execution. Development and Guarded use the broker's Landlock rules for writes. Reviewer and verification commands run with restricted writes. Verification can write to eligible existing Git-ignored directories. Command environments filter Cortex/credential variables but
 use owner toolchains, validated SSH-agent access and shared network. `command_run`
 defaults to 1800 seconds (30 minutes; `timeout_seconds` sets more); outside commands
 default to 600 seconds. On a timeout, stop or authority loss the command and every
@@ -94,30 +108,11 @@ project digest from dispatch to verdict, verification and completion. Drift bloc
 acceptance; a digest does not prove which OS process authored a change. Unsaved
 editor buffers are not inferred from an absent client capability.
 
-Project captures still rescan the tree and rebuild the same sorted manifest.
-For content-hashed regular files, an in-process, thread-safe LRU retains at most
-8,192 hashes (no file contents or paths), keyed by device, inode, size,
-mtime/ctime nanoseconds, mode and owner. Each reuse still opens the file with
-the existing no-follow checks and verifies its state before and after lookup;
-permission failures remain unavailable captures. Same-size writes with restored
-mtime invalidate the key through ctime. Entries within one second of hashing
-time (or future-dated) are not cached: this conservatively covers timestamp
-granularity on the recognized local Linux ext2/3/4, XFS, Btrfs and tmpfs
-filesystems. Unknown, remote and overlay filesystems, or unavailable filesystem
-type detection, use uncached hashing. Large-file metadata fingerprints and
-logical byte budgets are unchanged; warm and cold captures produce identical
-digests for the same tree. Nothing is persisted and no acceptance gate is
-skipped.
+Project snapshots bind review and verification to the current checkout. See the [Core workspace implementation](../../../crates/cortex-core/src/workspace.rs) for path handling and revision capture.
 
 Fixed read-only Git status/diff commands provide retained review context, with
 external diff, text conversion, hooks and fsmonitor disabled. The diff includes
 pre-existing edits and is not an authorship claim. Model commands cannot read `.git`.
-
-# Snapshot workspaces, candidates and integration
-
-The sections below describe the isolated snapshot workspaces, candidate staging
-and the integration entry point. Their claims are
-not yet re-verified line by line against source; the introduction above says there are no candidate copies, while the former implementation included candidate staging; this conflict is open and must be resolved by review against source.
 
 ## Code lease and managed file effects
 
@@ -131,234 +126,13 @@ and disk revision. This does not constrain host commands, outside writes from
 other projects, native engine writes, Git or external editors and terminals.
 See [Code editing and write leases](../../cortex-workspace/ide-and-git.md#code-editing-and-write-leases).
 
-## Workspace model
-
-Every mutating assignment's attempt gets a `WorkspaceBinding` (see
-`WorkspaceProvisioner`, `portable.identity
-.WorkspaceBinding`): a workspace id, a root path, a known base artifact
-revision, a resource owner
-(the attempt), a change-transfer method, and a logical `.cortex` binding
-that always resolves to the *main* project's own store (see below).
-
-### `IsolatedSnapshotWorkspaceProvisioner` (default)
-
-`delegation.workspace_isolation.IsolatedSnapshotWorkspaceProvisioner
-.create(attempt_id)` makes **two** owner-private copies of the project tree
-under this project's own `.cortex/workspaces/<attempt_id>/`, excluding the
-top-level `.git`/`.cortex` directories (matching the runtime's
-own exclusion):
-
-- `base/` — a pristine, read-only-for-the-rest-of-the-attempt's-lifetime
-  copy, used later as the three-way merge's base text.
-- `work/` — the mutable copy an engine actually receives as its workspace
-  root (`cwd`/`fs_bridge` containment root) and freely writes into.
-
-Only plain `os.scandir`/`open`/`read` calls ever touch the *real* project
-root while copying — a user's uncommitted/dirty files are captured exactly
-as they are on disk, never reset or stashed. A manifest (`{relpath:
-{kind, sha256|target, mode}}`) and a revision observation of `work/`
-are recorded in the additive `workspace_snapshots` table (`user_version`
-unchanged at 11). Caps (50k entries / 512 MiB total / 64 MiB per file / 20s
-wall-clock — the same numbers the runtime already uses) make an
-oversized or unreadable tree fail the whole snapshot atomically (never a
-partial, silently-incomplete copy).
-
-Two attempts delegated concurrently each get their own independent pair of
-copies: a write into one is never observable from, or able to overwrite,
-the other's copy or the real project tree — only an explicit, later
-the runtime call ever touches the main tree.
-
-### Snapshot location vs. `fs_bridge`/`terminal_bridge` containment
-
-The snapshot's `work` directory lives *under* the main project's own
-`.cortex/workspaces/<attempt_id>/work` — a descendant of the very
-`.cortex` directory `FsBridge`/
-`TerminalBridge` refuse a path/`cwd` for containing
-a `.git`/`.cortex` *component*. Verified: both
-bridges' checks are always computed *relative to* the bound
-`ResourceBinding.workspace_root`, never by walking workspace_root's own
-ancestor path components — a path inside the snapshot's `work` dir
-(`os.path.relpath(path, workspace_root)`) never contains a `.git`/`.cortex`
-segment itself (the resulting relative path is just `a.txt`, `sub/b.txt`,
-...), so a worker bound to a snapshot root can read/write its own files
-and run terminal commands normally. The *main* project's real
-`.cortex/cortex.sqlite3` is a sibling subtree, not a path under that
-binding's `workspace_root`, so plain containment (not the technical-storage
-check) already refuses it — confirmed explicitly by test, not merely
-inferred.
-
-### Snapshot failure
-
-Production delegation uses `IsolatedSnapshotWorkspaceProvisioner`. If its
-entry, byte, or time cap is exceeded, or an entry cannot be read safely,
-workspace creation fails. It does not switch to a shared project root.
-`SerializedSharedRootWorkspaceProvisioner` remains a separate legacy class,
-but is not an automatic production fallback; its existence does not make
-shared-root worker writes an acceptable isolation substitute.
-
-## Candidate staging before integration
-
-`prepare_candidate` requests an isolated stage built from exact finished
-assignment attempts. The main runtime copies the current project into a
-candidate and applies those selected attempts there. The candidate records
-source bindings, a project-base digest, content digest, and any conflict
-paths. `candidate_ready` or `candidate_conflict`/`candidate_failed` appears
-through `list_events`. Preparation does not write the user's project.
-
-The coordinator may call `request_check` for a ready candidate and exact
-content digest. The runtime runs its direct argv in a read-only candidate
-sandbox, retains a bounded command observation, and reports unknown outcomes
-without replaying the command. `read_check` returns that observation;
-`assess_check` records the coordinator's separate interpretation. The
-coordinator may then call `integrate` with the exact `candidate_ref` and
-`expected_base_digest`.
-The main runtime checks that binding and the current project base before
-application. A changed base or overlapping path is a conflict, never a
-silent replacement. Candidate selection remains a coordinator decision.
 
 ## Integration
 
-`delegation.integration.integrate(store, task_id=..., project_root=...,
-assignment_ref=..., request_key=..., attempt_id=..., workspace_binding_id=...,
-host_fs_checker=None)` is the one technical-application entry point,
-idempotent per `(assignment_ref, request_key)` (`workspace_integrations`
-table — a retry returns the exact previously recorded outcome, never
-re-applies or re-decides).
+Workspace owner actions operate on the registered checkout or the verified task worktree. The service implements merge, squash and pull-request actions with retained admission and outcome evidence. See [separate worktrees](../../cortex-workspace/local-task-execution.md#separate-worktrees), [IDE and Git](../../cortex-workspace/ide-and-git.md) and [service integration handlers](../../../crates/workspace-service/src/machine/integration.rs).
 
-### Coordinator MCP operation
+### Assignment-level worktree custody
 
-A coordinator channel calls the `integrate(assignment_ref, request_key)`
-MCP operation (`COORDINATOR_OPERATIONS`,
-`_coordinator_integrate`). Matching every other
-delegation operation's process-boundary rule (see `mcp_tools`
-module docstring), the MCP-subprocess-side handler only records a durable
-`progress` event (`payload["kind"] == "integration_requested"`) — it never
-touches the project tree itself. The *main* process's
-`_process_new_events` picks
-up that event on its next pass (the same polling seam `delegation_requested`/
-`assignment_cancel_requested` already use), calls
-the runtime for real, and appends the outcome as its
-own coordinator-visible `progress` event —
-`payload["kind"] == "integration_applied"` (status `applied`/`noop`, with
-`applied_paths`/`integrated_head`/`integrated_dirty_digest`) or
-`integration_conflict` (with the full `conflict_paths` report). These are
-carried as `progress` rows rather than a new `task_events.event_type`
-because that column has a DB-level `CHECK` constraint fixed at table
-creation — widening it would need a destructive rebuild for every existing
-store, which the runtime does not do (see
-`INTEGRATION_PROGRESS_KINDS`). `list_events` and the
-continuation-text renderer both surface these two kinds explicitly.
+The Workspace service can provision a linked checkout for a writing assignment that would otherwise wait behind another task's active review of the canonical checkout. The scopes must be disjoint. Selection uses retained worker and reviewer durations and a conservative cost from matching checkout preparation and verification measurements. The project must have a clean committed checkout, and the selected scope must consist of bounded literal tracked files. Missing timing or unsupported host or engine evidence leaves the ordinary shared-checkout wait in force.
 
-Algorithm:
-
-1. Diff the attempt's base manifest against a fresh rescan of its own
-   `work/` copy → the worker's own change set (added/modified/deleted).
-2. For every changed path, read the main project root's *current* state:
-   - unchanged since base → apply the worker's version directly.
-   - a host-negotiated unsaved buffer for that exact path (see below) →
-     refused, regardless of any merge outcome.
-   - changed since base, non-overlapping, both sides regular UTF-8 text →
-     a conservative line-level three-way merge (`difflib`-based; any edit
-     range that even touches the other side's edited range is a conflict,
-     never a guess at whether it would have agreed).
-   - anything else (binary content, kind mismatch, delete/modify, a
-     directory or symlink change, an add/add divergence) → a conflict.
-3. Every path is checked *before* any write; one conflicting path means
-   **nothing** is written at all (pre-check, all-or-nothing to the extent a
-   plain filesystem allows — see the module docstring's one documented gap:
-   applying more than one already-conflict-free file is still not one
-   atomic filesystem transaction).
-4. Each accepted write is its own atomic temp-write + `fsync` + `rename`
-   (mode preserved), never in place.
-5. The resulting project root's own revision is captured and recorded
-   as this integration's `integrated_head`/`integrated_dirty_digest`.
-
-No path is ever resolved by "last write wins" — an overlapping edit,
-binary difference, or unsaved host buffer always surfaces as a conflict
-report (`{relpath: {reason, ...}}`) to the caller instead.
-
-## Host buffers
-
-`host_fs_checker(relpath) -> bytes | None` is an optional, caller-supplied
-read of the *host's* own negotiated buffer for one project-relative path
-(see `HostFsForwarder`, only ever active for a
-host-visible coordinator binding). When it returns content that differs
-from the path's current on-disk bytes, that path is refused
-(`unsaved_host_buffer`) — an old engine-side result is never allowed to
-silently overwrite newer, unsaved editor content.
-
-`OrchestratingRuntime` accepts an optional constructor-level
-`host_fs_requester` — the exact same `(method, params) -> dict` shape as
-`HostRequester`, following the identical "`None` means
-not negotiated/available, never guessed" convention as the existing
-`host_elicitor` — supplied only once a real incoming ACP connection
-has actually negotiated an `fs` capability. When present,
-`_make_host_fs_checker` builds the per-path check by reusing the existing
-`HostFsForwarder`/`RevisionLog` abstraction directly
-(never a bespoke second wire protocol), and every recorded integration's
-`host_buffer_state` is `"checked"`. When no requester is supplied (the
-host never negotiated fs, or no live connection is wired to this runtime
-yet), `host_buffer_state` is durably recorded as `"unknown"` — a visible
-limitation, not silently treated the same as "checked, no conflict" (now closed for the case where a host connection is
-actually wired). Live wiring of a real ACP host's negotiated `fs`
-capability into the ACP entry's own runtime construction is not covered by the automated suite. The production seam
-is tested with a fake forwarder function standing in for the real host connection.
-
-## Revision binding and re-verification
-
-`_capture_result_revisions`
-now resolves each worker_result's own isolated `work/` root (via
-`resolve_attempt_root`) when the attempt
-used isolation, instead of always the task's shared project root. Because
-the tree digest is computed over *relative* paths/content, a
-worker's isolated final tree and the main project root after a clean,
-non-conflicting integration of that exact tree are byte-for-byte
-comparable: identical digest if nothing else changed, a different digest
-the instant integration merges in a concurrent main-root change or any
-later drift. The runtime's existing `stale_verification`
-comparison therefore already refuses to let a revision-A report
-certify a differing revision B, with zero changes needed to the gate logic
-itself — only to what revision worker_result binds to.
-
-## Cleanup
-
-`IsolatedSnapshotWorkspaceProvisioner.cleanup_binding` removes only a
-Cortex-owned snapshot (`base/`+`work/`, verified owner-private, never a
-symlink) after its own row is looked up by binding id — it never touches
-`project_root` or any user-owned path. `acp.orchestrating_runtime
-.OrchestratingRuntime._cleanup_isolated_workspace_if_integrated` calls it
-automatically once an attempt is both terminal (via
-`_terminate_completed_workers`) and either an integration outcome was
-durably recorded for it or the assignment was cancelled outright.
-`cleanup.finish_deletions` (task-level retention) removes any remaining
-`workspace_snapshots` directories before deleting the DB rows, so a
-`/cortex-clear` never leaks a snapshot directory either.
-
-## Tests
-
-The statements below were carried over from the former Python test suite
-(`workspace_isolation`, `workspace_integration`, `workspace_fs_bridge_containment` and
-`workspace_mcp_integration`), which was removed; the current Rust coverage is in
-`crates/workspace-service/tests` and `crates/cortex-core/tests/workspace.rs`.
-Covered then: two workers editing the same file in isolated workspaces (second
-integration conflicts, first worker's applied content never overwritten) --
-both at the function level and end to end over the real coordinator
-`integrate` MCP operation (idempotent dispatch,
-coordinator-only enforcement, applied/conflict outcomes appearing as
-durable `progress` events); a non-overlapping concurrent main-root change
-merging cleanly; a conflicting overlapping edit surfaced, never
-last-write-wins; dirty/uncommitted user files surviving snapshot and
-integration untouched; an unsaved host buffer blocking an otherwise-clean
-overwrite, both directly and through the real `host_fs_requester`
-production seam with a fake forwarder (plus `host_buffer_state: "unknown"`
-when no requester is wired); integration idempotency by `request_key`; a
-worker `ResourceBinding` rooted at the snapshot `work` dir actually
-reading/writing through `FsBridge` and running a contained terminal
-command, while the real project `.cortex` store stays unreachable; a
-worker's own execution files excluding `.cortex` while a real publish still
-lands in the main project's logical store; revision A not certifying a
-differing revision B (both the "integration hasn't happened yet" and the
-"main drifted after a clean integration" cases); the separately testable
-legacy serialized-writer class (not a production fallback); and cleanup
-removing only the Cortex-owned snapshot
-directories it created.
+The service records the intent before Git runs and binds the observed checkout to the exact assignment, plan revision and owner epoch. The worker uses that checkout for scoped effects. After a completed assignment, the runtime validates and transfers its bounded patch under the repository and destination write fences. It checks scope, base and destination evidence before applying. Dependent work remains blocked until integration settles. Conflicts or uncertain effects retain the checkout and custody record, prevent automatic replay, and block completion. Task-level worktree controls remain separate. See [Core selection and integration](../../../crates/cortex-core/src/workspace_worktrees/assignments.rs) and the [service launch and settlement](../../../crates/workspace-service/src/machine.rs).

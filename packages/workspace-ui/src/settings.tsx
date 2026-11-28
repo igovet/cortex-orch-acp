@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, useContext } from "solid-js";
-import { CONNECTION_ENGINE, DEFAULT_WORKTREE_ROOT, engineLabel, ENGINES, LANGUAGES, type EngineKey, type Machine } from "@cortex/workspace-domain";
+import { CONNECTION_ENGINE, DEFAULT_WORKTREE_ROOT, engineLabel, ENGINES, LANGUAGES, type Machine } from "@cortex/workspace-domain";
 import type { ThemePref } from "./theme";
+import { engineSetupNote } from "./engine-setup";
 import { sizeText } from "./archive-model";
 import { useWs } from "./ctx";
 import { ScreenActive } from "./freshness";
@@ -123,12 +124,10 @@ function Connections() {
   const stateOf = (c: Machine["connections"][number]) => c.state === "connected" ? { text: "Configured", tone: "st-ok", icon: "check-circle" } : c.state === "needs_login" ? { text: "Sign in needed", tone: "st-warn", icon: "alert" } : { text: "Unavailable", tone: "st-idle", icon: "x-circle" };
   const waiting = () => m().connections.filter(c => c.state !== "connected");
   const guard = (run: () => void) => () => { if (!off()) run(); };
-  const setupText = { not_downloaded: "Not downloaded", downloaded_no_login: "Downloaded, sign in on this machine", ready_to_connect: "Ready to connect", connected: "Connected" };
-  const setupNote = (e: EngineKey) => { const s = m().config.setup[e]; return [setupText[s.status], s.automatic ? "automatic setup on" : "", s.reason ?? "", s.autoConnectDisabled ? "automatic connection off" : ""].filter(Boolean).join(", "); };
   const enableOpenCode = () => ws.open({ kind: "prompt", title: "Enable OpenCode", label: "Connection name", value: "OpenCode", action: "Enable", hint: "OpenCode is never downloaded. It uses the one on this machine.", go: name => ws.run({ type: "enable_opencode", machineId: m().id, name }).then(r => r.ok) });
   return <Shell section="connections" title="Connections" lead="How this machine reaches each engine and how much of their limits is used. Every action here takes effect at once. Secrets are never shown.">
     <SetH title="Engines: download and connect"><Hint text={HELP.engineSetup} label="engine setup" /></SetH>
-    <div class="surface"><For each={ENGINES}>{e => <Srow t={e.label} d={setupNote(e.id)}>
+    <div class="surface"><For each={ENGINES}>{e => <Srow t={e.label} d={engineSetupNote(m().config.setup[e.id])}>
       <Show when={e.id === "opencode"} fallback={<Show when={m().config.setup[e.id].status === "not_downloaded"}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("download_engine")} onClick={guard(() => ws.run({ type: "download_engine", machineId: m().id, engine: e.id }))}>Download engine</button></Show>}>
         <Show when={m().config.setup.opencode.status !== "connected"}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("enable_opencode")} onClick={guard(enableOpenCode)}>Enable OpenCode…</button></Show>
       </Show>

@@ -69,6 +69,12 @@ fn owner(root: &Path) -> io::Result<Option<Owner>> {
         _ => Ok(None),
     }
 }
+
+fn relocated_store(key: cortex_core::ProjectKey) -> bool {
+    key.home_directory()
+        .is_some_and(|home| key.resolve_existing().is_ok_and(|key| key.directory() == home))
+}
+
 pub fn check(root: &Path) -> io::Result<()> {
     if !workspace_protocol::channel::current().is_dev() {
         return Ok(());
@@ -76,6 +82,9 @@ pub fn check(root: &Path) -> io::Result<()> {
     match (owner(root)?, store(root)?) {
         (None, None) => Ok(()),
         (Some(o), actual) if o.store == actual => Ok(()),
+        // ACP can initialize this same Dev store before Workspace has a
+        // registration. Only its verified channel binding replaces the marker.
+        (None, Some(_)) if crate::native_runtime::key(root).is_ok_and(relocated_store) => Ok(()),
         _ => Err(refused()),
     }
 }
@@ -165,6 +174,25 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn unmarked_acp_store_requires_an_exact_relocated_dev_binding() {
+        use cortex_core::{store::StoreRoot, OpenMode, ProjectKey, Store, StoreChannel};
+        let fixture = Fixture::new();
+        let project = fixture.0.join("project");
+        fs::create_dir(&project).unwrap();
+        let state = fixture.0.join("state");
+        let local = ProjectKey::new(&project, StoreChannel::Dev).unwrap();
+        drop(Store::open(local.clone(), OpenMode::Initialize).unwrap());
+        let dev = StoreRoot::new(&state, StoreChannel::Dev).unwrap();
+        let key = dev.project_key(&project).unwrap();
+        assert!(!relocated_store(local));
+        assert!(!relocated_store(key.clone()));
+        drop(Store::open(key.clone(), OpenMode::Initialize).unwrap());
+        assert!(!marker(&project).exists());
+        assert!(relocated_store(key));
+        let wrong = StoreRoot::new(&fixture.0.join("other-state"), StoreChannel::Dev).unwrap();
+        assert!(!relocated_store(wrong.project_key(&project).unwrap()));
     }
     #[test]
     fn unbound_legacy_reservation_and_interrupted_migration_are_retryable() {

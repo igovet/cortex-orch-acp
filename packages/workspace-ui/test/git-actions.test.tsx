@@ -180,6 +180,17 @@ function pendingDraft() {
   return { answer, request: vi.fn(() => ready) };
 }
 
+it("lists main and linked checkout branches only in their checkout sections", async () => {
+  const s = world(checkout(), null);
+  const repo = s.repos[0];
+  repo.checkouts.push(checkout({ id: "p:linked", kind: "worktree", branch: "linked", path: "/linked" }));
+  repo.branches = ["main", "linked", "spare"].map(name => ({ name, where: "", task: null, ahead: 0, behind: 0 }));
+  const { root } = await open(s, "/m/local/p/p/worktrees");
+  const rows = [...root.querySelectorAll('.hist[aria-label="Branches and worktrees"] .gr')];
+  expect(rows.filter(row => row.textContent?.includes("No checkout")).map(row => row.querySelector(".mono")?.textContent)).toEqual(["spare"]);
+  expect(rows.map(row => row.querySelector(".mono")?.textContent)).toEqual(["main", "linked", "spare"]);
+});
+
 describe("editable Git drafts", () => {
   const detailed = "Fix the race\n\n- Serialize updates to avoid concurrent writes.";
   it.each(["generated", "typed", "failed"])("handles a %s checkout commit draft", async scenario => {

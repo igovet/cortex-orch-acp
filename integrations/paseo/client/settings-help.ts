@@ -511,10 +511,10 @@ export const ROLE_HELP: Record<string, HelpText> = {
   "worker-database-architect": h("designs schemas, indexes, migrations and query plans", "проектирует схемы, индексы, миграции и планы запросов"),
   "worker-debugger": h("reproduces failures, proves the root cause, fixes and verifies", "воспроизводит сбои, доказывает причину, исправляет и проверяет"),
   "worker-devops-engineer": h("works on CI/CD, containers and deployment safety", "работает с CI/CD, контейнерами и безопасностью развёртывания"),
-  "worker-explorer": h("maps execution paths, dependencies and relevant files without changing them; automatic model tier: light for low and normal, standard for high complexity", "изучает пути выполнения, зависимости и нужные файлы, ничего не меняя; автоматический выбор уровня модели: лёгкий для низкой и обычной, стандартный для высокой сложности"),
+  "worker-explorer": h("maps execution paths, dependencies and relevant files without changing them; automatic model tier: light for low, standard for normal, deep for high complexity", "изучает пути выполнения, зависимости и нужные файлы, ничего не меняя; автоматический выбор уровня модели: лёгкий для низкой, стандартный для обычной, углублённый для высокой сложности"),
   "worker-frontend-dev": h("implements UI components, state, styling and UI tests", "реализует компоненты интерфейса, состояние, стили и UI-тесты"),
   "worker-fullstack-dev": h("makes coordinated backend and frontend changes", "делает согласованные изменения бэкенда и фронтенда"),
-  "worker-general": h("general agent for research, analysis or small implementation; automatic model tier: light for low, standard for normal, deep for high complexity", "универсальный агент для исследования, анализа или небольших правок; автоматический выбор уровня модели: лёгкий для низкой, стандартный для обычной, углублённый для высокой сложности"),
+  "worker-general": h("implements changes using the competencies selected for the work; automatic model tier: light for low, standard for normal, deep for high complexity", "реализует изменения с выбранными для задачи компетенциями; автоматический выбор уровня модели: лёгкий для низкой, стандартный для обычной, углублённый для высокой сложности"),
   "worker-mobile-dev": h("implements iOS, Android, React Native or Flutter changes", "реализует изменения для iOS, Android, React Native или Flutter"),
   "worker-performance-engineer": h("finds bottlenecks and makes safe optimizations", "находит узкие места и делает безопасные оптимизации"),
   "worker-planner": h("breaks work into steps, dependencies, risks and checks; automatic model tier: light for low, standard for normal, deep for high complexity", "разбивает работу на шаги, зависимости, риски и проверки; автоматический выбор уровня модели: лёгкий для низкой, стандартный для обычной, углублённый для высокой сложности"),
@@ -532,10 +532,16 @@ export const ROLE_HELP: Record<string, HelpText> = {
 /** Help under one "Preferred work" switch: what the kind is and which agents it covers. */
 export function workKindHelp(kind: string, roles: readonly string[]): HelpText {
   const base = WORK_KIND_HELP[kind] ?? h(`Work of kind ${kind}.`, `Работа вида ${kind}.`);
-  const agents = (lang: "en" | "ru") => roles.length === 0
-    ? (lang === "en" ? "No worker role uses this kind directly." : "Ни одна роль исполнителя не использует этот вид напрямую.")
-    : `${lang === "en" ? "Agents" : "Агенты"}:\n${roles.map((role) => `  • ${role}${ROLE_HELP[role] ? ` — ${ROLE_HELP[role][lang]}` : ""}`).join("\n")}`;
-  return { en: `${base.en}\n${agents("en")}`, ru: `${base.ru}\n${agents("ru")}` };
+  if (!roles.length) return base;
+  const groups = [
+    { label: h("New plan nodes", "Узлы новых планов"), roles: roles.filter(r => r === "worker-general" || r === "worker-explorer") },
+    { label: h("Runtime stages", "Этапы среды выполнения"), roles: roles.filter(r => ["worker-code-reviewer", "worker-build-verification", "worker-senior-consultant"].includes(r)) },
+  ];
+  const current = new Set(groups.flatMap(group => group.roles));
+  groups.push({ label: h("Retained roles from earlier plans", "Сохранённые роли прежних планов"), roles: roles.filter(r => !current.has(r)) });
+  const text = (lang: "en" | "ru") => [base[lang], ...groups.filter(g => g.roles.length).map(g =>
+    g.label[lang] + ":\n" + g.roles.map(r => `  • ${r}${ROLE_HELP[r] ? ` — ${ROLE_HELP[r][lang]}` : ""}`).join("\n"))].join("\n");
+  return { en: text("en"), ru: text("ru") };
 }
 
 export const PREFERRED_WHEN_HELP = h(

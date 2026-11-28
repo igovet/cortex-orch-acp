@@ -296,6 +296,26 @@ fn binary_frames_are_schema_valid_and_startup_dispatches_no_engine() {
     probe.send(2, "session/new", json!({"cwd":project,"mcpServers":[]}));
     let new = probe.receive("response")["result"].clone();
     let sid = new["sessionId"].as_str().unwrap().to_owned();
+    let state = probe.root.join("home/state");
+    let (state, store_channel) = if channel == "dev" {
+        (
+            workspace_protocol::channel::dev().state_dir(&state).join("state"),
+            cortex_core::StoreChannel::Dev,
+        )
+    } else {
+        (state, cortex_core::StoreChannel::Release)
+    };
+    let key = cortex_core::store::StoreRoot::new(&state, store_channel)
+        .unwrap()
+        .project_key(&project)
+        .unwrap();
+    let store = cortex_core::Store::open(key.clone(), cortex_core::OpenMode::LiveReadOnly).unwrap();
+    assert_eq!(Some(store.key().directory()), key.home_directory());
+    let persisted: String = store.read(|db| {
+        Ok(db.query_row("SELECT session_id FROM acp_host_sessions", [], |row| row.get(0))?)
+    }).unwrap();
+    assert_eq!(persisted, sid);
+    drop(store);
     let ids = |options: &Value| -> BTreeSet<String> {
         options
             .as_array()
@@ -511,24 +531,12 @@ fn binary_frames_are_schema_valid_and_startup_dispatches_no_engine() {
         "available_commands_update"
     );
 
-    // Exactly one project store exists for the logical project and channel, and
-    // no runtime task was ever created.
-    let directory = if channel == "dev" {
-        ".cortex-dev"
-    } else {
-        ".cortex"
-    };
-    let databases: Vec<_> = fs::read_dir(&project)
-        .unwrap()
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with(".cortex"))
-        .map(|e| e.path().join("cortex.sqlite3"))
-        .filter(|p| p.is_file())
-        .collect();
-    assert_eq!(
-        databases,
-        vec![project.join(directory).join("cortex.sqlite3")]
-    );
+    let store = cortex_core::Store::open(key, cortex_core::OpenMode::LiveReadOnly).unwrap();
+    let count: i64 = store.read(|db| {
+        Ok(db.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))?)
+    }).unwrap();
+    assert_eq!(count, 0);
+    drop(store);
 
     drop(probe.input.take());
     assert!(probe.child.wait().unwrap().success());

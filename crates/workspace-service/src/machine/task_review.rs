@@ -148,23 +148,18 @@ async fn settle(
         (project,task), |r|Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,r.get::<_, i64>(3)?))).optional()?
         .map(|(execution, evidence, runtime, revision)| {
-            let control = cortex_core::workspace::control::owner_rework_event(db, &runtime)?;
-            // Without an owner rework the task has one cycle: the runtime passed it.
-            // After one, only the verdict of the current cycle, for the current
-            // revision, counts: an older cycle's pass never settles the new result.
-            let passed: bool = if control.is_none() {
-                db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED')",
-                    [&runtime], |r| r.get(0),
-                )?
-            } else { db.query_row(
+            // An automatic reopen starts a fresh cycle just like owner rework.
+            // Only the latest verdict after that boundary can settle this result.
+            let passed: bool = db.query_row(
                 "SELECT coalesce((SELECT type='VERIFICATION_PASSED'
-                    AND json_extract(payload_json,'$.revision')=?3 FROM runtime_events
-                    WHERE task_id=?1 AND id>?2 AND (type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED')
+                    AND json_extract(payload_json,'$.revision')=?2 FROM runtime_events
+                    WHERE task_id=?1 AND id>coalesce((SELECT max(id) FROM runtime_events
+                       WHERE task_id=?1 AND type='TASK_REOPENED'),0)
+                    AND (type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED')
                       OR (type='VERIFICATION_REVISED' AND json_extract(payload_json,'$.accepted_unverified') IS NOT NULL))
                     ORDER BY id DESC LIMIT 1),0)",
-                (&runtime, control.unwrap_or(0), revision), |r| r.get(0),
-            )? };
+                (&runtime, revision), |r| r.get(0),
+            )?;
             let resolved = cortex_core::workspace::control::owner_resolution_current(db, &runtime)?;
             Ok::<_, cortex_core::CoreError>((execution, evidence, passed && !resolved))
         }).transpose()?)).map_err(context::core)?;
@@ -173,10 +168,6 @@ async fn settle(
             "There is no completed execution for this result.",
         )));
     };
-    // Only a result the runtime verified, with no owner resolution, settles itself.
-    if !verified {
-        return Ok(Some(refusal("This result has no eligible passing runtime verification. Review the result or request changes.")));
-    }
     // An unchanged refusal is not repeated on every background pass.
     let checkout = context::owned_checkout(root, project, task)?;
     let source_root = checkout.as_ref().map_or(root, |w| w.path.as_path());
@@ -190,7 +181,16 @@ async fn settle(
     if let Some(outcome) = remembered(key, inputs.as_deref()) {
         return Ok(Some(outcome));
     }
-    let native = task_facts::native_observation(source_root).await;
+    // Only a result the runtime verified, with no owner resolution, settles itself.
+    if !verified {
+        return Ok(Some(remember(
+            key.clone(),
+            inputs.clone(),
+            *signalled,
+            refusal("This result has no eligible passing runtime verification. Review the result or request changes."),
+        )));
+    }
+    let native = crate::native_effects::observe_digest(source_root.to_owned()).await;
     let candidate = store
         .read(|db| {
             let (actions, _, warnings, counts) = match task_facts::result_evidence_db(
@@ -199,29 +199,38 @@ async fn settle(
                 root,
                 project,
                 &execution,
-                native.as_deref(),
+                native.as_deref().ok(),
                 task_facts::own_writes(&record),
                 true,
                 None,
             ) {
                 Ok(evidence) => evidence,
-                Err(cortex_core::CoreError::Refused("result_unavailable")) => return Ok(Err("The result evidence could not be read. Refresh the task or request a new result.".to_owned())),
+                Err(cortex_core::CoreError::Refused("result_unavailable")) => return Ok(Err(Some("The result evidence could not be read. Refresh the task or request a new result.".to_owned()))),
                 Err(e) => return Err(e),
             };
             if warnings || actions["accept"] != true || counts != [0, 0, 0] {
+                if actions["workspaceChanged"] == true && native.is_err() {
+                    return Ok(Err(None));
+                }
                 let reason = actions["reason"]
                     .as_str()
                     .filter(|text| !text.trim().is_empty())
                     .map(str::to_owned)
                     .unwrap_or_else(|| "The result is not ready to accept.".to_owned());
-                return Ok(Err(reason));
+                return Ok(Err(Some(reason)));
             }
             Ok(Ok(json!({"version":actions["version"],"digest":actions["digest"]})))
         })
         .map_err(context::core)?;
     let p = match candidate {
         Ok(p) => p,
-        Err(reason) => {
+        Err(None) => {
+            return Err(record_observation_refusal(
+                &store, project, task, "native_source_unavailable",
+                native.as_ref().err().map(|error| error.code()),
+            )?);
+        }
+        Err(Some(reason)) => {
             return Ok(Some(remember(
                 key.clone(),
                 inputs.clone(),
@@ -253,6 +262,64 @@ async fn settle(
         }
         Err(e) => Err(e),
     }
+}
+
+fn record_observation_refusal(
+    store: &Store,
+    project: &str,
+    task: &str,
+    reason: &'static str,
+    diagnostic: Option<&'static str>,
+) -> Result<Refused> {
+    store.write(|db| {
+        let runtime: Option<String> = db.query_row(
+            "SELECT e.runtime_task_id FROM workspace_tasks t JOIN workspace_executions e
+             ON e.execution_id=t.execution_id JOIN runtime_tasks r ON r.task_id=e.runtime_task_id
+             WHERE t.task_id=? AND t.project_id=? AND r.state='COMPLETED'",
+            (task, project), |r| r.get(0),
+        ).optional()?;
+        if let Some(runtime) = runtime {
+            let payload = json!({"reason":reason,"diagnostic":diagnostic});
+            let exists: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?
+                 AND type='WORKSPACE_ACCEPTANCE_OBSERVATION_UNAVAILABLE' AND payload_json=json(?))",
+                (&runtime, payload.to_string()), |r| r.get(0),
+            )?;
+            if !exists {
+                cortex_core::lifecycle::event_tx(db, &runtime, "WORKSPACE_ACCEPTANCE_OBSERVATION_UNAVAILABLE", payload)?;
+            }
+        }
+        Ok(())
+    }).map_err(context::core)?;
+    if diagnostic == Some("native_verification_sandbox_unavailable") {
+        return Ok(refuse(
+            "workspace_unobservable",
+            "The native workspace observation could not start because its sandbox is unavailable. Restore local sandbox support, then retry acceptance.",
+        ));
+    }
+    let why = match reason {
+        "source_changed_during_scan" => "Files changed during the workspace scan. Let current writes finish, then retry acceptance.",
+        "source_entry_limit" => "The fallback workspace scan exceeded its file limit. Restore Git listing or reduce the files the scanner must read, then retry acceptance.",
+        "source_depth_limit" => "The workspace tree exceeds the scan depth limit. Reduce the directory depth and retry acceptance.",
+        "source_read_limit" => "The workspace exceeded the bounded read limit during the scan. Let current writes finish and retry acceptance.",
+        "source_scan_timeout" => "The workspace scan timed out. Let current writes finish, then retry acceptance.",
+        "git_listing_limit" => "Git could not produce a bounded file list. Reduce the project listing size and retry acceptance.",
+        _ => "The workspace could not be read completely. Check access to the project folder and retry acceptance.",
+    };
+    let context = match diagnostic {
+        Some("git_listing_sandbox_unavailable" | "git_listing_launch_unavailable") =>
+            " The sandboxed Git listing could not start. Check local sandbox availability and Git.",
+        Some("git_metadata_unavailable") =>
+            " The Git metadata could not be read. Check the project repository and worktree registration.",
+        Some("git_listing_failed" | "git_listing_unavailable") =>
+            " The sandboxed Git listing failed. Check the repository and local Git.",
+        Some("project_revision_unavailable") =>
+            " The checkout revision could not be observed. Check Git and access to the project folder.",
+        Some("project_unobservable_too_many_paths") =>
+            " The native checkout observation exceeded its path limit.",
+        _ => "",
+    };
+    Ok(refuse("workspace_unobservable", format!("{why}{context}")))
 }
 
 fn unavailable() -> Refused {
@@ -446,24 +513,23 @@ async fn accept_inner(
     let source_root = checkout.as_ref().map_or(root, |w| w.path.as_path());
     // Native verification keeps its full-checkout identity. In the project folder,
     // also retain an exact content witness for ordinary Commit when available.
-    let source = if checkout.is_some() || record["checkout"]["kind"].as_str().unwrap_or("main") == "main" {
-        crate::native_effects::observe_commit(source_root.to_owned()).await
-    } else {
-        None
-    };
-    let native = match &source {
-        Some(source) => Some(source.digest.clone()),
-        None => task_facts::native_observation(source_root).await,
-    };
-    let native = native.as_deref();
+    let initial = crate::native_effects::observe_digest(source_root.to_owned()).await;
     // Preserve result/version refusal order before resolving the checkout.
-    store
+    let preflight = store
         .read(|db| {
             Ok(validate(
-                db, &store, root, project, task, &record, p, native,
+                db, &store, root, project, task, &record, p, initial.as_deref().ok(),
             ))
         })
-        .map_err(context::core)??;
+        .map_err(context::core)?;
+    if let (Err(refusal), Err(error)) = (&preflight, &initial) {
+        if refusal.code == "stale_result" {
+            return Err(record_observation_refusal(
+                &store, project, task, "native_source_unavailable", Some(error.code()),
+            )?);
+        }
+    }
+    preflight?;
     checkout_shape(&record)?;
     let path = match &checkout { Some(w) => w.path.clone(), None => super::retention::task_path(root, &record, git).await? };
     let finish_consent = automatic_finish_consent(product, task, p)?;
@@ -480,11 +546,32 @@ async fn accept_inner(
             ));
         }
     }
-    store.write(|db| Ok((|| {
+    let probe = path.clone();
+    let observed = match tokio::task::spawn_blocking(move || {
+        super::legacy_source::capture_for_acceptance(&probe)
+    })
+    .await
+    .unwrap_or(Err(("source_scan_unavailable", None))) {
+        Ok(observed) => observed,
+        Err((reason, diagnostic)) => {
+            return Err(record_observation_refusal(&store, project, task, reason, diagnostic)?);
+        }
+    };
+    // The legacy witness is for integration and retention. Validate the native
+    // result again after acquiring it, so a scan retry cannot widen the time
+    // between reading verification bytes and accepting the result.
+    let source = if checkout.is_some() || record["checkout"]["kind"].as_str().unwrap_or("main") == "main" {
+        crate::native_effects::observe_commit(path.clone()).await
+    } else {
+        None
+    };
+    let native = match &source {
+        Some(source) => Ok(source.digest.clone()),
+        None => crate::native_effects::observe_digest(path).await,
+    };
+    let accepted: Result<Value> = store.write(|db| Ok((|| {
         // Start/owner replacement cannot race evidence validation and overlay replacement.
-        let (actions, counts) = validate(db, &store, root, project, task, &record, p, native)?;
-        let observed = super::legacy_source::capture(&path).map_err(context::core)?
-            .ok_or_else(|| refuse("workspace_unobservable", "The workspace could not be observed; acceptance was not recorded."))?;
+        let (actions, counts) = validate(db, &store, root, project, task, &record, p, native.as_deref().ok())?;
         let record = &mut product["tasks"][task];
         record["acceptedRevision"] = json!(observed);
         record["status"] = json!("ready_to_merge");
@@ -504,7 +591,15 @@ async fn accept_inner(
         // No retained-provider error may be returned after this mutation boundary.
         settings::write_json(&product_path(state, project)?, product)?;
         Ok(json!({"done":true,"reclamation":product["tasks"][task]["reclamation"]}))
-    })())).map_err(context::core)?
+    })())).map_err(context::core)?;
+    if let (Err(refusal), Err(error)) = (&accepted, &native) {
+        if refusal.code == "stale_result" {
+            return Err(record_observation_refusal(
+                &store, project, task, "native_source_unavailable", Some(error.code()),
+            )?);
+        }
+    }
+    accepted
 }
 /// The owner's explicit consent to delete an archived task's unmerged work when it is
 /// deleted. Nothing is deleted here and the task stays archived; archiving itself never asks.
@@ -770,10 +865,11 @@ mod native_acceptance_tests {
     }
     #[tokio::test]
     async fn automatic_acceptance_uses_the_reopened_cycles_verification_and_resolution() {
-        for (fresh_pass, current_resolution, expected) in [
-            (false, false, false),
-            (true, false, true),
-            (true, true, false),
+        for (origin, fresh_pass, current_resolution, expected) in [
+            ("owner_rework", false, false, false),
+            ("owner_rework", true, false, true),
+            ("owner_rework", true, true, false),
+            ("automatic_repair", false, false, false),
         ] {
             let (root, runtime, draft) = completed().await;
             let state = automatic_state(&root);
@@ -783,8 +879,10 @@ mod native_acceptance_tests {
                     "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED'",
                     [task], |row| row.get(0),
                 )?;
-                lifecycle::event_tx(db, task, "OWNER_TASK_RESOLVED", json!({}))?;
-                lifecycle::event_tx(db, task, "TASK_REOPENED", json!({"origin":"owner_rework"}))?;
+                if origin == "owner_rework" {
+                    lifecycle::event_tx(db, task, "OWNER_TASK_RESOLVED", json!({}))?;
+                }
+                lifecycle::event_tx(db, task, "TASK_REOPENED", json!({"origin":origin}))?;
                 if fresh_pass {
                     lifecycle::event_tx(db, task, "VERIFICATION_PASSED", serde_json::from_str(&pass)?)?;
                 }
@@ -797,12 +895,98 @@ mod native_acceptance_tests {
             let result = automatic(&root, "project", &draft, &state, &mut product, &mut Git::new())
                 .await
                 .unwrap();
-            assert_eq!(result["accepted"], expected, "{fresh_pass}/{current_resolution}: {result}");
+            assert_eq!(result["accepted"], expected, "{origin}/{fresh_pass}/{current_resolution}: {result}");
             assert_eq!(product["tasks"][&draft]["acceptance"].is_object(), expected);
             runtime.shutdown().await;
             drop(runtime);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn automatic_acceptance_reports_a_bounded_source_failure_without_reopening() {
+        let (root, runtime, draft) = completed().await;
+        let mut deep = root.clone();
+        for _ in 0..130 {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("file"), "fixture").unwrap();
+        let digest = crate::native_effects::observe_digest(root.clone()).await.unwrap();
+        with_task(&runtime, move |db, task| {
+            db.execute(
+                "UPDATE runtime_events SET payload_json=json_set(payload_json,
+                    '$.revision_digest',?2,'$.checks[0].revision_digest',?2)
+                 WHERE task_id=?1 AND type='VERIFICATION_PASSED'", (task, &digest),
+            )?;
+            db.execute(
+                "UPDATE runtime_events SET payload_json=json_set(payload_json,'$.receipt.revision_digest',?2)
+                 WHERE task_id=?1 AND type='NATIVE_COMMAND_FINISHED'", (task, &digest),
+            )?;
+            Ok(())
+        }).await;
+        let state = automatic_state(&root);
+        let mut product = sprint_product(&draft, "automatic");
+        settings::write_json(&product_path(&state, "project").unwrap(), &product).unwrap();
+        let outcome = automatic(&root, "project", &draft, &state, &mut product, &mut Git::new())
+            .await.unwrap();
+        assert_eq!(outcome["failed"], "workspace_unobservable", "{outcome}");
+        assert!(outcome["reason"].as_str().unwrap().contains("depth limit"));
+        assert!(product["tasks"][&draft]["acceptance"].is_null());
+        with_task(&runtime, |db, task| {
+            let diagnosis: (String, String) = db.query_row(
+                "SELECT r.state,json_extract(e.payload_json,'$.reason')
+                 FROM runtime_tasks r JOIN runtime_events e ON e.task_id=r.task_id
+                 WHERE r.task_id=? AND e.type='WORKSPACE_ACCEPTANCE_OBSERVATION_UNAVAILABLE'",
+                [task], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(diagnosis.0, "COMPLETED");
+            assert_eq!(diagnosis.1, "source_depth_limit");
+            Ok(())
+        }).await;
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn acceptance_explains_unavailable_native_sandbox_and_preserves_the_result() {
+        let (root, runtime, draft) = completed().await;
+        let shown = presented(&runtime, &draft).await;
+        assert_eq!(shown["reviewActions"]["accept"], true);
+        let state = automatic_state(&root);
+        let mut product = sprint_product(&draft, "automatic");
+        settings::write_json(&product_path(&state, "project").unwrap(), &product).unwrap();
+        let p = json!({"version":shown["result"]["sourceVersion"],"digest":shown["result"]["digest"]});
+        let failure = "native_verification_sandbox_unavailable";
+        let mut git = Git::new();
+        let owner = crate::native_effects::DIGEST_OBSERVATION_FAILURE.scope(
+            failure, accept(&root, "project", &draft, &state, &mut product, &p, &mut git),
+        ).await.unwrap_err();
+        assert_eq!(owner.code, "workspace_unobservable");
+        assert!(owner.message.contains("its sandbox is unavailable"));
+        assert!(owner.message.contains("Restore local sandbox support"));
+        let queue = crate::native_effects::DIGEST_OBSERVATION_FAILURE.scope(
+            failure, automatic(&root, "project", &draft, &state, &mut product, &mut git),
+        ).await.unwrap();
+        assert_eq!(queue["failed"], owner.code);
+        assert_eq!(queue["reason"], owner.message);
+        assert!(product["tasks"][&draft]["acceptance"].is_null());
+        with_task(&runtime, move |db, task| {
+            let (state, count, diagnostic): (String, i64, String) = db.query_row(
+                "SELECT r.state,count(*),min(json_extract(e.payload_json,'$.diagnostic'))
+                 FROM runtime_tasks r JOIN runtime_events e ON e.task_id=r.task_id
+                 WHERE r.task_id=? AND e.type='WORKSPACE_ACCEPTANCE_OBSERVATION_UNAVAILABLE'",
+                [task], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            assert_eq!(state, "COMPLETED");
+            assert_eq!(count, 1);
+            assert_eq!(diagnostic, failure);
+            Ok(())
+        }).await;
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2275,7 +2459,7 @@ mod native_acceptance_tests {
     /// are on its card; workers without a result say why they ended, from recorded facts.
     #[tokio::test]
     async fn a_failed_outcome_and_other_endings_are_on_the_worker_card() {
-        let (root, runtime, _) = completed().await;
+        let (root, runtime, draft) = completed().await;
         let set = |sql: &'static str, kind: Option<(&'static str, Value)>| {
             runtime
                 .host
@@ -2294,7 +2478,7 @@ mod native_acceptance_tests {
                 .unwrap()
         };
         set(
-            "UPDATE runtime_nodes SET status='failed', result_json='{\"assignment_outcome\":\"failed\",\"blocker\":{\"kind\":\"tool_unavailable\",\"detail\":\"No browser here.\"},\"checks\":[],\"report_ref\":\"r_a408f1d4976c\",\"summary\":\"The documentation update remains incomplete.\"}' WHERE assignment_ref='a-work'",
+            "UPDATE runtime_nodes SET status='failed', result_json='{\"assignment_outcome\":\"failed\",\"blocker\":{\"kind\":\"tool_unavailable\",\"detail\":\"No browser here.\"},\"objective_status\":\"partial\",\"remaining\":[\"Browser confirmation\"],\"checks\":[],\"report_ref\":\"r_a408f1d4976c\",\"summary\":\"The documentation update remains incomplete.\"}' WHERE assignment_ref='a-work'",
             None,
         )
         .await
@@ -2323,6 +2507,9 @@ mod native_acceptance_tests {
         assert_eq!(work["status"], "failed");
         assert_eq!(work["result"]["outcome"], "failed");
         assert_eq!(work["result"]["reportId"], "r_a408f1d4976c");
+        assert_eq!(work["result"]["objectiveStatus"], "partial");
+        assert_eq!(work["result"]["remaining"], json!(["Browser confirmation"]));
+        assert_eq!(work["result"]["blockerDetail"], "No browser here.");
         assert_eq!(
             work["result"]["summary"],
             "The documentation update remains incomplete."
@@ -2331,6 +2518,26 @@ mod native_acceptance_tests {
         assert!(work.get("endedReason").is_none());
         // The dead-end kind it named, so the card can say it could not run here rather than "Failed".
         assert_eq!(work["blockerKind"], "tool_unavailable");
+        let legacy = runtime.host.executor.publication(move |store| {
+            store.write(|db| {
+                let task: String = db.query_row("SELECT task_id FROM delegation_provisioning WHERE idempotency_key='a-work'", [], |r| r.get(0))?;
+                db.execute("INSERT INTO work_assignments (assignment_id,task_id,node_key,requirement_bindings_json,status,idempotency_key,created_at) VALUES ('legacy-wa',?,'worker-backend-dev','[]','failed','legacy-assignment','now')", [&task])?;
+                db.execute("INSERT INTO work_assignment_attempts (attempt_id,task_id,assignment_id,attempt_no,requirement_bindings_json,status,idempotency_key,created_at) VALUES ('legacy-at',?,'legacy-wa',1,'[]','failed','legacy-attempt','now')", [&task])?;
+                for (kind, key, payload) in [
+                    ("delegation_requested", "legacy-delegation", json!({"work_attempt_ref":"legacy-at"})),
+                    ("worker_result", "legacy-result", json!({"report_ref":"r_a408f1d4976c","checks":[]})),
+                ] {
+                    db.execute("INSERT INTO task_events (task_id,event_type,assignment_ref,dedup_key,payload_json,origin,created_at) VALUES (?,?,'a-work',?,?,'native-runtime','now')", (&task,kind,key,payload.to_string()))?;
+                }
+                super::super::workers::read_db(db, "project", &json!({"taskIds":[draft]}))
+            })
+        }).unwrap().await.unwrap().unwrap();
+        let historical = &legacy[0];
+        assert_eq!(historical["status"], "failed", "{legacy}");
+        assert_eq!(historical["blockerKind"], work["blockerKind"]);
+        for key in ["summary", "outcome", "reportId", "objectiveStatus", "remaining", "blockerDetail"] {
+            assert_eq!(historical["result"][key], work["result"][key], "{key}");
+        }
         let review = workers
             .iter()
             .find(|w| w["role"] == "code-reviewer")

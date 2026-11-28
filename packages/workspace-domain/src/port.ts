@@ -48,10 +48,16 @@ export type CatalogueState = { running: boolean; failed: { connectionId: string;
  * and maintenance fields, and omits `engineUsage` and `options`, which an update then leaves as they were.
  */
 export type MachineFacts = { machineId: string; patch: Partial<Machine>; engineUsage?: EngineWeeklyUsage[]; options?: SessionOptions; catalogue?: CatalogueState };
-export type PortUpdate = { kind: "preview"; slice: ProjectSlice; facts: ProjectFacts } | { kind: "enrichment"; update: ProjectionUpdate } | { kind: "project_state"; project: Project; issue: string | null; cause?: string | null } | { kind: "delta"; update: ProjectionUpdate } | { kind: "registry"; projectIds: string[] } | ProjectionUpdate | { kind: "connection"; connection: PortConnection } | { kind: "facts"; facts: ProjectFacts } | { kind: "machine"; facts: MachineFacts }
+/** One verified conversation for an already installed project version and execution. */
+export type ConversationUpdate = { kind: "conversation"; projectId: string; executionId: string; version: string; confirmedAt?: number;
+  conversation: Pick<TaskSession, "taskId" | "timeline" | "decisions" | "historyRead" | "historyEarlier"> & {
+    conversationRead?: {state:"ready"} | TaskSession["historyRead"]; orderedConversation?: boolean;
+  };
+};
+export type PortUpdate = { kind: "preview"; slice: ProjectSlice; facts: ProjectFacts } | { kind: "enrichment"; update: ProjectionUpdate } | { kind: "project_state"; project: Project; issue: string | null; cause?: string | null } | { kind: "project_migration"; projectId: string; active: boolean } | { kind: "delta"; update: ProjectionUpdate } | { kind: "registry"; projectIds: string[] } | ProjectionUpdate | { kind: "connection"; connection: PortConnection } | { kind: "facts"; facts: ProjectFacts } | { kind: "machine"; facts: MachineFacts }
   /** With `projectId`: that project's events arrived, so its tasks and facts are read again. Without: what the machine can
    *  do changed (a resubscribe, a registry change), so everything is read again. */
-  | { kind: "refresh"; projectId?: string };
+  | { kind: "refresh"; projectId?: string } | ConversationUpdate;
 
 export type CommandEnvelope = {
   requestId: string; operation: WorkspaceCommand["type"];
@@ -124,7 +130,7 @@ export interface WorkspacePort {
    * function releases it. `taskId` names the task the screen shows: while a project has interest, its facts carry worker
    * rows only for such tasks. A port that reads nothing in the background has no such registry.
    */
-  interest?(projectId: string, kind: GitInterest, taskId?: string): () => void;
+  interest?(projectId: string, kind: GitInterest, taskId?: string, conversation?: boolean): () => void;
   /** A screen on view shows the machine overview (storage, retention, version); it is reread only while one does. */
   watchOverview?(): () => void;
   /**
@@ -247,7 +253,8 @@ export type FileSaveResult = { outcome: "saved"; revision: string; size: number 
 
 /** Native read snapshots and patches use a separate generation/sequence domain from mutation receipts. */
 export type NativeTaskSnapshot = { projectId: string; generation: string; highWatermark: string; version: string; items: import("@cortex/workspace-contract").Task[] };
-export type NativeTaskDelta = { projectId: string; batch: { generation: string; streamKey: { scope: "project"; project_id: string }; fromSequence: string; throughSequence: string; changes: NativeTaskChange[] } };
+export type NativeHistoryHead = { taskId: string; executionId: string; position: string; questionsEmpty: boolean };
+export type NativeTaskDelta = { projectId: string; historyHeads?: NativeHistoryHead[]; batch: { generation: string; streamKey: { scope: "project"; project_id: string }; fromSequence: string; throughSequence: string; changes: NativeTaskChange[] } };
 export type NativeTaskChange = { kind: "task" | "project"; id: string; baseVersion: string; newVersion: string; operation: { type: "remove" | "invalidate" } | { type: "upsert"; data: { kind: "task_projection"; data: import("@cortex/workspace-contract").Task } } };
 /** Throw on a gap or a conflicting base; callers keep confirmed state and resnapshot, never guess. */
 export function applyNativeTaskDelta(snapshot: NativeTaskSnapshot, delta: NativeTaskDelta): NativeTaskSnapshot {
@@ -287,9 +294,14 @@ export function overlayTask(task: Task, overlay: TaskOverlay | undefined, branch
   const { status, automaticReady, planning: _planning, purged: _purged, coordinatorMetrics: _coordinatorMetrics, verificationCommands: _verificationCommands, ...facts } = overlay;
   // Runtime activity supersedes acceptance of an older result, even if a
   // machine-state write failed after durable steering capture.
-  const reopened = task.process === "live" && status === "ready_to_merge";
+  const ownerPaused = task.observedPhase === "paused" && !task.automaticContinuation?.pause;
+  const reopened = (task.process === "live" || ownerPaused) && status === "ready_to_merge";
   const next: Task = { ...task, ...facts, checkout: facts.checkout ?? checkout, status: reopened ? task.status : status ?? task.status };
-  if (reopened) { next.acceptance = null; next.observedPhase = task.observedPhase; }
+  if (reopened) {
+    next.acceptance = null;
+    next.observedPhase = task.observedPhase;
+    if (ownerPaused) next.integration = null;
+  }
   // Acceptance stores the wire source version; screens label the result sequence.
   if (next.acceptance && next.result && String(next.acceptance.version) === next.result.sourceVersion && next.acceptance.digest === next.result.digest) {
     next.acceptance = { ...next.acceptance, version: next.result.version };
@@ -299,6 +311,10 @@ export function overlayTask(task: Task, overlay: TaskOverlay | undefined, branch
   if (status === "done" && next.integration?.automatic === true) {
     next.process = "stopped";
     next.issue = null;
+  }
+  if (task.closedAs === "external" && task.warnings?.includes("owner_completed_externally")) {
+    return { ...next, status: "done", process: "stopped", observedPhase: task.observedPhase, issue: task.issue,
+      closedAs: "external", doneAt: task.doneAt, notVerifiedByCortex: true, acceptance: null, integration: null, work: "unmerged" };
   }
   if (task.closedAs === "unconfirmed") {
     // Older saved presentation must not replace the durable close or imply
@@ -349,6 +365,19 @@ function withFactEntries(session: TaskSession, facts: ProjectFacts): TaskSession
   const coordinator = metrics ? { ...session.coordinator, ...metrics } : session.coordinator;
   const commands = facts.overlays[session.taskId]?.verificationCommands;
   return { ...session, coordinator, ...(commands ? { verificationCommands: commands } : {}), decisions, timeline: [...kept, ...entries] };
+}
+
+export function applyConversation(state: WorkspaceState, update: ConversationUpdate, facts?: ProjectFacts): WorkspaceState {
+  const { conversation, projectId, executionId, confirmedAt } = update;
+  if (!state.tasks.some(t => t.id === conversation.taskId && t.projectId === projectId && t.executionId === executionId)) return state;
+  const sessions = state.sessions.map(session => {
+    if (session.taskId !== conversation.taskId) return session;
+    const next = { ...session, ...conversation };
+    return facts ? withFactEntries(next, facts) : next;
+  });
+  const projects = confirmedAt === undefined ? state.projects : state.projects.map(project =>
+    project.id === projectId && (project.confirmedAt ?? -Infinity) < confirmedAt ? { ...project, confirmedAt } : project);
+  return { ...state, projects, sessions };
 }
 
 /** One project's records replaced by what its facts say now. When they are the same records in the same order, each stays

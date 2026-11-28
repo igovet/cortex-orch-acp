@@ -1,9 +1,10 @@
+import { refOf } from "./attachment-reference";
 import { describe, expect, it, vi } from "vitest";
 import { LIMITS, validate } from "@cortex/workspace-contract";
 import { emptyWorkspace } from "@cortex/workspace-domain";
 import type { CommandEnvelope, MachineFacts, PortUpdate, ProjectionUpdate, WorkspaceCommand } from "@cortex/workspace-domain";
 import { createRealPort, MACHINE_POLL_MS, machineReadDelay, planFrom, unavailableTransport, usageObserved, USAGE_GRACE_MS, USAGE_LATE_MS, USAGE_REFRESH_MS, USAGE_RETRY_MS, type ProjectLocator } from "../src/port/real";
-import { capabilitiesWire, flush, refOf, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
+import { capabilitiesWire, flush, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
 import { REPO_RETRY_MS } from "../src/port/real";
 
 const projects: ProjectLocator[] = [{ projectId: "p", name: "Project", repository: "/p", openBranch: "main", defaultBranch: "main" }];
@@ -22,6 +23,25 @@ const port = (s: ReturnType<typeof service>) => createRealPort({ transport: s.tr
 const loaded = async (s: ReturnType<typeof service>) => { const p = port(s); await p.query("capabilities.get", {}); await p.query("project.snapshot", {}); return p; };
 
 describe("real port", () => {
+  it("shows an observed relocation from the registry and clears it from the runtime event", async () => {
+    const s = scriptedTransport({
+      "service.capabilities": () => ({ methods: ["projects.list", "projects.status"] }),
+      "projects.list": () => [{ projectId: "p", displayName: "Project", canonicalRoot: "/p", activation: {}, movingHistory: true }],
+      "capabilities.get": () => capabilitiesWire(ALL),
+    });
+    const p = createRealPort({ transport: s.transport, actorId: "local-peer", registry: true });
+    const updates: PortUpdate[] = [];
+    const stop = p.subscribe(update => updates.push(update));
+    try {
+      await p.query("capabilities.get", {});
+      s.send({ type: "project_state", projectId: "p", movingHistory: false });
+      expect(updates.filter(update => update.kind === "project_migration")).toEqual([
+        { kind: "project_migration", projectId: "p", active: true },
+        { kind: "project_migration", projectId: "p", active: false },
+      ]);
+    } finally { stop(); }
+  });
+
   it.each([["e", "Allowed once", true], ["other", "Allowed once", false], ["e", "Denied", false]] as const)(
     "checks the exact permission after a lost reply (%s, %s)", async (executionId, answerText, ok) => {
       const decision = wireDecision({ kind: "permission", permission: { operation: "run" }, options: [{ optionId: "allow", label: "Allow once" }] });
@@ -371,7 +391,7 @@ describe("real port", () => {
         if (call.op === "workers") return { ok: true, result: [] };
         if (call.op === "overview") return { ok: true, result: { name: "Desk", retentionDays: 9, autoArchiveDays: 3, automaticArchivePurge: false, unreferencedAttachmentRetentionDays: 5, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null } };
         if (call.op === "project.config.read") return {ok:true,result:{value:{},tokens:{routing:"absent",project_ceiling:"absent"}}};
-        if (call.op === "config.read") return { ok: true, result: { config: { active: "default", projects: {}, revisions: {routing:1} }, connections: [], tokens: { routing: "sha256:a", routing_profiles: "sha256:b", profile_sections: { routing: "x" } }, usage: [{ engine: "codex", connected: true, usedPercent: 40, resetAt: null, observedAt: null, window: "weekly" }] } };
+        if (call.op === "config.read") return { ok: true, result: { machineName: "Desk", config: { active: "default", projects: {}, revisions: {routing:1} }, connections: [], tokens: { routing: "sha256:a", routing_profiles: "sha256:b", profile_sections: { routing: "x" } }, usage: [{ engine: "codex", connected: true, usedPercent: 40, resetAt: null, observedAt: null, window: "weekly" }] } };
         return { ok: true, result: { done: true } };
       };
       const p = createRealPort({ transport: s.transport, actorId: "local-peer", registry: true });
@@ -670,6 +690,33 @@ describe("real port", () => {
       }
     });
 
+    it("keeps a confirmed rename when startup and Settings reply with an older name", async () => {
+      const { p, s } = helper();
+      await p.query("capabilities.get", {});
+      const names: string[] = [];
+      const stop = p.subscribe(update => {
+        if (update.kind === "machine" && update.facts.patch.name) names.push(update.facts.patch.name);
+      });
+      const answer = s.answers["machine.call"]!;
+      let release!: () => void;
+      const wait = new Promise<void>(resolve => { release = resolve; });
+      s.answers["machine.call"] = async message => {
+        const op = (message as { op: string }).op;
+        const reply = await answer(message) as { result: Record<string, unknown> };
+        if (op === "config.read" || op === "overview") await wait;
+        if (op === "config.read") reply.result.machineName = "Desk";
+        return reply;
+      };
+      const startup = p.query("machine.facts", {});
+      const overview = p.query("machine.overview", {});
+      try {
+        expect((await p.command(envelope({ type: "rename_machine", machineId: "local", name: "Studio" }))).ok).toBe(true);
+        release();
+        await Promise.all([startup, overview]);
+        expect(names).toEqual(["Studio"]);
+      } finally { release(); stop(); }
+    });
+
     it("reports the machine, its orchestration and the plan usage engines gave", async () => {
       const { p, ready, asked } = helper();
       await ready();
@@ -683,7 +730,7 @@ describe("real port", () => {
       expect(asked.map(a => a.op)).not.toContain("overview");
       const configReads = asked.filter(a => a.op === "config.read").length;
       const [overview] = await p.query("machine.overview", {});
-      expect(overview.patch).toEqual({ name: "Desk", retentionDays: 9, autoArchiveDays: 3, automaticArchivePurge: false, unreferencedAttachmentRetentionDays: 5, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null, ghAvailable: undefined, reclamationFailures: undefined, defaultWorktreeRoot: undefined });
+      expect(overview.patch).toEqual({ retentionDays: 9, autoArchiveDays: 3, automaticArchivePurge: false, unreferencedAttachmentRetentionDays: 5, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null, ghAvailable: undefined, reclamationFailures: undefined, defaultWorktreeRoot: undefined });
       // An overview-only update leaves the engine usage and the composer's options as they were.
       expect(overview).not.toHaveProperty("engineUsage");
       expect(overview).not.toHaveProperty("options");
@@ -703,7 +750,7 @@ describe("real port", () => {
         await vi.advanceTimersByTimeAsync(2 * MACHINE_POLL_MS);
         expect(asked.map(a => a.op)).not.toContain("overview");
         expect(machines.length).toBeGreaterThan(0);
-        expect(machines.every(m => !("name" in m.patch))).toBe(true);
+        expect(machines.map(m => m.patch.name).filter(Boolean)).toEqual(["Desk"]);
         await p.query("machine.overview", {});
         // Read once, with no screen left showing it: the poll does not read it again.
         asked.length = 0;
@@ -713,7 +760,7 @@ describe("real port", () => {
         asked.length = 0; machines.length = 0;
         await vi.advanceTimersByTimeAsync(2 * MACHINE_POLL_MS);
         expect(asked.filter(a => a.op === "overview").length).toBeGreaterThan(0);
-        expect(machines.find(m => "retentionDays" in m.patch)?.patch).toMatchObject({ retentionDays: 9, name: "Desk" });
+        expect(machines.find(m => "retentionDays" in m.patch)?.patch).toMatchObject({ retentionDays: 9 });
         release();
         asked.length = 0;
         await vi.advanceTimersByTimeAsync(2 * MACHINE_POLL_MS);
@@ -1203,6 +1250,32 @@ describe("real port", () => {
       s.calls.length=0;
       expect(await p.command(envelope({type:"rerun_check",taskId:"task-1",digest:"result:res:1",checkIndex:0}))).toMatchObject({ok:false,outcome:"stale_result"});
       expect(s.calls.some(c => c.operation === "executions.control")).toBe(false);
+    });
+
+    it("reads the exact manual acceptance once after disconnection and never resends it", async () => {
+      const result = {version:2,sourceVersion:"47",digest:"native-digest",summary:"Native",checks:[]};
+      const {s,p,ready} = helper({tasks:{"task-1":{result}}});
+      await ready();
+      const answer = s.answers["machine.call"]!;
+      let acceptedVersion = 2, sourceVersion = "47", writes = 0, reads = 0;
+      s.answers["machine.call"] = message => {
+        const { op, params } = message as {op:string; params:unknown};
+        if (op === "product.task") { writes++; throw new Error("service_disconnected"); }
+        if (op === "product.read") {
+          reads++;
+          expect(params).toEqual({taskIds:["task-1"]});
+          return {ok:true,result:{tasks:{"task-1":{status:"ready_to_merge",result:{...result,sourceVersion},
+            acceptance:{version:acceptedVersion,digest:result.digest}}}}};
+        }
+        return answer(message);
+      };
+      const accept = () => p.command(envelope({type:"accept_result",taskId:"task-1",digest:result.digest,sourceVersion:"47"}));
+      expect(await accept()).toMatchObject({ok:true});
+      sourceVersion = "48";
+      expect(await accept()).toMatchObject({ok:false,outcome:"unknown_outcome"});
+      sourceVersion = "47"; acceptedVersion = 1;
+      expect(await accept()).toMatchObject({ok:false,outcome:"unknown_outcome"});
+      expect([writes,reads]).toEqual([3,3]);
     });
 
     it("retains the server's stale refusal after a result command is dispatched", async () => {

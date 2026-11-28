@@ -304,6 +304,56 @@ impl Fixture {
         self.child.take();
     }
 }
+
+#[tokio::test]
+async fn service_status_needs_the_same_engines_lock_to_report_live_setup() {
+    use std::os::fd::AsRawFd;
+    let mut f = Fixture::new(20_001);
+    let codex = r#"{"phase":"downloading"}"#;
+    let claude = r#"{"phase":"refreshing_models"}"#;
+    f.initialize(&json!({
+        "config/cortex/first-run-codex-acp.json":{"mode":384,"content":codex},
+        "config/cortex/first-run-claude-agent-acp.json":{"mode":384,"content":claude},
+        "config/cortex/automatic-setup.lock":{"mode":384,"content":""},
+        "config/cortex/automatic-setup-codex-acp.lock":{"mode":384,"content":""},
+        "config/cortex/automatic-setup-claude-agent-acp.lock":{"mode":384,"content":""}
+    }));
+    let lock = |name: &str| {
+        let file = fs::File::open(f.config().join("cortex").join(name)).unwrap();
+        assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        file
+    };
+    let writer = lock("automatic-setup.lock");
+    let active = lock("automatic-setup-claude-agent-acp.lock");
+    f.start().await;
+    let status = f.wire("service.status", json!({})).await;
+    assert_eq!(status["result"]["engines"], json!({
+        "codex-acp":"interrupted", "claude-agent-acp":"refreshing_models"
+    }));
+    drop(active);
+    drop(writer);
+    let status = f.wire("service.status", json!({})).await;
+    assert_eq!(status["result"]["engines"], json!({
+        "codex-acp":"interrupted", "claude-agent-acp":"interrupted"
+    }));
+    let config = f.config().join("cortex");
+    assert_eq!(fs::read_to_string(config.join("first-run-codex-acp.json")).unwrap(), codex);
+    assert_eq!(fs::read_to_string(config.join("first-run-claude-agent-acp.json")).unwrap(), claude);
+    fs::write(config.join("first-run-codex-acp.json"), r#"{"phase":"download_failed"}"#).unwrap();
+    fs::write(config.join("first-run-claude-agent-acp.json"), r#"{"phase":"ready"}"#).unwrap();
+    let status = f.wire("service.status", json!({})).await;
+    assert_eq!(status["result"]["engines"], json!({
+        "codex-acp":"download_failed", "claude-agent-acp":"ready"
+    }));
+    let relocated = f.root.join("relocated-config");
+    fs::rename(f.config(), &relocated).unwrap();
+    std::os::unix::fs::symlink(relocated, f.config()).unwrap();
+    let status = f.wire("service.status", json!({})).await;
+    assert_eq!(status["result"]["engines"], json!({
+        "codex-acp":"not_started", "claude-agent-acp":"not_started"
+    }));
+    f.stop().await;
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {

@@ -1,0 +1,34 @@
+.sprint-blockers-trigger { flex: none; }
+dialog.dlg.sprint-blockers-dialog {
+  width: min(680px, calc(100% - 24px)); max-height: min(780px, calc(100dvh - 24px));
+  min-width: 0; white-space: normal;
+}
+.sprint-blockers-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.sprint-blockers-head h2 { margin: 0; overflow-wrap: anywhere; }
+.sprint-blockers-dialog .sprint-blockers-body { grid-template-columns: minmax(0, 1fr); gap: 10px; max-height: min(690px, calc(100dvh - 105px)); overflow: auto; }
+.sprint-blockers-note { color: var(--fg-2); margin: 0; overflow-wrap: anywhere; }
+.sprint-blockers-note p { margin: 3px 0; }
+.sprint-blockers-stats { display: flex; gap: 12px 24px; flex-wrap: wrap; margin: 0; }
+.sprint-blockers-stats div { display: flex; align-items: baseline; gap: 6px; }
+.sprint-blockers-stats dt { color: var(--fg-2); }
+.sprint-blockers-stats dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; }
+.sprint-blockers-ranked { list-style: none; padding: 0; margin: 0; }
+.sprint-blockers-row { border-block-start: 1px solid var(--line); padding-block: 12px; }
+.sprint-blockers-row h3 { margin: 0; font-size: var(--t-content); }
+.sprint-blockers-row p { margin: 2px 0 6px; }
+.sprint-blockers-row summary { padding-inline-end: 6px; overflow-wrap: anywhere; }
+.sprint-blockers-count { margin-inline-start: auto; font-variant-numeric: tabular-nums; color: var(--fg-2); }
+.sprint-blockers-row ul, .sprint-blockers-chain { margin: 0 0 6px 10px; padding-inline-start: 14px; border-inline-start: 1px solid var(--line); }
+.sprint-blockers-row ul { list-style: none; }
+.sprint-blockers-chain { list-style-position: inside; }
+.sprint-blockers-link { display: inline-flex; gap: 6px; align-items: baseline; max-width: 100%; padding-block: 4px; color: var(--fg); text-decoration: none; }
+.sprint-blockers-link span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.sprint-blockers-link .i { flex: none; color: var(--fg-2); }
+.sprint-blockers-link:hover span, .sprint-blockers-link:focus-visible span { text-decoration: underline; text-underline-offset: 3px; }
+.sprint-blockers-row li .sprint-blockers-note { display: block; font-size: var(--t-cap); }
+html[data-shell="phone"] .sprint-blockers-link { min-height: 44px; align-items: center; }
+@media (max-width: 600px) {
+  .sprint-blockers-trigger.btn { width: 28px; min-width: 28px; height: 28px; padding: 0; }
+  .sprint-blockers-trigger > span { display: none; }
+  html[data-shell="phone"] .sprint-blockers-trigger.btn { width: 44px; height: 44px; }
+}

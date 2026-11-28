@@ -1,4 +1,5 @@
 [
+  ["fact_memory"],
   [
     "code_editor_epoch",
     "code_owner_file_leases",
@@ -95,6 +96,10 @@
     "runtime_nodes",
     "runtime_requests",
     "runtime_tasks"
+  ],
+  [
+    "runtime_open_commands",
+    "runtime_open_commands_dirty"
   ],
   [
     "workspace_executions",

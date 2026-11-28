@@ -400,6 +400,71 @@ done
 "#;
 
 #[test]
+fn escalation_gateway_returns_the_committed_receipt() {
+    let fixture = Fixture::new();
+    let (key, _) = repo(&fixture);
+    let root = key.root().to_path_buf();
+    let broker_parent = key.directory();
+    let peer = fixture.0.join("fake-acp.sh");
+    fs::write(&peer, PEER).unwrap();
+    let home = fixture.0.join("home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let host = NativeHost::open(key).unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+    let task = "consultation";
+    let owner = host.create(task.into(), "Consultation fixture".into(), "owner".into()).await.unwrap();
+    receive(host.executor.write(move |db| worker(db, task)).unwrap()).await.unwrap();
+    let route = SessionRoute {
+        launch: LaunchSpec {
+            engine: cortex_engine::environment::EngineKind::Claude,
+            executable: "/usr/bin/bash".into(),
+            args: vec![peer.display().to_string(), "main".into()],
+            cwd: root.clone(),
+            native_home: home.clone(),
+            credential_directory: home.join(".claude"),
+            base_environment: [("PATH".into(), "/usr/bin:/bin".into())].into(),
+            codex_launcher: None,
+            confinement: None,
+        },
+        relay: std::env::current_exe().unwrap(),
+        broker_parent,
+        connection: "fixture".into(),
+        connection_limit: 2,
+        model: "fake".into(),
+        parameters: Default::default(),
+        instructions: "Offline fixture only".into(),
+        deadline: Duration::from_secs(5),
+    };
+    let driver = host.dispatch(
+        task.into(), owner,
+        SessionRole::Worker { assignment: "fixture-assignment".into() },
+        route,
+    ).await.unwrap();
+    let credential = &driver.credential;
+    let gateway = Gateway::new(
+        driver.policy.clone(),
+        Credentials::new(credential.channel_id.clone(), root, credential.secret().into()).unwrap(),
+    );
+    let reply = gateway.handle(json!({
+        "jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"escalation_request","arguments":{
+                "reason":"Choose whether to keep or revise the approach. The available fixture evidence does not establish which is sound.",
+                "question":"Should we keep or revise the current approach?",
+                "report_ids":[],"request_key":"escalate"
+            }
+        }
+    })).await.unwrap();
+    assert_eq!(reply["id"], 2);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(reply["result"]["structuredContent"], json!({
+        "accepted":true,"decision":"senior_consultation","scope_granted":false,"state":"RECOVERING"
+    }));
+    assert_eq!(host.state(task.into()).await.unwrap(), TaskState::Recovering);
+    driver.shutdown().await.unwrap();
+    });
+}
+
+#[test]
 fn worktree_native_cwd_and_command_mounts_with_real_namespace() {
     if !have_namespace() {
         return;
@@ -516,6 +581,41 @@ fn worktree_native_cwd_and_command_mounts_with_real_namespace() {
         assert_eq!(main.session_id(), logical.to_str().unwrap());
         assert!(main.policy.worktree.is_none());
         main.shutdown().await.unwrap();
+
+        let assigned_owner = host
+            .create("isolated".into(), "Isolated writer fixture".into(), "owner".into())
+            .await
+            .unwrap();
+        let assignment_dir = f.0.join("assignments");
+        fs::DirBuilder::new().mode(0o700).create(&assignment_dir).unwrap();
+        let o = assigned_owner.clone();
+        let isolated = receive(host.executor.publication(move |store| {
+            store.write(|db| worker(db, "isolated"))?;
+            cortex_core::workspace::worktrees::assignments::provision(
+                store, "isolated", &o, "fixture-assignment", &assignment_dir,
+            )
+        }).unwrap()).await.unwrap();
+        let isolated_session = host.dispatch(
+            "isolated".into(), assigned_owner,
+            SessionRole::Worker { assignment: "fixture-assignment".into() },
+            route("linked"),
+        ).await.unwrap();
+        assert_eq!(isolated_session.session_id(), isolated.path().to_str().unwrap());
+        let creds = Credentials::new(isolated_session.credential.channel_id.clone(), logical.clone(),
+            isolated_session.credential.secret().into()).unwrap();
+        let channel = isolated_session.policy.authenticate(&creds).await.unwrap();
+        isolated_session.policy.dispatch_call(
+            &creds, &channel, "project_read", json!({"path":"source.txt","line_numbers":false}), false,
+        ).await.unwrap();
+        let written = isolated_session.policy.dispatch_call(
+            &creds, &channel, "project_edit",
+            json!({"path":"source.txt","edits":[{"old_string":"committed","new_string":"isolated"}]}),
+            false,
+        ).await.unwrap();
+        assert_eq!(written["structuredContent"]["outcome"], "written", "{written}");
+        assert_eq!(fs::read_to_string(isolated.path().join("source.txt")).unwrap(), "isolated");
+        assert_eq!(fs::read_to_string(logical.join("source.txt")).unwrap(), "committed");
+        isolated_session.shutdown().await.unwrap();
 
         let sub = root.join("sub");
         fs::create_dir(&sub).unwrap();

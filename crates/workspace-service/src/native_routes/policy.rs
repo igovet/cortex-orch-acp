@@ -46,21 +46,7 @@ const ROLES: [&str; 23] = [
     "technical-writer",
     "ux-designer",
 ];
-pub(super) fn role_kind(role: &str) -> &'static str {
-    match role.trim_start_matches("worker-") {
-        "accessibility-auditor" | "security-auditor" | "code-reviewer" => "review",
-        "architect" | "database-architect" | "ux-designer" => "design",
-        "senior-consultant" => "consultation",
-        "accessibility-fixer" | "frontend-dev" | "mobile-dev" => "implementation_frontend",
-        "devops-engineer" => "operations",
-        "explorer" => "investigation",
-        "technical-writer" => "writing",
-        "planner" => "planning",
-        "qa-engineer" | "build-verification" => "testing",
-        "debugger" | "performance-engineer" => "debugging",
-        _ => "implementation_backend",
-    }
-}
+pub(super) use cortex_core::scheduler::role_kind;
 /// Rank independence and reruns only after the routing policy has selected the
 /// authorized review pool. The dominant author is the one with the most changed
 /// files (first in plan order on a tie).
@@ -167,6 +153,20 @@ fn role_tier(role: &str, complexity: &str, escalated: bool) -> usize {
     let i = base_tier(role) as i32 + shift - i32::from(escalated);
     i.clamp(if escalated { 0 } else { 1 }, 3) as usize
 }
+
+fn node_tier(node: &Value, role: &str, complexity: &str, escalated: bool) -> usize {
+    if !cortex_core::lifecycle::plan::PLANNABLE_ROLES.contains(&role.trim_start_matches("worker-"))
+        && node["competencies"].as_array().is_none_or(Vec::is_empty)
+    {
+        return role_tier(role, complexity, escalated);
+    }
+    let target: usize = match complexity {
+        "low" => 3,
+        "high" => 1,
+        _ => 2,
+    };
+    target - usize::from(escalated)
+}
 fn kind_in(v: &Value, kind: &str) -> bool {
     contains(v, kind) || (kind.starts_with("implementation_") && contains(v, "implementation"))
 }
@@ -229,7 +229,7 @@ fn provider_unavailability(event: &Value) -> Option<&'static str> {
     }
 }
 
-fn hot(used: Option<f64>) -> bool {
+pub(super) fn hot(used: Option<f64>) -> bool {
     used.is_some_and(|n| n >= 95.0)
 }
 fn now() -> f64 {
@@ -775,7 +775,7 @@ impl RouteResolver {
                 return refuse("unknown_model_hint");
             }
             let (grant, changed, _) = self.consent(&role, kind, hint, evidence);
-            let tier = TIERS[role_tier(&role, n["complexity"].as_str().unwrap_or("normal"), false)];
+            let tier = TIERS[node_tier(n, &role, n["complexity"].as_str().unwrap_or("normal"), false)];
             let mut item = json!({"node":n["id"],"model":hint,"tier_now":tier,"work_kind":kind,
                 "preview_status":if hint=="auto"{"auto"}else{"pending_dispatch"}});
             if let Some(change) = changed {
@@ -924,13 +924,10 @@ impl RouteResolver {
                 "builtin"
             });
         }
-        for role in ROLES
-            .iter()
-            .filter(|r| !["code-reviewer", "build-verification"].contains(r))
-        {
+        for role in cortex_core::lifecycle::plan::PLANNABLE_ROLES {
             let role = format!("worker-{role}");
             menu["role_work_kinds"][&role] = json!(role_kind(&role));
-            menu["roles"][&role] = json!({"low":TIERS[role_tier(&role,"low",false)],"normal":TIERS[role_tier(&role,"normal",false)],"high":TIERS[role_tier(&role,"high",false)]});
+            menu["roles"][&role] = json!({"low":TIERS[node_tier(&Value::Null,&role,"low",false)],"normal":TIERS[node_tier(&Value::Null,&role,"normal",false)],"high":TIERS[node_tier(&Value::Null,&role,"high",false)]});
         }
         Ok(menu)
     }
@@ -1051,7 +1048,7 @@ impl RouteResolver {
         let hint = node["model"].as_str().unwrap_or("auto");
         let (grant, changed, revocation) = self.consent(role, kind, hint, evidence);
         let mut decision = json!({"role":role,"model_hint":hint,"model_hint_reason":node["model_reason"],
-            "role_tier":TIERS[role_tier(role,complexity,escalated)],"escalated":escalated});
+            "role_tier":TIERS[node_tier(node,role,complexity,escalated)],"escalated":escalated});
         if let Some(changed) = changed {
             decision["project_instruction"] = changed;
         }
@@ -1186,7 +1183,7 @@ impl RouteResolver {
                 "ignored:pinned"
             });
             let permitted = self.efforts_any(c)?;
-            let automatic_tier = TIERS[role_tier(role, complexity, escalated)];
+            let automatic_tier = TIERS[node_tier(node, role, complexity, escalated)];
             let ladder = self.policy(c)["effort_ladder"]
                 .as_array()
                 .cloned()
@@ -1234,8 +1231,8 @@ impl RouteResolver {
         let listed = |c: &Candidate| kind_in(&self.policy(c)["preferred_for"], kind);
         let allowed_automatically =
             |c: &Candidate| self.allowed(c, true) && self.automatic(c).is_none();
-        let base_role_tier = role_tier(role, complexity, false);
-        let mut role_tier = role_tier(role, complexity, escalated);
+        let base_role_tier = node_tier(node, role, complexity, false);
+        let mut role_tier = node_tier(node, role, complexity, escalated);
         // The owner names the senior consultant's models explicitly (Preferred work:
         // consultation); their tier never excludes them, so Frontier-only models qualify.
         if consultant && kind == "consultation" {

@@ -38,11 +38,13 @@ export function changedBy(graph: LiveSprintGraph | null, taskId: string, title: 
 
 /** What one change proposes, field by field: the current value beside the proposed one, so the owner sees the difference. */
 function ChangeDiff(props: { change: SprintRevisionChange; title: Titles; current: (taskId: string) => { title: string; description: string } | null }) {
+  const ws = useWs();
   const c = () => props.change;
   const was = () => c().memberId ? props.current(c().memberId!) : null;
   const links = (ids: string[]) => ids.length ? ids.map(id => props.title(id) === "Task not loaded" ? id : props.title(id)).join(", ") : "None";
   return <li class="sp-rev-change">
     <span class="w500">{changeWords(c(), props.title)}</span>
+    <Show when={c().corrects}>{id => <div>{ws.t("sprintCorrectsTask")} {links([id()])}</div>}</Show>
     <Show when={c().op !== "propose_cancel"}>
       <dl class="sp-rev-diff">
         <Show when={c().title}>
@@ -84,6 +86,7 @@ export function SprintRevisions(props: { sprint: Sprint; graph: LiveSprintGraph 
       <For each={[...shown()].reverse()}>{r => <div class="sp-revision" role="group" aria-label={revisionHeading(r, title)}>
         <div class="sp-rev-head"><span class="w500">{revisionHeading(r, title)}</span><span class="cap muted">{revisionStatus(r)}</span></div>
         <Show when={r.reason}><p class="sp-rev-reason">{r.reason}</p></Show>
+        <Show when={r.startedAffected?.length}><div>{ws.t("sprintAffectedStarted")}<ul><For each={r.startedAffected}>{id => <li>{ws.store.index().byId.get(id)?.task.title ?? id}</li>}</For></ul></div></Show>
         <ul class="sp-rev-changes">{<For each={r.changes}>{c => <ChangeDiff change={c} title={title} current={current} />}</For>}</ul>
         <Show when={!props.history && r.status === "awaiting_owner"}>
           <div class="row gap sp-rev-actions">

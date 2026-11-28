@@ -162,6 +162,10 @@ function Worktrees(props: { repo: ProjectRepo | null; summary: ProjectSummary; p
   const ws = useWs();
   const rows = createMemo(() => worktreeRows(ws.store.index(), props.summary, props.repo));
   const main = () => props.repo?.checkouts.find(c => c.kind === "main");
+  const otherBranches = createMemo(() => {
+    const occupied = new Set(props.repo?.checkouts.map(checkout => checkout.branch));
+    return props.repo?.branches.filter(branch => !occupied.has(branch.name)) ?? [];
+  });
   const [menu, setMenu] = createSignal<Menu | null>(null);
   let pop: HTMLDivElement | undefined;
   const open = (row: WorktreeRow, trigger: HTMLElement) => { setMenu({ row }); if (pop) { place(pop, trigger, "right"); pop.showPopover?.(); } };
@@ -186,9 +190,9 @@ function Worktrees(props: { repo: ProjectRepo | null; summary: ProjectSummary; p
     </>}</Show>
     <SectionHead class="ws-wg" title="Worktrees" count={rows().length} />
     <Show when={rows().length > 0} fallback={<div class="cap muted ws-pad">No worktrees in this project.</div>}><div class="gt"><Keyed each={rows()} by={r => r.key}>{r => gr(r)}</Keyed></div></Show>
-    <Show when={(props.repo?.branches.length ?? 0) > 0}>
-      <SectionHead class="ws-wg" title="Other branches" count={props.repo!.branches.length} />
-      <div class="gt"><For each={props.repo!.branches}>{b => <div class="gr" style={{ "--cols": COLS }}><span class="trunc"><span class="mono ws-fg">{b.name}</span><span class="sub">{b.where}</span></span><span class="cap muted trunc">{b.task ?? "None"}</span><span class="cap tnum">{b.ahead} / {b.behind}</span><span><span class="st st-idle">No checkout</span></span><span></span></div>}</For></div>
+    <Show when={otherBranches().length > 0}>
+      <SectionHead class="ws-wg" title="Other branches" count={otherBranches().length} />
+      <div class="gt"><For each={otherBranches()}>{b => <div class="gr" style={{ "--cols": COLS }}><span class="trunc"><span class="mono ws-fg">{b.name}</span><span class="sub">{b.where}</span></span><span class="cap muted trunc">{b.task ?? "None"}</span><span class="cap tnum">{b.ahead} / {b.behind}</span><span><span class="st st-idle">No checkout</span></span><span></span></div>}</For></div>
     </Show>
     <Pop id="m-worktree" class="pop-right" label="Worktree actions" ref={el => { pop = el; }}>
       <Show when={menu()}>

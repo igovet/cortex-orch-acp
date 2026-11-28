@@ -1,8 +1,12 @@
 import { validate, type CodeLspEvent } from "@cortex/workspace-contract";
+import type { HistoryFollowRequest } from "../../../packages/workspace-ui/src/port/history-follow";
 import { nativeDelta } from "../../../packages/workspace-ui/src/port/native";
 import type { RealTransport, TransportEvent } from "../../../packages/workspace-ui/src/port/real";
 
 export type NativeDependencies = {
+  historyOpen?(id: string, params: unknown): Promise<void>;
+  historyNext?(id: string): Promise<unknown>;
+  historyClose?(id: string): Promise<void>;
   invoke(body: { operation: string; message: unknown }): Promise<unknown>;
   listen(listener: (event: unknown) => void): Promise<() => void>;
 };
@@ -39,7 +43,10 @@ function eventOf(raw: unknown): TransportEvent | null {
   if (e.type === "refresh") return { type: "refresh" };
   // Remote access moved, or one project's runtime did: each is read again on its own, never everything.
   if (e.type === "remote_state") return { type: "remote_state" };
-  if (e.type === "project_state" && typeof e.projectId === "string") return { type: "project_state", projectId: e.projectId };
+  if (e.type === "project_state" && typeof e.projectId === "string") return {
+    type: "project_state", projectId: e.projectId,
+    ...(typeof e.movingHistory === "boolean" ? { movingHistory: e.movingHistory } : {}),
+  };
   if (e.type === "connection" && ["connecting", "connected", "disconnected", "unavailable"].includes(String(e.state)))
     return { type: "connection", state: e.state as "connecting" | "connected" | "disconnected" | "unavailable",
       ...(typeof e.reason === "string" ? { reason: e.reason } : {}) };
@@ -64,7 +71,41 @@ export function createDesktopTransport(native: NativeDependencies) {
     .then(stop => { if (disposed) stop(); else unlisten = stop; })
     .catch(() => publish(lost));
 
+  let opening: Promise<void> = Promise.resolve();
+  let stopHistory: (() => void) | undefined;
   const transport: RealTransport = {
+    ...(native.historyOpen && native.historyNext && native.historyClose ? {
+      followHistory(params: HistoryFollowRequest,
+        onEvent: (value: unknown) => void, onEnd: () => void) {
+        stopHistory?.();
+        const id = crypto.randomUUID();
+        let active = true;
+        const stop = () => {
+          if (!active) return;
+          active = false;
+          if (stopHistory === stop) stopHistory = undefined;
+          void opened.then(() => native.historyClose!(id)).catch(() => {});
+        };
+        stopHistory = stop;
+        const opened = opening.then(() => {
+          if (active && !disposed) return native.historyOpen!(id, params);
+        });
+        opening = opened.catch(() => {});
+        void (async () => {
+          try {
+            await opened;
+            while (active && !disposed) {
+              const event = await native.historyNext!(id);
+              if (!active || disposed) break;
+              onEvent(event);
+              if ((event as {type?:unknown})?.type === "native_history_resync") break;
+            }
+          } catch { /* A lost private socket is recovered from the UI's confirmed cursor. */ }
+          finally { if (active) { stop(); onEnd(); } }
+        })();
+        return stop;
+      },
+    } : {}),
     async request(operation, message) {
       if (disposed) throw new Error("Workspace window detached");
       if (closing) throw new Error("Workspace window closing");
@@ -96,5 +137,5 @@ export function createDesktopTransport(native: NativeDependencies) {
       try { await Promise.all([...pending]); await finish(); }
       finally { closing = false; }
     },
-    dispose() { disposed = true; listeners.clear(); unlisten?.(); } };
+    dispose() { disposed = true; stopHistory?.(); listeners.clear(); unlisten?.(); } };
 }

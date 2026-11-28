@@ -119,12 +119,7 @@ pub(super) fn writable(
     i: &Identity,
     path: Option<&str>,
 ) -> CoreResult<()> {
-    if i.role != "worker"
-        || policy::read_only(
-            i.profile.as_deref().unwrap_or(""),
-            i.stage.as_deref().unwrap_or(""),
-        )
-    {
+    if crate::native_engine_policy::read_only(i) {
         return Err(CoreError::Refused("writing_worker_required"));
     }
     // A read-only sprint planning task never writes the project.
@@ -210,13 +205,13 @@ pub(super) fn checkout_binding(store: &Store, i: &Identity) -> CoreResult<Option
             (&i.task, i.epoch),
             |row| row.get(0),
         ).optional()?.ok_or(CoreError::Refused("stale_owner"))?;
-        checkout_binding_for(store, db, &i.task, owner, i.epoch)
+        checkout_binding_for(store, db, &i.task, owner, i.epoch, i.assignment.as_deref())
     })
 }
 
-fn checkout_binding_for(store: &Store, db: &rusqlite::Connection, task: &str, owner: String, epoch: i64) -> CoreResult<Option<Value>> {
-    let binding = cortex_core::workspace::worktrees::resolve_on(db, store.key(), task,
-        &cortex_core::ownership::OwnerEpoch { owner, epoch })?;
+fn checkout_binding_for(store: &Store, db: &rusqlite::Connection, task: &str, owner: String, epoch: i64, assignment: Option<&str>) -> CoreResult<Option<Value>> {
+    let binding = cortex_core::workspace::worktrees::resolve_for_assignment_on(db, store.key(), task,
+        &cortex_core::ownership::OwnerEpoch { owner, epoch }, assignment)?;
     Ok(binding.worktree.map(|w| json!({
         "id":w.id, "root":w.path, "logical":binding.logical.root(), "owner_epoch":epoch
     })))
@@ -230,7 +225,8 @@ pub(super) fn retained_checkout_matches(store: &Store, task: &str, binding: &Val
             (task, epoch), |row| row.get(0),
         ).optional()?;
         let Some(owner) = owner else { return Ok(false); };
-        match checkout_binding_for(store, db, task, owner, epoch) {
+        let assignment = cortex_core::workspace::worktrees::assignments::assignment_for_receipt(db, task, binding)?;
+        match checkout_binding_for(store, db, task, owner, epoch, assignment.as_deref()) {
             Ok(current) => Ok(current.as_ref() == Some(binding)),
             Err(CoreError::Refused(_)) => Ok(false),
             Err(error) => Err(error),
@@ -247,6 +243,15 @@ pub(super) fn task_root(db: &rusqlite::Connection, task: &str) -> CoreResult<std
         |r| r.get(0),
     )?;
     Ok(path.into())
+}
+
+pub(super) fn identity_root(db: &rusqlite::Connection, identity: &Identity) -> CoreResult<std::path::PathBuf> {
+    if let Some(assignment) = identity.assignment.as_deref() {
+        if let Some(root) = cortex_core::workspace::worktrees::assignments::root_on(db, &identity.task, assignment)? {
+            return Ok(root);
+        }
+    }
+    task_root(db, &identity.task)
 }
 
 /// Effective paths for a current writer. Command callers must authenticate the
@@ -330,11 +335,14 @@ pub(super) fn writable_target(
     scoped: bool,
 ) -> CoreResult<()> {
     writable(db, i, Some(path))?;
+    if crate::native_engine_policy::live_store_file(&root.join(path)) {
+        return Err(CoreError::Refused("cortex_live_store"));
+    }
     if crate::native_engine_policy::project_private(Path::new(path)) && !admitted(path) {
         return Err(CoreError::Refused("private_or_invalid_path"));
     }
     if scoped {
-        if task_root(db, &i.task)? != root {
+        if identity_root(db, i)? != root {
             return Err(CoreError::Refused("project_context_conflict"));
         }
         if !effective_write_scope(db, i)?
@@ -475,6 +483,27 @@ pub(super) fn open_project_root(root: &Path) -> CoreResult<File> {
     openat(&folder, ".", libc::O_RDONLY | libc::O_DIRECTORY)
 }
 fn bytes(folder: &File, name: &str) -> CoreResult<Option<(Vec<u8>, u32)>> {
+    Ok(read_project_entry(folder, name, false)?.map(|(data, mode, _)| (data, mode)))
+}
+
+fn file_identity(metadata: &fs::Metadata) -> [u64; 8] {
+    [
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        u64::from(metadata.mode()),
+        metadata.mtime() as u64,
+        metadata.mtime_nsec() as u64,
+        metadata.ctime() as u64,
+        metadata.ctime_nsec() as u64,
+    ]
+}
+
+fn read_project_entry(
+    folder: &File,
+    name: &str,
+    retain_identity: bool,
+) -> CoreResult<Option<(Vec<u8>, u32, Option<[u64; 8]>)>> {
     let file = match openat(folder, name, libc::O_RDONLY) {
         Ok(f) => f,
         Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -488,8 +517,18 @@ fn bytes(folder: &File, name: &str) -> CoreResult<Option<(Vec<u8>, u32)>> {
     }
     let mut b = Vec::new();
     // Text has no attachment-size cap; line delivery remains bounded.
-    file.take(u64::MAX).read_to_end(&mut b)?;
-    Ok(Some((b, m.mode() & 0o777)))
+    (&file).take(u64::MAX).read_to_end(&mut b)?;
+    let identity = if retain_identity {
+        let start = file_identity(&m);
+        let end = file_identity(&openat(folder, name, libc::O_PATH)?.metadata()?);
+        if start != end || start != file_identity(&file.metadata()?) || m.len() != b.len() as u64 {
+            return Err(CoreError::Refused("project_unobservable_changed_while_reading"));
+        }
+        Some(start)
+    } else {
+        None
+    };
+    Ok(Some((b, m.mode() & 0o777, identity)))
 }
 /// SHA-256 of a project file's current bytes, read the same way `project_read`
 /// reads them (descriptor traversal, no symlinks, a regular file; hard links are fine to read).
@@ -500,8 +539,153 @@ pub(super) fn current_sha256(root: &Path, path: &str) -> Option<String> {
     let (b, _) = bytes(&folder, &name).ok()??;
     Some(digest(&b))
 }
+
+pub(super) fn memory_source_path(path: &str) -> bool {
+    cortex_core::store::fact_memory::source_path(path)
+        && !crate::native_engine_policy::project_private(Path::new(path))
+        && !path.split('/').any(crate::native_engine_policy::credential_file)
+}
+
+pub(super) fn memory_sha256(root: &Path, path: &str) -> Option<String> {
+    const FILE_BYTES: u64 = 256 * 1024;
+    if !memory_source_path(path) {
+        return None;
+    }
+    let (folder, name) = parent(root, path).ok()?;
+    let mut file = openat(&folder, &name, libc::O_RDONLY).ok()?;
+    let before = file.metadata().ok()?;
+    if !before.is_file() || before.nlink() != 1 || before.len() > FILE_BYTES {
+        return None;
+    }
+    let mut content = Vec::new();
+    (&mut file).take(FILE_BYTES + 1).read_to_end(&mut content).ok()?;
+    let after = openat(&folder, &name, libc::O_PATH).ok()?.metadata().ok()?;
+    (content.len() as u64 == before.len()
+        && before.dev() == after.dev()
+        && before.ino() == after.ino()
+        && before.len() == after.len()
+        && before.mtime() == after.mtime()
+        && before.mtime_nsec() == after.mtime_nsec()
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec())
+        .then(|| digest(&content))
+}
 fn coverage_key(path: &str) -> String {
     format!("file-read:{}", digest(path.as_bytes()))
+}
+
+/// Coordinator file reads are planning evidence. Check the most recent retained
+/// read of each file from this checkout before committing a new proposal.
+pub(super) fn changed_plan_inputs(
+    db: &rusqlite::Connection,
+    root: &Path,
+    task: &str,
+    actor: &str,
+    binding: Option<&Value>,
+) -> CoreResult<Vec<String>> {
+    const REHASH_BYTES: u64 = 512 * 1024 * 1024;
+    let mut query = db.prepare(
+            "SELECT r.request_key,r.digest,r.result_json FROM trusted_channels c
+             JOIN runtime_requests r ON r.task_id=c.task_id AND r.actor=c.channel_id
+             WHERE c.task_id=?1 AND r.operation='native_file_read'
+               AND (c.role='coordinator' OR (c.role='worker'
+                 AND json_extract(r.result_json,'$.planning_observation')=1
+                 AND EXISTS(SELECT 1 FROM runtime_nodes n JOIN delegation_provisioning p
+                   ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
+                   WHERE n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
+                     AND p.channel_id=c.channel_id AND p.attempt_id=c.attempt_id
+                     AND p.owner_epoch=c.owner_epoch AND p.role_id=n.role
+                     AND n.stage='execution' AND n.status='completed' AND n.result_json IS NOT NULL)))
+             ORDER BY coalesce(json_extract(r.result_json,'$.observed_at'),c.issued_at) DESC,
+                      (r.actor=?2) DESC,c.issued_at DESC,r.rowid DESC",
+        )?;
+    let receipts = query.query_map((task, actor), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+    let mut seen = std::collections::HashSet::new();
+    let mut changed = Vec::new();
+    let mut remaining_bytes = REHASH_BYTES;
+    for receipt in receipts {
+        let (key, hash, raw) = receipt?;
+        let receipt: Value = serde_json::from_str(&raw)?;
+        if receipt.get("checkout") != binding || !seen.insert(key.clone()) {
+            continue;
+        }
+        // Older receipts intentionally stored only a hash of the path.
+        let Some(path) = receipt["path"].as_str() else {
+            continue;
+        };
+        if coverage_key(path) == key
+            && !plan_input_matches(root, path, &hash, &receipt["file_identity"], &mut remaining_bytes)
+        {
+            changed.push(path.to_owned());
+        }
+    }
+    changed.sort();
+    Ok(changed)
+}
+
+fn plan_input_matches(
+    root: &Path,
+    path: &str,
+    hash: &str,
+    identity: &Value,
+    remaining_bytes: &mut u64,
+) -> bool {
+    const FILE_REHASH_BYTES: u64 = 64 * 1024 * 1024;
+    let mut read = || -> CoreResult<bool> {
+        let current = plan_entry_metadata(root, path)?;
+        let current_identity = file_identity(&current);
+        let retained = serde_json::from_value::<[u64; 8]>(identity.clone()).ok();
+        if hash == "directory" {
+            return Ok(current.is_dir() && retained.is_none_or(|old| old == current_identity));
+        }
+        if hash == "absent" || !current.is_file() {
+            return Ok(false);
+        }
+        if retained == Some(current_identity) {
+            return Ok(true);
+        }
+        let limit = FILE_REHASH_BYTES.min(*remaining_bytes);
+        if current.len() > limit {
+            return Ok(false);
+        }
+        let (folder, name) = parent(root, path)?;
+        let file = openat(&folder, &name, libc::O_RDONLY)?;
+        let before = file.metadata()?;
+        if file_identity(&before) != current_identity {
+            return Ok(false);
+        }
+        let mut observed = Sha256::new();
+        *remaining_bytes = remaining_bytes.saturating_sub(current.len());
+        let copied = std::io::copy(&mut (&file).take(current.len()), &mut observed)?;
+        let after = plan_entry_metadata(root, path)?;
+        Ok(copied == current.len()
+            && current_identity == file_identity(&after)
+            && current_identity == file_identity(&file.metadata()?)
+            && format!("{:x}", observed.finalize()) == hash)
+    };
+    match read() {
+        Ok(matches) => matches,
+        Err(CoreError::Io(error)) => hash == "absent" && error.kind() == std::io::ErrorKind::NotFound,
+        Err(_) => false,
+    }
+}
+
+fn plan_entry_metadata(root: &Path, path: &str) -> CoreResult<fs::Metadata> {
+    if path == "." {
+        return Ok(root.symlink_metadata()?);
+    }
+    let (folder, name) = parent(root, path)?;
+    Ok(openat(&folder, &name, libc::O_PATH)?.metadata()?)
+}
+
+pub(super) fn changed_plan_inputs_reply(mut paths: Vec<String>) -> Value {
+    let total = paths.len();
+    paths.truncate(16);
+    let value = json!({"code":"plan_inputs_changed","recorded":false,"paths":paths,"total":total,
+        "message":"The proposal's previously read files have changed or cannot be observed. Read the current paths with project_read and revise the proposal before submitting it again."});
+    json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":true})
 }
 fn coverage(
     store: &Store,
@@ -576,10 +760,20 @@ fn save_coverage(
     binding: Option<&Value>,
 ) -> CoreResult<()> {
     let mut v = v.clone();
+    if planning_observation(i) {
+        v["path"] = json!(path);
+        v["planning_observation"] = json!(true);
+        v["observed_at"] = json!(cortex_core::now());
+    }
     if let Some(binding) = binding { v["checkout"] = binding.clone(); }
     v["observed"] = json!(true);
     store.write(|db|{let current=channels::authenticate(db,&c.channel_id,c.secret(),true)?;if &current!=i{return Err(CoreError::Refused("channel_identity_changed"));}db.execute("INSERT INTO runtime_requests VALUES (?,?,?,'native_file_read',?,?) ON CONFLICT(task_id,actor,request_key) DO UPDATE SET digest=excluded.digest,result_json=excluded.result_json WHERE operation='native_file_read'",
         (&i.task,coverage_key(path),&c.channel_id,v["sha256"].as_str().unwrap_or("absent"),v.to_string()))?;Ok(())})
+}
+fn planning_observation(i: &Identity) -> bool {
+    i.role == "coordinator"
+        || (i.role == "worker" && i.stage.as_deref() == Some("execution")
+            && crate::native_engine_policy::read_only(i))
 }
 fn mime(b: &[u8]) -> Option<&'static str> {
     if b.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -651,6 +845,9 @@ fn read_at(
             let (folder, name) = parent(root, path)?;
             openat(&folder, &name, libc::O_RDONLY | libc::O_DIRECTORY)?
         };
+        let identity = planning_observation(i)
+            .then(|| held.metadata().map(|m| file_identity(&m)))
+            .transpose()?;
         let mut entries = fs::read_dir(format!("/proc/self/fd/{}", held.as_raw_fd()))?
             .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
             .collect::<Result<Vec<_>, _>>()?;
@@ -665,12 +862,22 @@ fn read_at(
                 break;
             }
         }
-        return Ok(crate::native_sources::reply(
-            json!({"path":path,"entries":selected,"total_entries":total,"next_offset":if start-1+selected.len()<total{json!(start+selected.len())}else{Value::Null}}),
-        ));
+        let result = json!({"path":path,"entries":selected,"total_entries":total,
+            "next_offset":if start-1+selected.len()<total{json!(start+selected.len())}else{Value::Null}});
+        if let Some(identity) = identity.filter(|_| !batched
+            || serde_json::to_vec(&result).is_ok_and(|b| b.len() <= crate::native_batch::ITEM_BYTES))
+        {
+            if identity != file_identity(&plan_entry_metadata(root, path)?) {
+                return Err(CoreError::Refused("project_unobservable_changed_while_reading"));
+            }
+            save_coverage(store, i, c, path,
+                &json!({"sha256":"directory","file_identity":identity}), binding)?;
+        }
+        return Ok(crate::native_sources::reply(result));
     }
     let (folder, name) = parent(root, path)?;
-    let (b, _) = bytes(&folder, &name)?.ok_or(CoreError::Refused("file_missing"))?;
+    let (b, _, identity) = read_project_entry(&folder, &name, planning_observation(i))?
+        .ok_or(CoreError::Refused("file_missing"))?;
     let hash = digest(&b);
     let mut meta = json!({"path":path,"sha256":hash,"size_bytes":b.len()});
     if let Some(mime) = mime(&b) {
@@ -688,7 +895,7 @@ fn read_at(
                 i,
                 c,
                 path,
-                &json!({"sha256":hash,"lines":[],"complete":true,"content":"image"}),
+                &json!({"sha256":hash,"lines":[],"complete":true,"content":"image","file_identity":identity}),
                 binding,
             )?;
             meta["read_coverage_complete"] = json!(true);
@@ -708,7 +915,7 @@ fn read_at(
             i,
             c,
             path,
-            &json!({"sha256":hash,"lines":[],"complete":true,"content":"binary"}),
+            &json!({"sha256":hash,"lines":[],"complete":true,"content":"binary","file_identity":identity}),
             binding,
         )?;
         meta["read_coverage_complete"] = json!(true);
@@ -845,6 +1052,12 @@ fn read_at(
     // page the batch would defer records nothing and claims only the coverage
     // already recorded before it.
     if !batched || serde_json::to_vec(&meta)?.len() <= crate::native_batch::ITEM_BYTES {
+        if covered["complete"] == true && memory_source_path(path) {
+            covered["fact_source_path"] = json!(path);
+        }
+        if let Some(identity) = identity {
+            covered["file_identity"] = json!(identity);
+        }
         save_coverage(store, i, c, path, &covered, binding)?;
     } else {
         meta["read_coverage_complete"] = json!(prior_complete);
@@ -889,7 +1102,7 @@ fn reconcile_file(
         // A legacy partial receipt cannot establish a worktree effect.
         return Ok(None);
     }
-    if let Some(workspace) = workspace {
+    if let Some(workspace) = workspace.filter(|_| intent.get("checkout").is_none()) {
         let current = store.read(|db| task_root(db, task))?;
         if workspace != current {
             return Ok(None);
@@ -1001,6 +1214,12 @@ mod effective_scope_tests {
             check(".cortex-dev/cortex.sqlite3"),
             Some("private_or_invalid_path")
         );
+        // A scoped live-store write is still refused if a caller admits the
+        // private name before reaching the final effect check.
+        {
+            let _admission = Admitted::enter(".cortex-dev/cortex.sqlite3");
+            assert_eq!(check(".cortex-dev/cortex.sqlite3"), Some("cortex_live_store"));
+        }
         assert_ne!(check("AGENTS.md"), Some("rule_file_protected"));
         store.write(|db| {
             lifecycle::event_tx(db, "t", "USER_STEERING",
@@ -1115,6 +1334,116 @@ mod long_line_tests {
     }
     fn page(store: &Store, i: &Identity, c: &Credential, args: Value) -> Value {
         read(store, i, c, &args, false).unwrap()["structuredContent"].take()
+    }
+    #[test]
+    fn plan_inputs_recheck_prior_coordinator_reads_in_the_same_checkout() {
+        let (f, store, _, _) = reviewer();
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
+            Ok(())
+        }).unwrap();
+        let coordinator = || {
+            store
+                .write(|db| {
+                    let owner = cortex_core::ownership::OwnerEpoch { owner: "owner".into(), epoch: 1 };
+                    let c = channels::issue_tx(db, "t", &owner, channels::Principal::Coordinator)?;
+                    channels::bind_session_tx(db, &c, "planner")?;
+                    Ok(c)
+                })
+                .unwrap()
+        };
+        let old = coordinator();
+        let identify = |c: &Credential| {
+            store.read(|db| channels::authenticate(db, &c.channel_id, c.secret(), true)).unwrap()
+        };
+        let old_identity = identify(&old);
+        fs::write(f.0.join("input.txt"), "before").unwrap();
+        page(&store, &old_identity, &old, json!({"path":"input.txt"}));
+        page(&store, &old_identity, &old, json!({"path":"missing.txt"}));
+        store.write(|db| channels::revoke_tx(db, &old.channel_id)).unwrap();
+        let new = coordinator();
+        let changed = || {
+            store
+                .read(|db| changed_plan_inputs(db, &f.0, "t", &new.channel_id, None))
+                .unwrap()
+        };
+        fs::write(f.0.join("unrelated.txt"), "elsewhere").unwrap();
+        assert!(changed().is_empty());
+        fs::write(f.0.join("input.txt"), "after").unwrap();
+        fs::write(f.0.join("missing.txt"), "created").unwrap();
+        let stale = changed();
+        assert_eq!(stale, ["input.txt", "missing.txt"]);
+        let refusal = changed_plan_inputs_reply(stale);
+        assert_eq!(refusal["isError"], true);
+        assert_eq!(refusal["structuredContent"]["code"], "plan_inputs_changed");
+        assert_eq!(refusal["structuredContent"]["recorded"], false);
+        let new_identity = identify(&new);
+        page(&store, &new_identity, &new, json!({"path":"input.txt"}));
+        assert_eq!(changed(), ["missing.txt"]);
+        fs::remove_file(f.0.join("missing.txt")).unwrap();
+        assert!(changed().is_empty());
+    }
+    #[test]
+    fn plan_input_rehash_respects_its_budget_and_refuses_special_entries() {
+        let (fixture, _, _, _) = reviewer();
+        let path = fixture.0.join("input");
+        fs::write(&path, "original").unwrap();
+        let hash = digest(b"original");
+        let identity = json!(file_identity(&path.metadata().unwrap()));
+        assert!(plan_input_matches(&fixture.0, "input", &hash, &identity, &mut 0));
+        assert!(!plan_input_matches(&fixture.0, "input", &hash, &Value::Null, &mut 4));
+        assert!(plan_input_matches(&fixture.0, "input", &hash, &Value::Null, &mut 16));
+
+        fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(!plan_input_matches(&fixture.0, "input", &hash, &identity, &mut 16));
+    }
+    #[test]
+    fn plan_inputs_include_inline_batched_reads_of_completed_read_only_specialists() {
+        let (fixture, store, _, _) = reviewer();
+        let worker = store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='EXECUTING' WHERE task_id='t'", [])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'study','worker-explorer','Read','[]',
+                '[\"src\"]','execution','running','study-assignment',NULL)", [])?;
+            let owner = cortex_core::ownership::OwnerEpoch { owner: "owner".into(), epoch: 1 };
+            let c = channels::issue_tx(db, "t", &owner, channels::Principal::Worker {
+                assignment: "study-assignment",
+            })?;
+            channels::bind_session_tx(db, &c, "study-session")?;
+            Ok(c)
+        }).unwrap();
+        let identity = store.read(|db| channels::authenticate(db, &worker.channel_id, worker.secret(), true)).unwrap();
+        fs::create_dir(fixture.0.join("src")).unwrap();
+        fs::write(fixture.0.join("src/input"), "before").unwrap();
+        for path in ["src/input", "src"] {
+            let reply = read(&store, &identity, &worker, &json!({"path": path}), true).unwrap();
+            assert_eq!(reply["structuredContent"]["path"], path);
+        }
+        fs::write(fixture.0.join("src/input"), "after").unwrap();
+        fs::write(fixture.0.join("src/added"), "new entry").unwrap();
+        let read_inputs = || store.read(|db| changed_plan_inputs(db, &fixture.0, "t", "planner", None)).unwrap();
+        assert!(read_inputs().is_empty());
+        store.write(|db| {
+            db.execute("UPDATE runtime_nodes SET status='completed', result_json='{}'
+                WHERE assignment_ref='study-assignment'", [])?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(read_inputs(), ["src", "src/input"]);
+
+        let coordinator = store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
+            let owner = cortex_core::ownership::OwnerEpoch { owner: "owner".into(), epoch: 1 };
+            let c = channels::issue_tx(db, "t", &owner, channels::Principal::Coordinator)?;
+            channels::bind_session_tx(db, &c, "planner")?;
+            Ok(c)
+        }).unwrap();
+        let identity = store.read(|db| channels::authenticate(db, &coordinator.channel_id,
+            coordinator.secret(), true)).unwrap();
+        page(&store, &identity, &coordinator, json!({"path":"src/input"}));
+        assert_eq!(read_inputs(), ["src"]);
+        page(&store, &identity, &coordinator, json!({"path":"src"}));
+        assert!(read_inputs().is_empty());
     }
     /// Follows next_offset/next_column from `(offset, column)` to the end of the
     /// file: the raw text returned, the page count and the last page.
@@ -1371,7 +1700,7 @@ mod long_line_tests {
             {"path":"stale.bin","change":"added","current_sha256":"0".repeat(64)}],"total":5,"complete":true},
             "read_scope_covers_change":true,"outside_read_scope":[]});
         fs::write(f.0.join("stale.bin"), [0u8, 1, 2]).unwrap();
-        add_review_lines(&f.0, None, &mut packet);
+        let _ = add_review_lines(&f.0, None, &mut packet);
         let kinds: Vec<Value> = packet["changed_files"]["files"]
             .as_array()
             .unwrap()
@@ -1456,6 +1785,7 @@ mod recovery_tests {
             .create("t", "Implement the parser", "owner")
             .unwrap();
         let i = Identity {
+            read_only: false,
             task: "t".into(),
             attempt: "a".into(),
             principal: "worker".into(),
@@ -2008,6 +2338,7 @@ fn execute_inner(
         missing_parents(root_path, path, |parent| {
             writable_target(db, i, root_path, parent, scoped)
         })?;
+        intent["revision"] = json!(lifecycle::domain::task_tx(db, &i.task)?.1);
         db.execute(
             "INSERT INTO runtime_requests VALUES (?,?,?,?,?,?)",
             (
@@ -2027,6 +2358,9 @@ fn execute_inner(
         let missing = missing_parents(root_path, path, |parent| {
             writable_target(db, i, root_path, parent, scoped)
         })?;
+        if intent["revision"] != lifecycle::domain::task_tx(db, &i.task)?.1 {
+            return Err(CoreError::Refused("stale_project_write"));
+        }
         let fence = WorkerLeaseFence::new(root_path, path, &missing)?;
         match fence.check(db) {
             Ok(()) => {}
@@ -2111,12 +2445,20 @@ fn execute_inner(
         binding,
     )?;
     let mut settled = json!({"complete":true,"reply":v});
-    let mut event = json!({"channel_id":c.channel_id,"path":path,"sha256":new_hash,"encoding":encoding,"add":added,"del":removed});
+    let mut event = json!({"channel_id":c.channel_id,"path":path,"sha256":new_hash,"encoding":encoding,"add":added,"del":removed,"request_key":key});
     if let Some(binding) = binding {
         settled["checkout"] = binding.clone();
         event["checkout"] = binding.clone();
     }
-    store.write(|db|{db.execute("UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?",
+    store.write(|db|{
+        let (operation, revision): (String, i64) = db.query_row(
+            "SELECT operation,json_extract(result_json,'$.revision') FROM runtime_requests
+             WHERE task_id=? AND actor=? AND request_key=?", (&i.task,&c.channel_id,&key),
+            |row|Ok((row.get(0)?,row.get(1)?)))?;
+        event["operation"] = json!(operation);
+        event["revision"] = json!(revision);
+        settled["revision"] = json!(revision);
+        db.execute("UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?",
         (settled.to_string(),&i.task,&c.channel_id,&key))?;
         lifecycle::event_tx(db,&i.task,"NATIVE_PROJECT_WRITTEN",event)?;Ok(())})?;
     Ok(v)
@@ -2290,18 +2632,26 @@ fn required_bytes(bytes: &[u8], ranges: &[[u64; 2]]) -> usize {
 /// read it completely (an image directly, so that it was shown). Text whose required
 /// bytes (the `review_lines` ranges, or the whole file) exceed `BULK_BYTES` is
 /// marked `bulk` the same way.
-pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Value) {
+pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Value) -> Option<usize> {
+    let mut observed = Some(0usize);
+    if packet["changed_files"]["required"].as_u64().unwrap_or(0) == 0
+        || packet["changed_files"]["more"]["required"].as_u64().unwrap_or(0) > 0
+    {
+        observed = None;
+    }
     let Some(files) = packet["changed_files"]["files"].as_array_mut() else {
-        return;
+        return None;
     };
     let mut any = false;
     let mut bulk = false;
     for file in files {
+        let task_file = file["required"] == true;
         if let Some(entry) = file.as_object_mut() {
             entry.remove("review_lines");
             entry.remove("review_content");
         }
         let Some(hash) = file["current_sha256"].as_str().map(str::to_owned) else {
+            if task_file { observed = None; }
             continue;
         };
         let Some(path) = file["path"].as_str().map(str::to_owned) else {
@@ -2313,9 +2663,11 @@ pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Val
             .map(|(b, _)| b)
             .filter(|b| digest(b) == hash);
         let Some(current) = current else {
+            if task_file { observed = None; }
             continue;
         };
         if let Some(kind) = review_text(&current) {
+            if task_file { observed = None; }
             file["review_content"] = json!(kind);
             continue;
         }
@@ -2327,6 +2679,9 @@ pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Val
             Some(ranges) => required_bytes(&current, ranges),
             None => current.len(),
         };
+        if task_file {
+            observed = observed.map(|bytes| bytes.saturating_add(required));
+        }
         if required > BULK_BYTES {
             file["review_content"] = json!("bulk");
             bulk = true;
@@ -2346,6 +2701,7 @@ pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Val
             changed.insert("review_content_guidance".into(), json!("A file with review_content bulk is generated data or longer than about eight project_read pages: it is not required reading. Read what you need of it; unless you read it completely, an approval discloses it as not reviewed in full."));
         }
     }
+    observed
 }
 /// The commit checked out when the task's execution started: the `head` of the
 /// execution baseline a review packet's change boundary names.
@@ -2418,7 +2774,7 @@ mod bulk_content_tests {
             {"path":"page.yml","change":"added","current_sha256":digest(big.as_bytes())},
             {"path":"main.rs","change":"added","current_sha256":digest(small.as_bytes())},
         ]}});
-        add_review_lines(&root, None, &mut packet);
+        let _ = add_review_lines(&root, None, &mut packet);
         let files = &packet["changed_files"]["files"];
         assert_eq!(files[0]["review_content"], "bulk");
         assert!(files[1]["review_content"].is_null());

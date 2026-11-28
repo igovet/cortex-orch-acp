@@ -25,6 +25,7 @@ pub use readers::SettingsRead;
 use serde_json::{json, Value};
 pub use settings::settings_view;
 pub use setup::SetupEnvironment;
+pub(crate) use setup::automatic as engine_setup_observation;
 use std::{os::unix::fs::MetadataExt, path::Path};
 
 /// Management profiles validate tokens more strictly than the project editor.

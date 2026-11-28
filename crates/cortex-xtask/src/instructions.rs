@@ -2,7 +2,7 @@
 //! Rust host embeds, assembled from the canonical `skills/` sources at build time.
 
 use crate::fsutil::{py_strip, read_bytes, read_text, write_text};
-use crate::json::{dumps, Format, Res, Value};
+use crate::json::{dumps, parse, Format, Res, Value};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -506,6 +506,7 @@ fn inlined_for(kind: &str) -> &'static [&'static str] {
 pub fn expected(root: &Path) -> Res<String> {
     let roles = Roles::new(root);
     let mut profiles = Value::obj();
+    let mut legacy_skills = Value::obj();
     let mut skills: BTreeMap<String, String> = BTreeMap::new();
     for name in roles.known_role_ids()? {
         let kind = roles.role_kind(&name)?;
@@ -543,6 +544,26 @@ pub fn expected(root: &Path) -> Res<String> {
         );
         profiles.set(&name, profile);
     }
+    let catalogue = parse(&read_text(&root.join("profiles.json"))?)?;
+    let legacy = catalogue.req("legacy_report_templates")?.as_obj().ok_or("invalid legacy role metadata")?;
+    for (name, _) in legacy {
+        let references = roles.reference_ids("worker", Some(name));
+        let mut allowed = roles.shared_skill_ids("worker", Some(name));
+        allowed.extend(references.iter().cloned());
+        for skill in &allowed {
+            let text = if references.contains(skill) {
+                roles.read_reference(skill, "worker", Some(name))?
+            } else {
+                roles.body_portable(skill)?
+            };
+            if let Some(previous) = skills.insert(skill.clone(), text.clone()) {
+                if previous != text {
+                    return Err("inconsistent legacy role-visible skill".into());
+                }
+            }
+        }
+        legacy_skills.set(name, Value::Arr(allowed.iter().map(|s| Value::str(s.clone())).collect()));
+    }
     let mut skill_map = Value::obj();
     for (id, text) in skills {
         skill_map.set(&id, Value::Str(text));
@@ -550,7 +571,13 @@ pub fn expected(root: &Path) -> Res<String> {
     let mut out = Value::obj();
     out.set("version", Value::int(1));
     out.set("profiles", profiles);
+    out.set("legacySkills", legacy_skills);
     out.set("skills", skill_map);
+    let mut competencies = Value::obj();
+    for (id, source) in crate::profiles::competency_sources(root)? {
+        competencies.set(&id, Value::Str(source));
+    }
+    out.set("competencies", competencies);
     let mut text = dumps(
         &out,
         &Format {

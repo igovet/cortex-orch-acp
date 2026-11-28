@@ -1,6 +1,6 @@
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { emptyWorkspace, mapProjectSlice, type AutomaticContinuation, type AutomaticQueue, type PortCapabilities, type QueryResults, type Worker, type WorkspaceState } from "@cortex/workspace-domain";
+import { emptySession, emptyWorkspace, mapProjectSlice, type AutomaticContinuation, type AutomaticQueue, type PortCapabilities, type QueryResults, type Worker, type WorkspaceState } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { attemptsSpentOn, buildIndex, refusalLine, refusalReason, reviewDeadEnd, sideWord, stopReason } from "../src/selectors";
 import { attemptsByNode, sessionModel, stateChip, workerState } from "../src/session-model";
@@ -76,6 +76,53 @@ describe("a replan waiting for a cancelled worker to stop", () => {
 });
 
 describe("refused worker results", () => {
+  it.each([false,true])("separates recorded partial work and current actors from refusal history (historical %s)", async earlier => {
+    const refused = worker({id:"w1",status:"failed",superseded:earlier || undefined,
+      result:{summary:"Updated the guide",objectiveStatus:"partial", remaining:["Run the integration check"],blockerDetail:"Missing fixture",
+        outcome:"failed",checks:[{name:"Lint",outcome:"passed",detail:""},{name:"Integration",outcome:"not_run",detail:"Missing fixture"}]},
+      resultRefusals:{count:3,code:"open_failed_check",codes:["check_blocker_required","open_failed_check"],missing:["Exact check receipt"]}});
+    await mount(world({phase:"execution",runtimeState:"EXECUTING",executionState:"running"},
+      {workers:[refused,worker({id:"w2",role:"implementer",status:"working"})]}),"/m/local/t/t/workers/w1");
+    const card = document.querySelector<HTMLElement>(".ws-worker-result")!;
+    expect(card.textContent).toContain(earlier ? "Earlier attempt · Partially delivered" : "Partially delivered");
+    expect(card.textContent).toContain("Run the integration check");
+    expect(card.textContent).toContain("Checks · 1 passed · 1 not run");
+    expect(card.textContent).toContain("Working on this execution: implementer");
+    const history = card.querySelector("details")!;
+    expect(history.open).toBe(false);
+    expect(history.querySelector("summary")?.textContent).toContain("3 refusals");
+    history.querySelector("summary")!.click();
+    expect(history.open).toBe(true);
+    expect(history.textContent).toContain("Exact check receipt");
+  });
+  it("keeps old refusals without a result or a confirmed actor factual", async () => {
+    const refused = worker({id:"old",status:"failed",resultRefusals:{count:1,code:"omitted_failed_check"}});
+    await mount(world({phase:"execution",runtimeState:"EXECUTING",executionState:"running"}, {workers:[
+      refused,worker({id:"old-run",executionId:"old-execution",role:"old actor",status:"working"}),
+      worker({id:"stale",role:"stale actor",status:"working",stale:true})]}),"/m/local/t/t/workers/old");
+    const card = document.querySelector(".ws-worker-result")!;
+    expect(card.textContent).toContain("Attempt ended without an accepted result");
+    expect(card.textContent).toContain("No checks reported.");
+    expect(card.textContent).toContain("No worker is confirmed working");
+    expect(card.textContent).not.toMatch(/Partially delivered|Working on this execution|Waiting for you/);
+  });
+  it.each([false,true])("shows an observed pause only while connected and lists missing details once (offline %s)", async offline => {
+    const w = worker({id:"old",status:"failed",resultRefusals:{count:1,code:"review_file_coverage_required",missing:["settings.ts (current complete read is missing)"]}});
+    const s = world({phase:"paused",runtimeState:"PAUSED",executionState:"paused"}, {workers:[w]});
+    const port = await mount(s,"/m/local/t/t/workers/old");
+    if (offline) { port.emit({kind:"connection",connection:{state:"disconnected",at:null,reason:null}}); await settle(); }
+    const card = document.querySelector(".ws-worker-result")!;
+    expect(card.textContent).toContain(offline ? "No worker is confirmed working" : "Task paused.");
+    expect(card.textContent?.match(/settings\.ts/g)).toHaveLength(1);
+  });
+  it.each(["decision","planning"])("shows the confirmed task state when there is no current worker (%s)", async phase => {
+    const w = worker({id:"old",status:"failed",resultRefusals:{count:1,code:"omitted_failed_check"}});
+    const s = world({phase:"planning",runtimeState:"PLANNING",executionState:"running"}, {workers:[w],decision:phase === "decision"});
+    if (!s.sessions.length) s.sessions.push(emptySession("t"));
+    s.sessions[0].plan = {revision:2,note:"",nodes:[]};
+    await mount(s,"/m/local/t/t/workers/old");
+    expect(document.querySelector(".ws-worker-result")?.textContent).toContain(phase === "decision" ? "Waiting for your answer." : "The coordinator is revising the plan.");
+  });
   it("every refusal code the audit found reads in words, never generically", () => {
     for (const code of ["review_file_coverage_required", "command_not_settled", "review_predecessor_reports_required", "review_project_revision_changed",
       "failed_check_repair_required", "review_project_revision_unstable", "review_coverage_unfinished", "assignment_blocker_required", "report_sections_missing",
@@ -139,14 +186,19 @@ describe("failed attempts", () => {
   it("the Workers tab folds earlier attempts of a step under its newest", async () => {
     await mount(world({ phase: "execution", runtimeState: "EXECUTING", executionState: "running" }, {
       workers: [worker({ id: "w1", node: "qa", status: "failed", superseded: true, replacedIn: 2 }), worker({ id: "w2", node: "qa", status: "failed", blockerKind: "tool_unavailable" })] }), "/m/local/t/t/workers");
-    const toggle = button(document, "Show 1 earlier attempt of this step")!;
-    expect(toggle).toBeTruthy();
-    // The Workers tab itself; the inspector beside it lists every worker with the same labels.
-    const tab = () => document.querySelector(".l-task")?.textContent ?? "";
-    expect(tab()).toContain("Could not run here");
-    expect(tab()).not.toContain("Replaced in plan v2");
+    const list = document.querySelector<HTMLElement>('[role="tablist"][aria-label="Workers"].wlist')!;
+    const toggle = button(list, "Show 1 earlier attempt of this step")!;
+    const attempt = (id: string) => list.querySelector<HTMLAnchorElement>(`[role="tab"][href$="/workers/${id}"]`);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(attempt("w2")?.textContent).toContain("Could not run here");
+    expect(attempt("w1")).toBeNull();
     toggle.click(); await settle();
-    expect(tab()).toContain("Replaced in plan v2");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(attempt("w1")?.textContent).toContain("Replaced in plan v2");
+    expect(attempt("w2")?.textContent).toContain("Could not run here");
+    toggle.click(); await settle();
+    expect(attempt("w1")).toBeNull();
+    expect(attempt("w2")).toBeTruthy();
   });
 });
 

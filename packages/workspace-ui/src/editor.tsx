@@ -1,4 +1,4 @@
-import { createEffect, createMemo, on, onCleanup, onMount } from "solid-js";
+import { createEffect, createMemo, on, onCleanup } from "solid-js";
 import { defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory } from "@codemirror/commands";
 import { bracketMatching, HighlightStyle, indentOnInput, LanguageDescription, LanguageSupport, StreamLanguage, syntaxHighlighting, type StreamParser } from "@codemirror/language";
 import { search, searchKeymap } from "@codemirror/search";
@@ -141,6 +141,7 @@ const positionOf = (view: EditorView, at: number): CodeLspPosition => {
   return { line: line.number - 1, character: at - line.from };
 };
 const locked = new Compartment();
+const syntax = new Compartment();
 const lockOf = (path: string, reason: boolean) => [EditorState.readOnly.of(reason), EditorView.editable.of(!reason), EditorView.contentAttributes.of({ "aria-label": `${reason ? "Read" : "Edit"} ${path}`, tabindex: "0" })];
 
 type Session = { state: EditorState; scroll?: ReturnType<EditorView["scrollSnapshot"]> };
@@ -187,7 +188,7 @@ export function changedSpan(before: string, after: string) {
 export default function CodeEditor(props: { buffer: FileBuffer; locked: boolean; line?: number; changed: Set<number>; onSave: () => void; diagnostics?: readonly CodeLspDiagnostic[]; jump?: { line: number; column: number }; onDefinition?: (position: CodeLspPosition) => void }) {
   const ws = useWs();
   const buffers = ws.buffers, keep = heldBy(buffers), sessions = keep.sessions;
-  let host!: HTMLDivElement, view: EditorView | undefined, current: string | null = null, opening = 0;
+  let host!: HTMLDivElement, view: EditorView | undefined, current: string | null = null;
   // on() tracks dependencies, not value equality. Snapshot object churn must not reset the view.
   const keyOf = createMemo(() => props.buffer.key), lock = createMemo(() => props.locked), lineOf = createMemo(() => props.line);
   const changed = createMemo(() => props.changed, undefined, { equals: (a, b) => a.size === b.size && [...a].every(n => b.has(n)) });
@@ -203,15 +204,21 @@ export default function CodeEditor(props: { buffer: FileBuffer; locked: boolean;
   });
   const guard = EditorState.changeFilter.of(tr => !tr.startState.readOnly || !!tr.annotation(diskUpdate));
 
-  async function stateFor(buffer: FileBuffer) {
+  function stateFor(buffer: FileBuffer) {
     const have = sessions.get(buffer.key);
     if (have) return have;
-    const grammar = await languageFor(buffer.path);
-    const made = sessions.get(buffer.key) ?? { state: EditorState.create({ doc: buffers.text(buffer.key), extensions: [
-      lineNumbers(), diagnosticField, diagnosticsGutter, guard, navigation, history(), drawSelection(), indentOnInput(), bracketMatching(), search({ top: true }), syntaxHighlighting(highlighting), appearance, changedLines, commands, keep.listen, grammar,
+    const made: Session = { state: EditorState.create({ doc: buffers.text(buffer.key), extensions: [
+      lineNumbers(), diagnosticField, diagnosticsGutter, guard, navigation, history(), drawSelection(), indentOnInput(), bracketMatching(), search({ top: true }), syntaxHighlighting(highlighting), appearance, changedLines, commands, keep.listen, syntax.of([]),
       locked.of(lockOf(buffer.path, props.locked)),
     ] }) };
     sessions.set(buffer.key, made);
+    // Opening the document and applying its lease must not wait for a grammar chunk.
+    void languageFor(buffer.path).then(grammar => {
+      const effect = syntax.reconfigure(grammar);
+      const shown = keep.shown;
+      if (shown?.key === buffer.key) shown.view.dispatch({ effects: effect });
+      else made.state = made.state.update({ effects: effect }).state;
+    });
     return made;
   }
   const markChanged = () => view?.dispatch({ effects: setChanged.of([...changed()]) });
@@ -225,23 +232,20 @@ export default function CodeEditor(props: { buffer: FileBuffer; locked: boolean;
     if (props.jump) view.focus();
   };
 
-  onMount(() => { view = new EditorView({ parent: host }); });
-  onCleanup(() => { ++opening; remember(); keep.shown = null; view?.destroy(); view = undefined; });
+  onCleanup(() => { remember(); keep.shown = null; view?.destroy(); view = undefined; });
   createEffect(on(keyOf, key => {
-    const turn = ++opening;
     remember();
-    void stateFor(props.buffer).then(session => {
-      if (turn !== opening || !view) return;
-      current = key;
-      keep.shown = { key, view, onSave: () => { if (keyOf() === key) props.onSave(); },
-        definition: position => { if (keyOf() !== key || !props.onDefinition) return false; props.onDefinition(position); return true; } };
-      view.setState(session.state);
-      if (session.scroll) view.dispatch({ effects: session.scroll });
-      view.dispatch({ effects: locked.reconfigure(lockOf(props.buffer.path, props.locked)) });
-      markChanged();
-      view.dispatch({ effects: setDiagnostics.of(props.diagnostics ?? []) });
-      goTo();
-    });
+    const session = stateFor(props.buffer);
+    const state = session.state.update({ effects: locked.reconfigure(lockOf(props.buffer.path, props.locked)) }).state;
+    current = key;
+    if (view) view.setState(state);
+    else view = new EditorView({ parent: host, state });
+    keep.shown = { key, view, onSave: () => { if (keyOf() === key) props.onSave(); },
+      definition: position => { if (keyOf() !== key || !props.onDefinition) return false; props.onDefinition(position); return true; } };
+    if (session.scroll) view.dispatch({ effects: session.scroll });
+    markChanged();
+    view.dispatch({ effects: setDiagnostics.of(props.diagnostics ?? []) });
+    goTo();
   }));
   createEffect(on(() => props.diagnostics, diagnostics => {
     // Clearing a snapshot may be triggered by the editor's own document update.

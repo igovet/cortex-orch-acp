@@ -119,6 +119,9 @@ impl Bridge {
             unix,
         }
     }
+    pub(crate) async fn history_socket(&self) -> Result<Stream, &'static str> {
+        self.unix.connect().await.map_err(|_| "history_disconnected")
+    }
     /// The shared bridge this desktop bridge wraps.
     pub fn shared(&self) -> &workspace_client::Bridge {
         &self.shared
@@ -443,6 +446,66 @@ mod tests {
         let address = std::path::PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()))
             .join(path.file_name().unwrap());
         tokio::net::UnixListener::bind(address).unwrap()
+    }
+
+    #[tokio::test]
+    async fn scoped_history_rejects_a_foreign_frame_and_closes_an_idle_reader() {
+        use workspace_client::frames::{read_frame, write_frame};
+        let root = socket_root("history-follow");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let path = root.join("service.sock");
+        let listener = bind_socket(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let bridge = Bridge::new(path);
+        let history = crate::history::History::default();
+        let scope = json!({"projectId":"p","taskId":"t","executionId":"e","generation":null,"cursor":null,"limit":32});
+        let (ready, idle) = tokio::sync::oneshot::channel();
+        let server = async {
+            for foreign in [true, false] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_frame(&mut stream).await.unwrap();
+                assert_eq!(request["method"], "native.history.follow");
+                assert_eq!(request["params"], scope);
+                write_frame(
+                    &mut stream,
+                    &json!({"jsonrpc":"2.0","id":"history","result":{"subscribed":true}}),
+                )
+                .await
+                .unwrap();
+                if foreign {
+                    let event = json!({"type":"native_history_page","projectId":"p","taskId":"other","executionId":"e"});
+                    write_frame(
+                        &mut stream,
+                        &json!({"jsonrpc":"2.0","method":"service.event","params":event}),
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    ready.send(()).unwrap();
+                    assert!(read_frame(&mut stream).await.is_err());
+                    break;
+                }
+            }
+        };
+        let client = async {
+            history.open("A".into(), scope.clone()).unwrap();
+            assert_eq!(
+                history.next(&bridge, "A").await.unwrap_err(),
+                "history_invalid"
+            );
+            history.open("B".into(), scope.clone()).unwrap();
+            let close = async {
+                idle.await.unwrap();
+                history.close("B");
+            };
+            let (read, ()) = tokio::join!(history.next(&bridge, "B"), close);
+            assert_eq!(read.unwrap_err(), "history_closed");
+        };
+        tokio::join!(server, client);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

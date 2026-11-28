@@ -1,5 +1,5 @@
-import { capabilityOf, FEATURES, sprintRouteLabel } from "@cortex/workspace-domain";
-import { createMemo, createSignal, createUniqueId, For, mapArray, Show } from "solid-js";
+import { capabilityOf, type Sprint, FEATURES, sprintRouteLabel } from "@cortex/workspace-domain";
+import { createEffect, createMemo, createSignal, createUniqueId, For, mapArray, on, onCleanup, Show } from "solid-js";
 import { CodeView } from "./code";
 import { useWs } from "./ctx";
 import { REQUESTING, RequestStatus } from "./request-feedback";
@@ -14,9 +14,10 @@ import { taskActionsFor, taskRoute, type TaskAction } from "./task-actions-model
 import { taskContextMenu, TaskMenuButton } from "./task-menu-trigger";
 import { resumeState } from "./session-model";
 import { KnowledgePage, ProjectSettingsPage } from "./project-pages";
-import { createQueueStrip, QueueButton, QueueHelp, RunMode, SprintTarget, TargetChoices } from "./sprint";
+import { createQueueStrip, QueueButton, QueueHelp, RunMode, SprintTarget, SprintLifecycleItems, TargetChoices } from "./sprint";
 import { EmptyUntilRead, projectsPending } from "./skeleton";
 import { watchLiveGraphs } from "./live-graph";
+import { SprintBlockers } from "./sprint-blockers";
 
 const CARD_GAP = 8;
 const SECONDARY: { id: ProjectView; label: string }[] = [
@@ -112,14 +113,39 @@ const SprintHead = (props: { row: Extract<GroupedRow, { kind: "sprint" }>; machi
   <I n="layers" s={12} /><span data-tooltip-cut="" class="trunc">{sprintTitle(props.row.sprint)}</span><span class="n">{props.row.count}</span>
 </A>;
 
-function Board(props: { summary?: ProjectSummary; views: TaskView[]; onQuick?: () => void; machine: string; grouped?: boolean; sprint?: boolean }) {
+type BoardPosition = { left: number; lanes: Map<string, number> };
+const boardPositions = new WeakMap<object, Map<string, BoardPosition>>();
+
+function Board(props: { positionKey: string; summary?: ProjectSummary; views: TaskView[]; onQuick?: () => void; machine: string; grouped?: boolean; sprint?: boolean }) {
   const ws = useWs();
   // Each sprint's tasks in the service's execution order, in the places they hold in their column.
   const columns = createMemo(() => columnsOf(props.views, ws.store.index()));
   const columnLabel = (id: ColumnId, label: string) => id === "merge" && columns().merge.some(v => sameBranch(v.task, v.target)) ? "Ready to finish" : label;
   const quick = () => props.summary && !props.summary.offline && props.onQuick;
   const rows = (id: ColumnId): GroupedRow[] => props.grouped ? bySprint(columns()[id]) : columns()[id].map(view => ({ kind: "task", view }));
-  return <div class="board-wrap" classList={{ "machine-board": !props.summary }} onKeyDown={moveOnBoard}>
+  let board!: HTMLDivElement;
+  let positions = boardPositions.get(ws.store);
+  if (!positions) boardPositions.set(ws.store, positions = new Map());
+  const memory = positions;
+  createEffect(on(() => props.positionKey, key => {
+    const position = memory.get(key) ?? { left: 0, lanes: new Map<string, number>() };
+    memory.set(key, position);
+    board.scrollLeft = position.left;
+    for (const lane of board.querySelectorAll<HTMLElement>(".col-b")) {
+      lane.scrollTop = position.lanes.get(lane.closest<HTMLElement>("[data-col]")!.dataset.col!) ?? 0;
+    }
+    const remember = (event: Event) => {
+      const target = event.target;
+      if (target === board) position.left = board.scrollLeft;
+      else if (target instanceof HTMLElement && target.matches(".col-b")) {
+        const column = target.closest<HTMLElement>("[data-col]")?.dataset.col;
+        if (column) position.lanes.set(column, target.scrollTop);
+      }
+    };
+    board.addEventListener("scroll", remember, true);
+    onCleanup(() => board.removeEventListener("scroll", remember, true));
+  }));
+  return <div ref={board} class="board-wrap" onKeyDown={moveOnBoard}>
     <For each={COLUMNS.filter(col => col.id !== "closed_unverified" || columns()[col.id].length > 0)}>{col => {
       const open = () => columns()[col.id].length > 0 || (col.id === "todo" && !!quick());
       return <section class={`col${open() ? "" : " strip"}`} data-col={col.id} aria-label={columnLabel(col.id, col.label)}>
@@ -135,23 +161,77 @@ function Board(props: { summary?: ProjectSummary; views: TaskView[]; onQuick?: (
   </div>;
 }
 
-export function MachineBoard() {
+function WorkFilter(props: { value: string; onInput: (value: string) => void }) {
+  const [open, setOpen] = createSignal(false);
+  const field = createUniqueId();
+  const close = () => { props.onInput(""); setOpen(false); };
+  let toggle!: HTMLButtonElement;
+  return <>
+    <Show when={open()}><input id={field} class="inp ws-filter" placeholder="Filter tasks" aria-label="Filter tasks" value={props.value}
+      onInput={e => props.onInput(e.currentTarget.value)}
+      onKeyDown={e => { if (e.key === "Escape") { close(); toggle.focus(); } }}
+      ref={el => queueMicrotask(() => el.focus())} /></Show>
+    <button ref={toggle} data-tooltip="" class="ib" aria-label="Filter" aria-expanded={open()} aria-controls={open() ? field : undefined}
+      onClick={() => open() ? close() : setOpen(true)}><I n="search" /></button>
+  </>;
+}
+
+function WorkViewTabs(props: { view: ProjectView; at: (view: "board" | "list") => Route; hidden?: boolean }) {
+  return <div class="seg" classList={{ "l-tight-hide": props.hidden }} role="tablist" aria-label="View">
+    <A role="tab" to={props.at("board")} aria-selected={props.view === "board" ? "true" : "false"}><I n="board" s={14} />Board</A>
+    <A role="tab" to={props.at("list")} aria-selected={props.view === "list" ? "true" : "false"}><I n="list" s={14} />List</A>
+  </div>;
+}
+
+export function MachineBoard(props: { route: Extract<Route, { name: "board" }> }) {
   const ws = useWs();
+  const [filter, setFilter] = createSignal("");
+  const scopeMenu = createUniqueId();
   const projects = createMemo(() => projectsOn(ws.store.index(), ws.machine().id));
-  const views = createMemo(() => projects().flatMap(p => p.views));
-  return <Page class="l-work" scroll="none" status={<Show when={ws.shell.kind !== "phone" && ws.machine().connection !== "connected"}>
-    <Strip tone="info">Last known state. {ws.machine().name} is offline, last confirmed {clock(ws.machine().lastConfirmedAt)}.</Strip>
+  const scope = () => projects().find(p => p.project.id === props.route.project);
+  const views = createMemo(() => props.route.project ? scope()?.views ?? [] : projects().flatMap(p => p.views));
+  const filtered = createMemo(() => filterTasks(views(), filter()));
+  const grouped = () => filtered().some(v => v.sprint);
+  const at = (view: "board" | "list"): Route => ({ ...props.route, view: view === "list" ? view : undefined });
+  const pick = (project?: string) => ws.go({ ...props.route, project });
+  return <Page class="l-work" scroll="none"
+    head={<Toolbar class="pstrip" label="Board options"
+      mid={<>
+        <button class="scope-btn l-scope" popovertarget={scopeMenu} aria-label={`Board scope: ${scope()?.project.name ?? (props.route.project ? "Project unavailable" : "All projects")}`}>
+          <I n="folder" s={14} class="faint" /><span class="trunc">{scope()?.project.name ?? (props.route.project ? "Project unavailable" : "All projects")}</span><I n="chevron-down" s={14} />
+        </button>
+        <Pop id={scopeMenu} class="pop-anchor" align="left" label="Board scope">
+          <MenuItem icon="board" label="All projects" check={!props.route.project} onSelect={() => pick()} />
+          <For each={projects()}>{p => <MenuItem icon="folder" label={p.project.name} check={p.project.id === props.route.project} onSelect={() => pick(p.project.id)} />}</For>
+        </Pop>
+        <WorkViewTabs view={props.route.view ?? "board"} at={at} />
+      </>}
+      end={<WorkFilter value={filter()} onInput={setFilter} />} />}
+    status={<Show when={ws.shell.kind !== "phone" && ws.machine().connection !== "connected"}>
+      <Strip tone="info">Last known state. {ws.machine().name} is offline, last confirmed {clock(ws.machine().lastConfirmedAt)}.</Strip>
   </Show>}>
-    <Show when={views().length > 0} fallback={<EmptyUntilRead name={`board|${ws.machine().id}`} pending={() => projectsPending(ws, p => p.machineId === ws.machine().id)} label="Loading the board…">
-      <div class="note-panel"><span class="w500">{projects().length ? "No tasks to show on this machine" : "No projects on this machine yet"}</span>
+    <Show when={views().length > 0} fallback={<EmptyUntilRead name={`board|${ws.machine().id}|${props.route.project ?? ""}`} pending={() => projectsPending(ws, p => p.machineId === ws.machine().id && (!props.route.project || p.id === props.route.project))} label="Loading the board…">
+      <div class="note-panel"><span class="w500">{props.route.project ? scope() ? "No tasks in this project yet" : "Project unavailable on this machine" : projects().length ? "No tasks to show on this machine" : "No projects on this machine yet"}</span>
+      <Show when={props.route.project}><button class="btn btn-sm" onClick={() => pick()}>Show all projects</button></Show>
       <A class="lnk" to={{ name: "home", machine: ws.machine().id }}>Back to Home</A></div></EmptyUntilRead>}>
-      <Board views={views()} machine={ws.machine().id} />
+      <Show when={filtered().length > 0} fallback={<div class="note-panel"><span class="w500">No tasks match this filter</span><button class="btn btn-sm" onClick={() => setFilter("")}>Clear filter</button></div>}>
+        <div class="main-body">
+          <Show when={props.route.view !== "list"} fallback={<List views={filtered()} machine={ws.machine().id} grouped={grouped()} showProject />}>
+            <Board positionKey={JSON.stringify(["machine", ws.machine().id, props.route.project])} views={filtered()} machine={ws.machine().id} grouped={grouped()} />
+          </Show>
+        </div>
+      </Show>
     </Show>
   </Page>;
 }
 
+function filterTasks(views: TaskView[], filter: string) {
+  const query = filter.trim().toLowerCase();
+  return query ? views.filter(v => v.task.title.toLowerCase().includes(query)) : views;
+}
+
 type ListRow = { kind: "head"; id: ColumnId; count: number } | GroupedRow;
-function List(props: { views: TaskView[]; grouped: boolean; machine: string; sprint?: boolean }) {
+function List(props: { views: TaskView[]; grouped: boolean; machine: string; sprint?: boolean; showProject?: boolean }) {
   const ws = useWs();
   const rows = createMemo(() => {
     const columns = columnsOf(props.views, ws.store.index());
@@ -171,7 +251,10 @@ function List(props: { views: TaskView[]; grouped: boolean; machine: string; spr
       if (row.kind === "sprint") return <SprintHead row={r() as typeof row} machine={props.machine} />;
       const v = () => (r() as typeof row).view;
       return <div class="lrow-shell" {...taskContextMenu(() => v().id)}><A class={`lrow${awaitsOwner(v()) ? " need-you" : ""}`} to={taskRoute(v())} aria-current={ws.selected() === v().id ? "true" : undefined} onKeyDown={e => { if (e.key === " ") { e.preventDefault(); ws.select(v().id); } }}>
-        <I n={rowIcon(v())} s={14} class={awaitsOwner(v()) ? "st-warn" : v().fact.tone || "faint"} /><span data-tooltip-cut="" class="trunc w500">{v().task.title}</span>
+        <I n={rowIcon(v())} s={14} class={awaitsOwner(v()) ? "st-warn" : v().fact.tone || "faint"} />
+        <Show when={props.showProject} fallback={<span data-tooltip-cut="" class="trunc w500">{v().task.title}</span>}>
+          <span class="board-list-title"><span data-tooltip-cut="" class="trunc w500">{v().task.title}</span><span data-tooltip-cut="" class="cap faint trunc">{v().project.name}</span></span>
+        </Show>
         <span class="cap faint trunc">{v().sprint ? sprintTitle(v().sprint!) : "Standalone"}</span>
         <span class="mono trunc faint">{!v().task.checkout.branch ? "" : v().task.checkout.kind === "worktree" ? v().task.checkout.branch : `${v().task.checkout.branch} (project folder)`}</span>
         <span class={`st trunc ${cardFact(v()).tone}`}><span class="trunc" data-tooltip-cut="">{cardFact(v()).text}</span></span><span class="cap faint">{age(v().at, ws.store.clock())}</span>
@@ -198,6 +281,7 @@ function SprintBar(props: { summary: ProjectSummary; sprintId: string; reason: s
     </>}
     end={<>
       <SprintTarget sprint={sprint()} summary={props.summary} class="l-tight-hide" />
+      <Show when={sprint().planning === "created" && !sprint().archivedAt && !sprint().deletion}><SprintBlockers sprint={sprint()} /></Show>
       <A data-tooltip="" class="ib l-tight-hide" to={tab("planning")} aria-label="Sprint planning"><I n="pencil" s={14} /></A>
       <A data-tooltip="" class="ib l-tight-hide" to={tab("summary")} aria-label="Sprint summary"><I n="list" s={14} /></A>
       <button data-tooltip="" class="ib l-tight-only" popovertarget="m-queue-more" aria-label="More queue options"><I n="more" s={14} /></button>
@@ -242,7 +326,6 @@ function ScopeMenu(props: { summary: ProjectSummary; route: Extract<Route, { nam
 export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Route, { name: "project" }> }) {
   const ws = useWs();
   const [filter, setFilter] = createSignal("");
-  const [filtering, setFiltering] = createSignal(false);
   const view = () => props.route.view ?? "board";
   const sprintId = () => props.route.scope.kind === "sprint" ? props.route.scope.id : null;
   const knownSprint = () => { const id = sprintId(); return id === null || props.summary.sprints.some(s => s.id === id); };
@@ -251,10 +334,7 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
     return sprint ? sprintView(ws.store.index(), sprint).missing : 0;
   };
   const scoped = createMemo(() => inScope(props.summary, props.route.scope));
-  const views = createMemo(() => {
-    const q = filter().trim().toLowerCase();
-    return q ? scoped().filter(v => v.task.title.toLowerCase().includes(q)) : scoped();
-  });
+  const views = createMemo(() => filterTasks(scoped(), filter()));
   const at = (v: ProjectView): Extract<Route, { name: "project" }> => ({ ...props.route, view: v, scope: sprintId() !== null || v === "board" || v === "list" ? props.route.scope : { kind: "all" }, file: undefined, line: undefined });
   // On a sprint's board a new task joins that sprint, already selected; it is saved as a draft and starts nothing.
   const addSprint = () => { const id = sprintId(); return id && props.summary.sprints.some(s => s.id === id && s.planning === "created") ? id : null; };
@@ -286,6 +366,7 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
   // Each strip is one item for the life of the page, so a change of words never redraws the rest of the lane.
   const notActivated: StripItem = { id: "activate", tone: "info", text: "This project is not activated. Activating lets tasks run in this folder; it starts no task and keeps everything already here.", action: <button class="btn btn-primary btn-sm" {...ws.needs("activate_project")} onClick={activate}>Activate</button> };
   const issue: StripItem = { id: "issue", tone: "fail", role: "alert", icon: <I n="help" s={14} class="faint" />, get text() { const cause = props.summary.project.issueCause; return <>{props.summary.project.issue}{cause ? <span class="cap muted ws-block">Cause: {cause}</span> : null}</>; }, action: <button class="btn btn-sm" {...ws.needs("activate_project")} onClick={activate}>Try again</button> };
+  const moving: StripItem = { id: "moving-history", tone: "info", role: "status", text: "Moving project history…" };
   const offline: StripItem = { id: "offline", tone: "info", icon: <I n="help" s={14} />, get text() { return `Last known state. ${props.summary.machine.name} is offline, last confirmed ${clock(props.summary.machine.lastConfirmedAt)}. Actions are unavailable until it reconnects.`; } };
   const planning = mapArray(() => isWork() && props.route.scope.kind === "all" ? props.summary.sprints.filter(s => s.planning !== "created" && s.planning !== "cancelled") : [], (s): StripItem => ({
     id: `planning:${s.id}`, tone: "info", icon: <I n="layers" s={14} />,
@@ -299,8 +380,10 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
     action: <A class="lnk" to={sprintRoute(props.summary.machine.id, s)}>Open sprint</A>,
   }));
   const status = createMemo<StripItem[]>(() => [
-    ...(ws.store.mode === "real" && props.summary.project.activated === false ? [notActivated] : []),
-    ...(props.summary.project.issue ? [issue] : []),
+    ...(ws.store.movingProjectHistory(props.summary.project.id) ? [moving] : [
+      ...(ws.store.mode === "real" && props.summary.project.activated === false ? [notActivated] : []),
+      ...(props.summary.project.issue ? [issue] : []),
+    ]),
     ...deleting(),
     ...planning(),
     ...(props.summary.offline && isWork() ? [offline] : []),
@@ -311,10 +394,7 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
       <Toolbar class="pstrip"
         mid={<>
           <Show when={isRepo() && repo() && checkout()} fallback={<ScopeMenu summary={props.summary} route={props.route} />}><CheckoutButton repo={repo()!} checkout={checkout()!} onPick={pickCheckout} /></Show>
-          <div class="seg" classList={{ "l-tight-hide": !isWork() }} role="tablist" aria-label="View">
-            <A role="tab" to={at("board")} aria-selected={view() === "board" ? "true" : "false"}><I n="board" s={14} />Board</A>
-            <A role="tab" to={at("list")} aria-selected={view() === "list" ? "true" : "false"}><I n="list" s={14} />List</A>
-          </div>
+          <WorkViewTabs view={view()} at={at} hidden={!isWork()} />
           <div class="ptabs" role="tablist" aria-label="Project areas">
             <For each={areas()}>{t => <A class="ptab" classList={{ "l-compact-hide": folds(t.id) && view() !== t.id, "l-tight-hide": !folds(t.id) && view() !== t.id }} role="tab" to={at(t.id)} aria-selected={view() === t.id ? "true" : "false"}>{t.label}</A>}</For>
           </div>
@@ -329,11 +409,7 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
             </Pop>
           </Show>
         </>}
-        end={<Show when={isWork()}>
-          <Show when={filtering()}><input id="ws-filter" class="inp ws-filter" placeholder="Filter tasks" aria-label="Filter tasks" value={filter()} onInput={e => setFilter(e.currentTarget.value)}
-            onKeyDown={e => { if (e.key === "Escape") { setFilter(""); setFiltering(false); } }} ref={el => queueMicrotask(() => el.focus())} /></Show>
-          <button data-tooltip="" class="ib" aria-label="Filter" aria-pressed={filtering()} onClick={() => { if (filtering()) setFilter(""); setFiltering(!filtering()); }}><I n="search" /></button>
-        </Show>} />
+        end={<Show when={isWork()}><WorkFilter value={filter()} onInput={setFilter} /></Show>} />
       <Show when={queueSprint()?.id}>{id => <SprintBar summary={props.summary} sprintId={id()} reason={queueReason} />}</Show>
     </>}
     status={<StatusLane items={status()} />}>
@@ -350,7 +426,7 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
           <Show when={!props.summary.offline && (!sprintId() || (addSprint() && !missing()))}><button class="btn btn-line btn-sm" onClick={onQuick}><I n="plus" s={14} />New task</button></Show></div></EmptyUntilRead>}>
           <Show when={views().length > 0} fallback={<div class="note-panel"><span class="w500">No tasks match this filter</span><button class="btn btn-sm" onClick={() => setFilter("")}>Clear filter</button></div>}>
             <div class="main-body">
-              <Show when={view() === "board"} fallback={<List views={views()} grouped={grouped()} machine={props.summary.machine.id} sprint={sprintId() !== null} />}><Board summary={props.summary} views={views()} onQuick={onQuick} machine={props.summary.machine.id} grouped={grouped()} sprint={sprintId() !== null} /></Show>
+              <Show when={view() === "board"} fallback={<List views={views()} grouped={grouped()} machine={props.summary.machine.id} sprint={sprintId() !== null} />}><Board positionKey={JSON.stringify(["project", props.summary.machine.id, props.summary.project.id, props.route.scope.kind, sprintId()])} summary={props.summary} views={views()} onQuick={onQuick} machine={props.summary.machine.id} grouped={grouped()} sprint={sprintId() !== null} /></Show>
             </div>
           </Show>
         </Show>
@@ -360,23 +436,24 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
 }
 
 /** One shared task menu: rendering a popover per card would multiply with long columns. */
-export function TaskMenu(props: { taskId: string | null; ref: (el: HTMLDivElement) => void }) {
+export function TaskMenu(props: { taskId: string | null; sprint?: Sprint; focusTrigger?: () => void; ref: (el: HTMLDivElement) => void }) {
   const ws = useWs();
   const actions = createMemo(() => {
     const view = props.taskId ? ws.store.index().byId.get(props.taskId) : undefined;
     return view ? taskActionsFor(view, ws) : [];
   });
-  return <Pop id="m-task" class="pop-right" role="menu" label="Task actions" ref={props.ref} onKeyDown={e => {
+  return <Pop id="m-task" class="pop-right" role="menu" label={props.sprint ? "Sprint actions" : "Task actions"} ref={props.ref} onKeyDown={e => {
     const items = [...e.currentTarget.querySelectorAll<HTMLElement>("[role=menuitem]")];
     const index = items.indexOf(document.activeElement as HTMLElement);
     const key = e.key;
-    if (key === "Escape") { e.preventDefault(); e.stopPropagation(); e.currentTarget.hidePopover?.(); return; }
+    if (key === "Escape") { e.preventDefault(); e.stopPropagation(); e.currentTarget.hidePopover?.(); props.focusTrigger?.(); return; }
     if (!items.length || !["ArrowDown", "ArrowUp", "Home", "End"].includes(key)) return;
     e.preventDefault();
     const next = key === "Home" ? 0 : key === "End" ? items.length - 1
       : key === "ArrowDown" ? (index + 1) % items.length : (index <= 0 ? items.length : index) - 1;
     items[next]?.focus();
   }}>
+    <Show when={props.sprint}>{s => <SprintLifecycleItems sprint={s()} focusTrigger={props.focusTrigger} />}</Show>
     <Keyed each={actions()} by={a => a.id}>{a => <>
       <Show when={a().id === "open_editor"}><div class="mi-sep" /></Show>
       <MenuItem actionId={a().id} icon={a().icon} label={a().label} sub={a().sub} keys={a().keys} danger={a().danger} disabled={a().why} onSelect={() => void a().run()} />

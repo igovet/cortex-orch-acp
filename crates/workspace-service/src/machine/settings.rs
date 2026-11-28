@@ -6,7 +6,7 @@ use std::{
     io::{Read, Write},
     os::{
         fd::AsRawFd,
-        unix::fs::{OpenOptionsExt, PermissionsExt},
+        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -203,29 +203,49 @@ pub fn save_task(
     write_json(&product_path(state, project)?, &saved)
 }
 pub fn read_json(path: &Path, default: Value) -> Result<Value> {
-    let file = match OpenOptions::new()
+    read_json_snapshot(path, default).map(|(value, _)| value)
+}
+
+pub(super) fn read_json_snapshot(path: &Path, default: Value) -> Result<(Value, Option<File>)> {
+    let mut file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
     {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(default),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((default, None)),
         Err(e) => return Err(e.into()),
     };
-    if !file.metadata()?.is_file() || file.metadata()?.len() > FRAME_BUDGET as u64 {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > FRAME_BUDGET as u64 {
         return Err(refuse(
             "state_unreadable",
             "Saved Workspace state could not be read.",
         ));
     }
     let mut data = Vec::new();
-    file.take(FRAME_BUDGET as u64 + 1).read_to_end(&mut data)?;
-    serde_json::from_slice(&data).map_err(|_| {
+    Read::by_ref(&mut file).take(FRAME_BUDGET as u64 + 1).read_to_end(&mut data)?;
+    let value = serde_json::from_slice(&data).map_err(|_| {
         refuse(
             "state_unreadable",
             "Saved Workspace state could not be read.",
         )
-    })
+    })?;
+    Ok((value, Some(file)))
+}
+
+/// Product writers replace the file by rename. Holding the original descriptor
+/// prevents inode reuse while the caller pins its matching SQLite snapshot.
+pub(super) fn json_snapshot_is_current(path: &Path, file: Option<&File>) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(current) => {
+            let Some(file) = file else { return Ok(false) };
+            let opened = file.metadata()?;
+            Ok(current.dev() == opened.dev() && current.ino() == opened.ino())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(file.is_none()),
+        Err(e) => Err(e.into()),
+    }
 }
 pub fn write_json(path: &Path, value: &Value) -> Result<()> {
     let parent = path
@@ -565,7 +585,7 @@ pub fn overview(state: &Path, projects: &Value) -> Result<Value> {
         let root = p["root"]
             .as_str()
             .ok_or_else(|| refuse("invalid_project", "Unknown project."))?;
-        let store = super::context::key(Path::new(root))?.directory();
+        let store = super::context::directory(Path::new(root))?;
         if store.is_dir() {
             storage.push(json!({"label":p["name"],"mb":mb(tree_bytes(&store))}));
         }

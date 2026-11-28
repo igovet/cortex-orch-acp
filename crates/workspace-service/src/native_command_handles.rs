@@ -401,6 +401,7 @@ fn settle(
     status: &Value,
     revision: Option<String>,
     changes: Option<Value>,
+    work_set: Option<(&str, &[String], &str, &str)>,
 ) -> CoreResult<Value> {
     let dir = directory(store, task);
     let filename = leaf(h, "output")?;
@@ -465,11 +466,18 @@ fn settle(
         // Which deliverable paths changed while it ran (`native_change_set`). A run
         // settled without its listings (recovered after a restart) has no record
         // unless it was read-only.
-        let changes=changes.clone().unwrap_or_else(|| if h["profile"]=="read_only" || h["profile"]==crate::native_command_sandbox::CODEX_SCRATCH {crate::native_change_set::unchanged("read_only")}
+        let changes=changes.clone().unwrap_or_else(|| if h["profile"]=="read_only" || h["profile"]==crate::native_command_sandbox::CODEX_SCRATCH || h["profile"]==crate::native_command_sandbox::WORKTREE_READ_ONLY {crate::native_change_set::unchanged("read_only")}
             else {crate::native_change_set::incomplete("settled_without_listing")});
         crate::native_change_set::add(&mut observation,&changes);
         lifecycle::event_tx(db,task,"NATIVE_COMMAND_FINISHED",json!({"receipt":{
             "tool_call_ref":h["reference"],"argv":h["argv"],"observation":observation}}))?;
+        if current && value["complete"] == true {
+            if let Some((assignment, paths, start, end)) = work_set {
+                lifecycle::worker_checks::record_work_set_tx(
+                    db, task, h["reference"].as_str().unwrap(), assignment, paths, start, end,
+                )?;
+            }
+        }
         if let Some(reference) = h["reference"].as_str() {
             crate::owner_command_output::coordinator_marker(db, task, actor, reference,
                 if value["complete"] == true && code == Some(0) {"completed"} else {"failed"})?;
@@ -522,8 +530,9 @@ pub(super) async fn execute(
     scoped: Option<ScopedAuthority>,
     operation: String,
     checkout: Option<Value>,
-    launch: crate::native_change_set::Launch,
+    work_set: Option<Vec<String>>,
 ) -> CoreResult<Value> {
+    let launch = crate::native_change_set::Launch::default();
     let status_file = format!("{id}.status");
     let stopping = format!("{id}.stop");
     let lease = scoped.is_some() || checkout.is_some();
@@ -594,7 +603,7 @@ pub(super) async fn execute(
     let launched = async {
     let mut attempts = 0u32;
     let mut retried: Vec<String> = Vec::new();
-    let (child, messages, h, input) = loop {
+    let (child, messages, h, input, observed_work_set) = loop {
     let attempt_result = async {
     let mut launcher = Command::from(crate::native_command_scope::launcher(&std::env::current_exe()?));
     // Read now, so a changed tool search path applies from the next command on.
@@ -617,7 +626,7 @@ pub(super) async fn execute(
     let mut messages = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut authorizing = 0u64;
     let mut h;
-    loop {
+    let observed_work_set = loop {
         // Each preparation step is normally well under a second. Under heavy host disk
         // load (observed on 2026-11-20) one step took longer than the former 15 seconds,
         // and the command was refused as if the sandbox were unavailable. The bound stays
@@ -650,6 +659,14 @@ pub(super) async fn execute(
             cause = Some(launch_cause(failed));
             return Err(CoreError::Refused("native_command_sandbox_unavailable"));
         }
+        // A prepared supervisor is holding the payload. Observe its bounded
+        // inputs before checking authority and releasing the payload.
+        let observed_work_set = match (v["ready"].is_object(), &work_set, &i.assignment) {
+            (true, Some(paths), Some(assignment)) =>
+                crate::native_work_set::observe(root.clone(), paths.clone()).await
+                    .map(|start| (assignment.clone(), paths.clone(), start)),
+            _ => None,
+        };
         let committing = std::time::Instant::now();
         authorize(
             &ex,
@@ -718,15 +735,15 @@ pub(super) async fn execute(
             // checked against this instant.
             launch.released();
             input.write_all(b"go\n").await?;
-            break;
+            break observed_work_set;
         }
         if v["authorize"] != true {
             cause = Some("invalid_supervisor_message".into());
             return Err(CoreError::Refused("invalid_command_supervisor"));
         }
         input.write_all(b"go\n").await?;
-    }
-    Ok::<_, CoreError>((child, messages, h, input))
+    };
+    Ok::<_, CoreError>((child, messages, h, input, observed_work_set))
     }
     .await;
     match attempt_result {
@@ -745,10 +762,10 @@ pub(super) async fn execute(
     if !retried.is_empty() {
         timings.insert("launch_retries".into(), json!(retried.len()));
     }
-    Ok::<_, CoreError>((child, messages, h, authority_pipe))
+    Ok::<_, CoreError>((child, messages, h, authority_pipe, observed_work_set))
     }
     .await;
-    let (mut child, _messages, h, authority_pipe) = match launched {
+    let (mut child, _messages, h, authority_pipe, work_set) = match launched {
         Ok(launched) => {
             unreleased.ex = None;
             launched
@@ -903,12 +920,20 @@ pub(super) async fn execute(
             );
             crate::native_change_set::add(&mut changes, &observed.meta);
             let revision = if observed.digest == after { after } else { None };
+            let work_set = if let Some((assignment, paths, start)) = work_set {
+                crate::native_work_set::observe(root.clone(), paths.clone())
+                    .await
+                    .map(|end| (assignment, paths, start, end))
+            } else {
+                None
+            };
             let actor = c.channel_id;
             let task = i.task;
             let key = args["request_key"].as_str().unwrap().to_owned();
             let h = h.clone();
             recv(ex.publication(move |s| {
-                settle(s, &task, &actor, &key, &h, &status, revision, Some(changes))
+                settle(s, &task, &actor, &key, &h, &status, revision, Some(changes),
+                    work_set.as_ref().map(|(a, p, s, e)| (a.as_str(), p.as_slice(), s.as_str(), e.as_str())))
             })?)
             .await
         }
@@ -1063,7 +1088,7 @@ pub(super) async fn recover(runtime: &crate::native_runtime::Runtime) -> CoreRes
                     let dir=directory(s,&t);
                     match observe(&dir,&handle) {
                         Ok(status) if status["state"]=="finished" => {
-                            let confirmed=settle(s,&t,&a,&k,&handle,&status,None,None).is_ok();
+                            let confirmed=settle(s,&t,&a,&k,&handle,&status,None,None,None).is_ok();
                             if !confirmed {unknown(s,&t,&handle)?;}
                             Ok(Some(confirmed))
                         },
@@ -1216,7 +1241,7 @@ pub(super) fn resettle_row(
                 .and_then(|f| supervisor::status(&directory(store, task).join(f)).ok())
                 .filter(|s| s["ref"] == h["reference"] && s["supervisor"] == h["identity"]);
             if let Some(status) = status.as_ref().filter(|s| s["state"] == "finished") {
-                if settle(store, task, actor, key, h, status, None, None).is_ok() {
+                if settle(store, task, actor, key, h, status, None, None, None).is_ok() {
                     return Ok(Resettled::Settled);
                 }
                 Some((
@@ -1878,8 +1903,14 @@ mod resettle_tests {
             "cwd":"/","profile":"development","mode":"development","denied":[]});
         let status = json!({"state":"finished","exit_code":1,"signal":null,"failure":null,"hash":hash,"byte_count":size});
         store
-            .write(|db| row(db, "command_run", "nested", json!({"complete":false,"tool_call_ref":"native-command:nested","handle":handle})))
+            .write(|db| {
+                row(db, "command_run", "nested", json!({"complete":false,"tool_call_ref":"native-command:nested","handle":handle}))?;
+                lifecycle::event_tx(db, "t", "NATIVE_COMMAND_STARTED", json!({"ref":"native-command:nested"}))?;
+                Ok(())
+            })
             .unwrap();
+        let digest = "a".repeat(64);
+        let scope = vec!["src/**".to_owned()];
         let value = settle(
             &store,
             "t",
@@ -1889,9 +1920,15 @@ mod resettle_tests {
             &status,
             None,
             None,
+            Some(("fixture-assignment", &scope, &digest, &digest)),
         )
         .unwrap();
         assert_eq!(value["exit_code"], 1);
+        let binding = store.read(|db| {
+            lifecycle::worker_checks::work_set_record(db, "t", "native-command:nested")
+        }).unwrap().unwrap();
+        assert_eq!(binding["assignment_ref"], "fixture-assignment");
+        assert_eq!(binding["work_set"], json!(scope));
         assert_eq!(value["complete"], true);
         assert_eq!(value["output_truncated"], true);
         assert_eq!(value["nested_sandbox"]["outside_command"], "offered");

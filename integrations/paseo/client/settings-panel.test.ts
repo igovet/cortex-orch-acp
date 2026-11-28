@@ -1626,8 +1626,8 @@ test("each preferred-work switch explains the work kind and the agents it covers
   const texts = screen.texts();
   assert.ok(texts.some((text) => text.startsWith("Independent checking of finished work")
     && text.includes("• worker-code-reviewer — reviews changes") && text.includes("• worker-security-auditor — audits auth")));
-  assert.ok(texts.some((text) => text.startsWith("Независимая проверка готовой работы") && text.includes("Агенты:")));
-  assert.ok(texts.some((text) => text.includes("No worker role uses this kind directly.")), "a kind without roles says so");
+  assert.ok(texts.some((text) => text.startsWith("Независимая проверка готовой работы") && text.includes("Этапы среды выполнения:") && text.includes("Сохранённые роли прежних планов:")));
+  assert.ok(texts.some(text => text === "Work of kind code."), "a kind with no default role still describes that work");
   assert.ok(texts.some((text) => text.startsWith("Turn a work kind on to rank this model first")));
 });
 
@@ -1648,7 +1648,7 @@ test("the three implementation work kinds each get their own exact help text, no
   assert.ok(texts.some((text) => text.startsWith("Frontend implementation that does not need visual design decisions")
     && text.includes("• worker-frontend-dev — implements UI components")), "frontend-without-design kind has its own help");
   assert.ok(texts.some((text) => text.startsWith("Frontend implementation that also makes visual design choices")
-    && text.includes("No worker role uses this kind directly.")), "frontend-design kind has its own help even with no direct role");
+    && !text.includes("Retained roles from earlier plans")), "frontend-design kind has its own help even with no direct role");
   assert.ok(!texts.some((text) => text.includes("Work of kind implementation_backend.")
     || text.includes("Work of kind implementation_frontend.") || text.includes("Work of kind implementation_frontend_design.")),
     "none of the three kinds falls back to the generic unknown-kind text");

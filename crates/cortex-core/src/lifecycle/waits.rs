@@ -13,7 +13,7 @@ pub(crate) fn field<'a>(v: &'a Value, key: &str) -> CoreResult<&'a str> {
         .filter(|s| !s.is_empty())
         .ok_or(CoreError::Refused("invalid_worker_wait"))
 }
-pub fn projection_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<Value>> {
+pub fn projection_tx(db: &rusqlite::Connection, task: &str) -> CoreResult<Vec<Value>> {
     let rows=db.prepare("SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type='WORKER_WAIT_CHANGED' ORDER BY id")?
         .query_map([task],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
     let mut map = BTreeMap::new();

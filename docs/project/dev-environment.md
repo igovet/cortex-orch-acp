@@ -364,7 +364,7 @@ and explicit `permit allow AGENT REQUEST`. This does not authorize launching,
 blanket permissions or a daemon change. Inspect complete nested error/content
 output, not only an absent structured value.
 
-Check outcomes against the disposable project's `.cortex/cortex.sqlite3`
+Check outcomes against the disposable project's channel store
 store, opened read-only: tasks, reports, review and verification records.
 The read-only `cortex-paseo-tools` readers never initialize or repair a store. An opaque host agent ID or daemon stop alone is not
 binding, engine confirmation or a resource-release receipt (see [removed qualification tooling](#removed-python-era-qualification-tooling)).
@@ -616,7 +616,7 @@ not requested for the current work, so those interactions remain unqualified.
 The Python scripts that supported a requested `cli` run were removed on 2026-11-16 and have no replacement: the route preflight (`paseo-dev route-preflight`), the task-inspection and outcome-assertion scripts (`cortex_inspect_task`, `cortex_qualification_assert`), the case observer (`cortex_qualification_observer`) and the read-only binding mode (`paseo-dev binding`). Their dated results above remain history. Until a supported replacement exists:
 
 - Before a paid `cli` run, resolve every stage's route by hand from the owner-selected settings (the dev profile's `routing.json`, and the `cortex-paseo-tools config` reads) and confirm that no stage, including the mandatory reviewer, would fall back to another route. A `*` pin in the dev profile decides the reviewer unless the user's request names a model for review. If a stage cannot be shown to run on the selected route, do not start the run.
-- After the run, read the outcome from the disposable project's `.cortex/cortex.sqlite3` through the read-only `cortex-paseo-tools` readers (`project-root`, `task-id`, `worker-history`, `worker-results`, `running-commands`, `pipeline`) and the `paseo-dev -- inspect`/`logs` output. State plainly that no automated assertion was run; an absent signal is never a pass, and a wait, an idle agent or the absence of `failed` is not a pass.
+- After the run, read the outcome from the disposable project's channel store through the read-only `cortex-paseo-tools` readers (`project-root`, `task-id`, `worker-history`, `worker-results`, `running-commands`, `pipeline`) and the `paseo-dev -- inspect`/`logs` output. State plainly that no automated assertion was run; an absent signal is never a pass, and a wait, an idle agent or the absence of `failed` is not a pass.
 - Keep each case within the ten-minute budget of the recipe below, with at most 60 seconds per wait and cleanup started no later than 6:30. Send at most one decision-free steering message (`send <agent-id> --prompt ... --no-wait`) and record that it was sent before relying on it; a repeated send is not evidence of continuation.
 - An opaque host agent ID or a daemon stop alone is not binding, engine confirmation or a resource-release receipt. Report each unobserved binding as unverified.
 

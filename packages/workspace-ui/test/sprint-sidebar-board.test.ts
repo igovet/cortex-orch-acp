@@ -2,7 +2,7 @@ import { createEffect, createRoot } from "solid-js";
 import { expect, it, vi } from "vitest";
 import { LOCAL_MACHINE_ID, type Sprint, type TaskOverlay } from "@cortex/workspace-domain";
 import { createRealPort } from "../src/port/real";
-import { sideRows, topWorkRows, type SideRow } from "../src/selectors";
+import { sideRows, activeProject, type SideRow } from "../src/selectors";
 import { createWorkspaceStore } from "../src/store";
 import { capabilitiesWire, flush, scriptedTransport, wireTask } from "./support";
 
@@ -62,7 +62,7 @@ it.each(["before the sprint record", "before the member links", "in a native del
       const index = store.index(), summary = index.summaries.get("p");
       if (!summary) return null;
       return {
-        active: topWorkRows(index, LOCAL_MACHINE_ID).flatMap(g => g.rows.map(r => `${g.id}/${rowKey(r)}`)),
+        active: [activeProject(summary)].flatMap(s => s ? sideRows(index, s, undefined, Infinity).map(rowKey) : []),
         projects: sideRows(index, summary).map(rowKey),
         // The project badge and All link count drafts even when they have no preview row.
         standalone: summary.views.filter(v => !v.sprint).map(v => v.id),
@@ -82,7 +82,7 @@ it.each(["before the sprint record", "before the member links", "in a native del
     });
     try {
       await vi.waitFor(() => expect(store.state().tasks.map(t => t.id)).toEqual(["one", "two"]));
-      const baseline = { active: ["work/task:one", "work/task:two"], projects: ["task:one", "task:two"], standalone: ["one", "two"] };
+      const baseline = { active: ["task:one", "task:two"], projects: ["task:one", "task:two"], standalone: ["one", "two"] };
       const assertHistory = (from: number, allowed: typeof baseline[]) => {
         const actual = seen.slice(from);
         expect(actual.filter(rows => !allowed.some(expected => JSON.stringify(expected) === JSON.stringify(rows)))).toEqual([]);
@@ -156,7 +156,7 @@ it.each(["before the sprint record", "before the member links", "in a native del
         await store.reload();
       }
       const placed = {
-        active: [...baseline.active, "work/task:standalone", "sprints/sprint:sp", "sprints/child:member"],
+        active: ["sprint:sp", "child:member", ...baseline.active, "task:standalone"],
         projects: ["sprint:sp", "child:member", ...baseline.projects, "task:standalone"],
         standalone: [...baseline.standalone, "standalone"],
       };

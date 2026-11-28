@@ -36,7 +36,7 @@ pub fn catalogue(role: &str, profile: Option<&str>, stage: Option<&str>) -> Resu
         .map(|id| snapshot()["tools"][id.as_str().unwrap()].clone())
         .collect::<Vec<_>>();
     if role == "coordinator" && stage == Some("active_steering") {
-        let plan = tools.iter().find(|t| t["name"] == "plan_submit")
+        let mut plan = tools.iter().find(|t| t["name"] == "plan_submit")
             .and_then(|t| t["inputSchema"]["properties"].get("plan"))
             .cloned().ok_or(Error::Forbidden)?;
         tools.retain(|t| active_steering_read(t["name"].as_str().unwrap_or_default()));
@@ -44,8 +44,16 @@ pub fn catalogue(role: &str, profile: Option<&str>, stage: Option<&str>) -> Resu
             "description":"Exact owner message request shown in this steering prompt."});
         let key = json!({"type":"string","minLength":1,"maxLength":128,
             "description":"Stable action key; reuse only for an exact retry of this owner message's action."});
+        plan["description"] = json!("Full editable plan from the steering snapshot. Add fresh task ids, revise pending tasks and their dependencies, or omit pending tasks to cancel them. Keep every locked task and the verification commands identical, and carry all accepted outcomes. Remove or replace dependencies on cancelled tasks. New tasks use automatic routing.");
+        let node = &mut plan["properties"]["tasks"]["items"];
+        node.as_object_mut().ok_or(Error::Forbidden)?.remove("anyOf");
+        node["required"].as_array_mut().ok_or(Error::Forbidden)?.retain(|field| field != "competencies");
+        node["properties"]["competencies"]["description"] = json!("New or edited nodes must explicitly select competencies and explain an empty selection. Retain an untouched node's existing selection and rationale verbatim, including absence from a legacy snapshot.");
+        let role = &mut node["properties"]["role"];
+        *role = json!({"type":"string","minLength":1,"maxLength":80,
+            "description":"Use explorer or general for new nodes or role changes. An existing node may keep its exact role from the steering snapshot."});
         tools.push(json!({"name":"steer_plan",
-            "description":"Propose a replacement of unclaimed work in the executing plan. Every already claimed or completed node and the verification commands must remain identical. The runtime validates the graph and owner limits; it never restarts a worker for this operation.",
+            "description":"Propose changes to never-claimed work in the executing plan. The runtime checks the full graph and scope policy and returns added, changed and cancelled node ids. Independent review and verification still run through the ordinary lifecycle.",
             "inputSchema":{"type":"object","additionalProperties":false,
                 "required":["source_request","request_key","expected_plan","plan"],
                 "properties":{"source_request":source,"request_key":key,
@@ -101,6 +109,57 @@ pub fn catalogue(role: &str, profile: Option<&str>, stage: Option<&str>) -> Resu
 pub fn active_steering_read(name: &str) -> bool {
     matches!(name, "tools_discover" | "read_batch" | "read_capsule" | "read_report"
         | "list_reports" | "read_skill" | "list_sources" | "read_source" | "project_read")
+}
+
+#[cfg(test)]
+#[test]
+fn fresh_plans_only_advertise_the_two_execution_bases() {
+    let tools = catalogue("coordinator", None, None).unwrap();
+    let plan = tools.iter().find(|t| t["name"] == "plan_submit").unwrap();
+    let role = &plan["inputSchema"]["properties"]["plan"]["properties"]["tasks"]["items"]["properties"]["role"];
+    assert_eq!(role["enum"], json!(cortex_core::lifecycle::plan::PLANNABLE_ROLES));
+    for base in ["explorer", "general"] {
+        assert!(validate(role, &json!(base)).is_ok());
+    }
+    for old in ["data-engineer", "code-reviewer", "build-verification", "senior-consultant"] {
+        assert!(validate(role, &json!(old)).is_err());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn consultation_proposals_require_a_question_and_reason() {
+    let coordinator = catalogue("coordinator", None, None).unwrap();
+    let worker = catalogue("worker", Some("worker-general"), Some("execution")).unwrap();
+    for tools in [coordinator, worker] {
+        let tool = tools.iter().find(|tool| tool["name"] == "escalation_request").unwrap();
+        let schema = &tool["inputSchema"];
+        let question = "Can the retry distinguish a pending receipt from a committed write?";
+        let reason = "The answer selects retry or reconciliation. The receipts observed so far lack a terminal state.";
+        assert!(validate(schema, &json!({"request_key":"proposal","reason":reason})).is_err());
+        assert!(validate(schema, &json!({"request_key":"proposal","question":question})).is_err());
+        assert!(validate(schema, &json!({"request_key":"proposal","reason":reason,"question":question})).is_ok());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn plan_advertises_an_explicit_competency_choice() {
+    let tools = catalogue("coordinator", None, None).unwrap();
+    let plan = tools.iter().find(|t| t["name"] == "plan_submit").unwrap();
+    let node = &plan["inputSchema"]["properties"]["plan"]["properties"]["tasks"]["items"];
+    let mut input = json!({"id":"study","role":"explorer","objective":"Compare manifest fields",
+        "dependencies":[],"scope":["manifest"],"model":"auto"});
+    assert!(validate(node, &input).is_err());
+    input["competencies"] = json!([]);
+    assert!(validate(node, &input).is_err());
+    input["base_sufficiency_reason"] = json!(" \t ");
+    assert!(validate(node, &input).is_err());
+    input["base_sufficiency_reason"] = json!("The checked-in manifest provides both fields for a direct comparison.");
+    assert!(validate(node, &input).is_ok());
+    input.as_object_mut().unwrap().remove("base_sufficiency_reason");
+    input["competencies"] = json!(["database"]);
+    assert!(validate(node, &input).is_ok());
 }
 
 #[cfg(test)]

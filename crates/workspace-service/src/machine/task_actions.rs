@@ -250,6 +250,9 @@ pub async fn run(
         }
         return Err(e);
     }
+    if p["action"] == "close_paused_external" {
+        return super::task_lifecycle::close_paused_external(root, project, state, task, p);
+    }
     // Check before any effect. Unmaterialized legacy names still need the retained projection.
     super::task_facts::materialized(root, project).or_else(|error| {
         if error.code == "project_storage_mismatch"
@@ -356,7 +359,8 @@ pub async fn run(
     let stale_automatic_acceptance =
         close_as_is && record["acceptance"]["automatic"] == true && result_is_stale;
     let automatic_acceptance_close = stale_automatic_acceptance
-        || close_as_is && review_hold == Some("automatic_acceptance_blocked");
+        || close_as_is
+            && matches!(review_hold, Some("automatic_acceptance_blocked" | "workspace_unobservable"));
     // The scheduler handed this task to the owner because the runtime cannot settle
     // an effect whose outcome is unknown (see `settling_hold` in the native driver).
     let owner_unsettled = product["sprints"]
@@ -560,15 +564,34 @@ pub async fn run(
                 // Return to the project, not to an irrevocably closed sprint.
                 // Remove both membership links so a subsequent sprint delete
                 // cannot delete a task the owner already restored.
+                let mut detached = false;
                 for sprint in product["sprints"].as_array_mut().into_iter().flatten() {
                     if sprint["archivedAt"].is_null() || sprint["deleting"] == true {
                         continue;
                     }
                     if sprint["id"] == record["sprintId"] {
                         record["sprintId"] = Value::Null;
+                        detached = true;
                     }
                     if let Some(ids) = sprint["taskIds"].as_array_mut() {
                         ids.retain(|id| id != task);
+                    }
+                }
+                if detached && (record.get("produces").is_some() || record.get("consumes").is_some()) {
+                    // Remove the execution contract before publishing the detached
+                    // overlay. If the projection save fails, the old archive still
+                    // fences launch and a retry can finish the detachment.
+                    let store = context::open(root, OpenMode::RuntimeValidate)?
+                        .ok_or_else(|| refuse("project_store_unavailable", "Restore requires the saved project store."))?;
+                    store.write(|db| {
+                        db.execute("UPDATE workspace_task_options SET options_json=json_remove(options_json,'$.sprintDeliverables')
+                             WHERE task_id IN (SELECT task_id FROM workspace_tasks WHERE project_id=? AND task_id=?)",
+                            (project, task))?;
+                        Ok(())
+                    }).map_err(context::core)?;
+                    if let Some(saved) = record.as_object_mut() {
+                        saved.remove("produces");
+                        saved.remove("consumes");
                     }
                 }
             }
@@ -801,7 +824,11 @@ pub async fn run(
             // Recheck under Start arbitration and retain it through the private save.
             store
                 .write(|db| {
-                    super::task_lifecycle::settled(db, root, project, task)?;
+                    if super::task_lifecycle::external(p) {
+                        super::task_lifecycle::external_settled(db, root, project, task)?;
+                    } else {
+                        super::task_lifecycle::settled(db, root, project, task)?;
+                    }
                     if automatic_acceptance_close {
                         let runtime: String = db.query_row(
                             "SELECT e.runtime_task_id FROM workspace_tasks w JOIN workspace_executions e

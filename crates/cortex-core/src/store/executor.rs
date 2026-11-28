@@ -97,7 +97,7 @@ enum Item {
 /// [`StoreExecutor::write_deferred`]).
 type DeferredBody = Box<dyn FnOnce(&rusqlite::Transaction<'_>) -> CoreResult<()> + Send + 'static>;
 /// How long a deferred write may wait for companions before it commits.
-pub const DEFER_WINDOW: Duration = Duration::from_millis(250);
+pub const DEFER_WINDOW: Duration = Duration::from_millis(40);
 /// A batch this large commits at once.
 pub const DEFER_LIMIT: usize = 64;
 #[derive(Default)]
@@ -108,9 +108,21 @@ struct Deferred {
 struct DeferredState {
     /// One counter orders ordinary jobs and deferred writes alike.
     ticket: u64,
-    pending: Vec<(u64, DeferredBody)>,
-    since: Option<Instant>,
+    pending: Vec<(u64, Instant, DeferredBody)>,
+    last_deferred: Option<Instant>,
     wake_queued: bool,
+}
+impl DeferredState {
+    fn push(&mut self, now: Instant, body: DeferredBody) -> u64 {
+        self.ticket += 1;
+        let after_idle = self
+            .last_deferred
+            .is_none_or(|last| now.duration_since(last) >= DEFER_WINDOW);
+        self.last_deferred = Some(now);
+        let deadline = if after_idle { now } else { now + DEFER_WINDOW };
+        self.pending.push((self.ticket, deadline, body));
+        self.ticket
+    }
 }
 impl Deferred {
     fn lock(&self) -> std::sync::MutexGuard<'_, DeferredState> {
@@ -120,27 +132,54 @@ impl Deferred {
     fn take(&self, before: Option<u64>) -> Vec<DeferredBody> {
         let mut state = self.lock();
         let split = match before {
-            Some(ticket) => state.pending.partition_point(|(t, _)| *t < ticket),
+            Some(ticket) => state.pending.partition_point(|(t, _, _)| *t < ticket),
             None => state.pending.len(),
         };
-        let taken: Vec<_> = state.pending.drain(..split).map(|(_, b)| b).collect();
-        if state.pending.is_empty() {
-            state.since = None;
-        } else if !taken.is_empty() {
-            // The remaining writes were deferred after the ones taken; restart their window.
-            state.since = Some(Instant::now());
-        }
-        taken
+        state.pending.drain(..split).map(|(_, _, body)| body).collect()
     }
     /// Time until the oldest pending write is due, when there is one.
     fn due_in(&self) -> Option<Duration> {
+        self.due_in_at(Instant::now())
+    }
+    fn due_in_at(&self, now: Instant) -> Option<Duration> {
         let state = self.lock();
-        let since = state.since?;
+        let (_, deadline, _) = state.pending.first()?;
         Some(if state.pending.len() >= DEFER_LIMIT {
             Duration::ZERO
         } else {
-            DEFER_WINDOW.saturating_sub(since.elapsed())
+            deadline.saturating_duration_since(now)
         })
+    }
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    use super::*;
+
+    #[test]
+    fn idle_leads_immediately_and_active_batches_keep_the_oldest_deadline() {
+        let deferred = Deferred::default();
+        let first = Instant::now();
+        let second = first + Duration::from_millis(1);
+        let third = second + Duration::from_millis(1);
+        let idle = third + DEFER_WINDOW;
+
+        deferred.lock().push(first, Box::new(|_| Ok(())));
+        assert_eq!(deferred.due_in_at(first), Some(Duration::ZERO));
+        assert_eq!(deferred.take(None).len(), 1);
+
+        let before = deferred.lock().push(second, Box::new(|_| Ok(())));
+        deferred.lock().push(third, Box::new(|_| Ok(())));
+        assert_eq!(deferred.take(Some(before)).len(), 0);
+        assert_eq!(deferred.due_in_at(second + DEFER_WINDOW), Some(Duration::ZERO));
+        assert_eq!(deferred.take(None).len(), 2);
+
+        deferred.lock().push(idle, Box::new(|_| Ok(())));
+        assert_eq!(deferred.due_in_at(idle), Some(Duration::ZERO));
+        let fourth = idle + Duration::from_millis(1);
+        let remaining = deferred.lock().push(fourth, Box::new(|_| Ok(())));
+        assert_eq!(deferred.take(Some(remaining)).len(), 1);
+        assert_eq!(deferred.due_in_at(fourth + DEFER_WINDOW), Some(Duration::ZERO));
     }
 }
 /// Close the savepoint around one body: keep its changes, or roll back only them. An
@@ -283,7 +322,7 @@ impl Lane {
                 let setup = || -> CoreResult<_> {
                     // Acquire the owner fence BEFORE any writable initialization.
                     let lease = if owner {
-                        super::locks::private_directory(&key.directory(), true)?;
+                        super::locks::private_directory(&key.anchor_directory(), true)?;
                         // A shared writer waits for another process's idle release;
                         // an exclusive one refuses at once.
                         Some(if shared {
@@ -465,13 +504,8 @@ impl Lane {
             return refuse("storage_executor_closed");
         };
         let mut state = deferred.lock();
-        state.ticket += 1;
-        let ticket = state.ticket;
-        state.pending.push((ticket, body));
-        let first = state.since.is_none();
-        if first {
-            state.since = Some(Instant::now());
-        }
+        let first = state.pending.is_empty();
+        let ticket = state.push(Instant::now(), body);
         if (first || state.pending.len() == DEFER_LIMIT) && !state.wake_queued {
             match sender.try_send(Item::Wake) {
                 Ok(()) => state.wake_queued = true,
@@ -617,12 +651,14 @@ impl StoreExecutor {
     }
     /// Queue a display-only write on the writer lane without waiting for it. Writes
     /// deferred together commit in ONE transaction (each in its own savepoint, so a
-    /// failing one is rolled back alone): after at most [`DEFER_WINDOW`], at once when
-    /// [`DEFER_LIMIT`] are pending, before any ordinary writer job submitted after them
+    /// failing one is rolled back alone). The first submission after idle is due
+    /// immediately. Continuing submissions wait for companions for up to
+    /// [`DEFER_WINDOW`], or until [`DEFER_LIMIT`] are pending. A busy writer can delay
+    /// the batch. Deferred writes run before any ordinary writer job submitted after them
     /// (so every later write, a turn's settle event included, sees them committed and
     /// ordered first), and when the executor shuts down. The outcome is never reported.
-    /// A process killed before the commit loses the pending writes, at most one window's
-    /// worth: never use this for authority, lifecycle or any state another write relies on.
+    /// A process killed before the commit loses the pending writes: never use this
+    /// for authority, lifecycle or any state another write relies on.
     /// A batch committed on its own uses `synchronous=NORMAL` (see [`Store::write_relaxed`]);
     /// one committed in a group with an ordinary write uses that group's FULL commit.
     /// Returns the write's ticket (see [`Self::submitted`]).

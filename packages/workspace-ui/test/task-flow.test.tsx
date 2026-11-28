@@ -22,7 +22,7 @@ const button = (text: string) => all("button").find(b => b.textContent?.trim().s
 const choose = (label: string) => all(".dc-panel .opt").find(o => o.textContent?.includes(label))!.click();
 /** Presses the form's one Send answers button. */
 const sendAll = async () => { button("Send answers").click(); await settled(); };
-const write = (field: HTMLTextAreaElement, value: string) => { field.value = value; field.dispatchEvent(new Event("input", { bubbles: true })); };
+const write = (field: HTMLTextAreaElement | HTMLInputElement, value: string) => { field.value = value; field.dispatchEvent(new Event("input", { bubbles: true })); };
 async function mount(port: Parameters<typeof Workspace>[0]["port"], path: string) {
   history.replaceState(null, "", path);
   const root = document.createElement("div");
@@ -47,13 +47,16 @@ const BOARD = `/m/${LOCAL_MACHINE_ID}/p/p`;
 
 describe("machine Board", () => {
   const href = `/m/${LOCAL_MACHINE_ID}/board`;
-  const card = (id: string) => $(`.machine-board .card[data-task="${id}"]`);
+  const card = (id: string) => $(`.board-wrap .card[data-task="${id}"]`);
   const column = (id: string) => card(id)?.closest(".col")?.getAttribute("data-col");
 
   it("round-trips a machine Board without changing the project Board route", () => {
     const route = { name: "board" as const, machine: "Desk / remote" };
     expect(hrefOf(route)).toBe("/m/Desk%20%2F%20remote/board");
     expect(parseRoute(hrefOf(route))).toEqual(route);
+    const scopedList = { ...route, project: "Cedar & Birch", view: "list" as const };
+    const url = new URL(hrefOf(scopedList), "https://example.test");
+    expect(parseRoute(url.pathname, url.search)).toEqual(scopedList);
     expect(parseRoute(`${BOARD}/board`)).toMatchObject({ name: "project", view: "board" });
     expect(parseRoute(`${href}/extra`).name).toBe("notfound");
   });
@@ -116,6 +119,44 @@ describe("machine Board", () => {
     s.emit(projection("2", world([])));
     await settled();
     expect($(".note-panel")?.textContent).toContain("No tasks to show on this machine");
+  });
+
+  it("shares the work toolbar and sprint groups without adding project actions to the machine Board", async () => {
+    const s = everything();
+    await mount(s.port, href);
+    const member = task("member", { title: "Sprint member", sprintId: "sp" });
+    const other = task("other", { title: "Other project task", projectId: "q" });
+    const state = world([member, other], [sprint({ taskIds: [member.id] })]);
+    state.projects.push({ ...project, id: "q", name: "Birch" });
+    s.emit(projection("1", state));
+    await settled();
+    expect($('[aria-label="Board options"]')?.textContent).toContain("All projects");
+    expect($(".col-grp")?.textContent).toContain("Coffee landing");
+    expect(card(other.id)?.querySelector(".card-project")?.textContent).toBe("Birch");
+    expect($(".quick")).toBeNull();
+    expect($('[aria-label="More project areas"]')).toBeNull();
+    const toggle = $<HTMLButtonElement>('.pstrip button[aria-label="Filter"]')!;
+    toggle.click();
+    const filter = $<HTMLInputElement>('.pstrip input[aria-label="Filter tasks"]')!;
+    write(filter, "other");
+    expect(card(member.id)).toBeNull();
+    expect(card(other.id)).not.toBeNull();
+    write(filter, "missing");
+    expect($(".note-panel")?.textContent).toContain("No tasks match this filter");
+    filter.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(document.activeElement).toBe(toggle);
+    expect(card(member.id)).not.toBeNull();
+    expect(location.pathname).toBe(href);
+    $<HTMLAnchorElement>('.pstrip a[role="tab"][href$="view=list"]')!.click();
+    expect(location.search).toBe("?view=list");
+    expect($(".ws-list .board-list-title")?.textContent).toContain("Birch");
+    all<HTMLButtonElement>('[role="menuitem"]').find(el => el.textContent?.includes("Cedar"))!.click();
+    expect(location.search).toBe("?project=p&view=list");
+    expect($(".ws-list")?.textContent).toContain(member.title);
+    expect($(".ws-list")?.textContent).not.toContain(other.title);
+    $<HTMLButtonElement>('.titlebar button[aria-label="Back"]')!.click();
+    expect(location.search).toBe("?view=list");
+    expect($(".ws-list")?.textContent).toContain(other.title);
   });
 });
 
@@ -786,6 +827,20 @@ describe("the workers list", () => {
     await settled();
     expect(finished.getAttribute("aria-selected")).toBe("true");
     expect(location.pathname).toBe(`/m/${LOCAL_MACHINE_ID}/t/w/workers/a`);
+  });
+
+  it("lets the owner inspect worker tabs by keyboard before opening one and distinguishes same-role attempts in the picker", async () => {
+    const s = everything();
+    await mount(s.port, `/m/${LOCAL_MACHINE_ID}/t/w/workers/cortex`);
+    s.emit(projection("1", live([worker("a"), worker("b", { status: "working" })])));
+    await settled();
+    const coordinator = card("Coordinator")!;
+    coordinator.focus();
+    coordinator.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    expect(document.activeElement).toBe(card("Goal b"));
+    expect(coordinator.getAttribute("aria-selected")).toBe("true");
+    const select = document.querySelector<HTMLSelectElement>(".ws-worker-picker select")!;
+    expect([...select.options].map(option => option.text)).toEqual(expect.arrayContaining(["frontend-dev · Working · Goal b", "frontend-dev · Finished · Goal a"]));
   });
 
   it("still moves a worker that finishes into Finished", async () => {

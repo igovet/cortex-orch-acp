@@ -1,4 +1,5 @@
 pub mod client;
+pub mod history;
 pub mod navigation;
 mod opener;
 pub mod policy;

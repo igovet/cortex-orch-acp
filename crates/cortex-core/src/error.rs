@@ -5,6 +5,8 @@ pub type CoreResult<T> = Result<T, CoreError>;
 pub enum CoreError {
     #[error("{0}")]
     Refused(&'static str),
+    #[error("external_stop_pending")]
+    ExternalStopPending { role: String, reference: Option<String> },
     #[error("owner_file_lease_held")]
     OwnerFileLeaseHeld {
         path: crate::store::owner_file_leases::RelativePath,
@@ -24,6 +26,7 @@ impl CoreError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Refused(code) => code,
+            Self::ExternalStopPending { .. } => "external_stop_pending",
             Self::OwnerFileLeaseHeld { .. } => "owner_file_lease_held",
             Self::TaskFileLeaseHeld { .. } => "task_file_lease_held",
             Self::UnsupportedStorageFormat10 => "unsupported_storage",

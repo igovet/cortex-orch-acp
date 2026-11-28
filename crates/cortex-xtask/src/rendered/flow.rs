@@ -8,7 +8,7 @@ use super::ENGINE;
 use crate::installed::util::*;
 use crate::json::Res;
 use crate::json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(super) const DRAFT_TITLE: &str = "Explain this disposable project";
 const CONSTRAINT: &str = " Never lose constraint α";
@@ -36,20 +36,21 @@ impl J {
         self.release_clipboards();
         self.click("Save draft")?;
         self.wait_text("baseline_draft_visible", 15, DRAFT_TITLE)?;
+        let db = super::baseline::fixture_store(self, &project)?;
         require(
-            self.store_count(&project, "SELECT count(*) FROM runtime_tasks")? == 0,
+            crate::installed::native::count(&db, "SELECT count(*) FROM runtime_tasks")? == 0,
             "the baseline draft started without input",
         )?;
         self.open_task("baseline_draft_link", DRAFT_TITLE)?;
-        self.start_and_question()?;
+        self.start_and_question(Some(&db))?;
         self.close_window()
     }
 
-    fn start_and_question(&mut self) -> Res<()> {
+    fn start_and_question(&mut self, baseline_db: Option<&Path>) -> Res<()> {
         super::baseline::begin(self)?;
         self.click_task("Start")?;
         self.wait_text("runtime_question", 90, "How should we finish?")?;
-        super::baseline::finish(self)?;
+        super::baseline::finish(self, baseline_db)?;
         self.step("start_and_question", vec![]);
         Ok(())
     }
@@ -478,7 +479,7 @@ impl J {
         sleep_ms(300);
         self.audit("task session draft", "dark")?;
         self.inspector_open("task session draft")?;
-        self.start_and_question()?;
+        self.start_and_question(None)?;
         self.audit("task session question", "dark")?;
         self.popovers("task session question")?;
         self.resize(960, 540)?;
@@ -573,7 +574,9 @@ impl J {
         self.wait_text("hold_draft_visible", 15, hold)?;
         self.open_task("hold_task_link", hold)?;
         self.click_task("Start")?;
-        self.wait("worker_live", 60, |j| Ok(j.task_state(&project)?.as_deref() == Some("EXECUTING") && j.store_count(&project, "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')")? == 1))?;
+        self.wait("worker_live", 60, |j| {
+            Ok(j.task_state(&project)?.as_deref() == Some("EXECUTING") && j.worker_running(&project)?)
+        })?;
         self.step("start_held_task", vec![]);
         let hold_at = self.path()?;
         self.close_window()?;
@@ -617,7 +620,7 @@ impl J {
         self.click("Send message now")?;
         self.wait_js("steer_recorded_during_turn", 30, "return document.body.innerText.includes('Focus on durable conversation') && document.querySelector('[aria-label=\"Message\"]').value === '' ? 'yes' : ''")?;
         self.step("steer_durable_capture_during_turn", vec![]);
-        self.wait_found_role("workers_in_the_conversation", 15, "backend-dev", "link")?;
+        self.wait_found_role("workers_in_the_conversation", 15, "general", "link")?;
         self.step(
             "workers_from_the_real_store",
             vec![("through", s("service, native peer, port and screen"))],

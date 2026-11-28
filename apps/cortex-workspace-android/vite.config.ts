@@ -6,7 +6,8 @@ const at = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 // The phone app is the shared interface in its phone shell. The boot page files (logo, theme, licences) are the desktop's own.
 export default defineConfig({
   plugins: [solid()],
-  base: "./",
+  // Tauri serves the embedded frontend from the origin root, including on a deep-link reload.
+  base: "/",
   publicDir: at("../cortex-workspace-desktop/public"),
   resolve: {
     alias: [

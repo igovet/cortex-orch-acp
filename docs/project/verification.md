@@ -34,6 +34,25 @@ digest; its `CHECK_EXECUTION_STARTED` marker alone is diagnostic and never close
 a gap. Discarded candidates remain ineligible.
 
 A worker's failed check is closed only by an exact later passing rerun of the same argv and cwd; that exact rerun may cross between `command_run` and `outside_command` in either direction, preserving both receipts and their operation/profile provenance, while a same-operation profile change still never matches. A supported syntax, regex, or statically proven literal-expectation error in the worker's own bounded, self-contained standalone Python probe may instead be retracted by a later verified passing correction; the failure stays as `retracted` history and is never a pass. A supported standalone-Python probe mistake or a direct Python script's argparse startup error (exit code 2) may instead be superseded by an explicit `command_correction` (`superseded` history, never a pass). A complete whole-tree `git diff --check` whose whitespace diagnostics name only paths reserved by sibling writers of the same plan revision is `not_attributable` and does not fail the submitting check. Runtime verification failures and real project test/lint/build failures are never retracted (see [check history](../features/orchestration/index.md#check-history-and-current-outcome)). The Rust check-history, correction, retraction and evidence-strength cases are in `cargo test -p cortex-core --lib worker_checks` and `cargo test -p cortex-core --test lifecycle_parity resolved_check_history_is_rederived_at_completion`.
+
+For runtime verification with the owner's pinned Cargo, Cortex can observe the
+artifact from a literal locked, offline `cargo test` command targeting one
+named package and either its library or one named integration test. Cargo's
+build-only output identifies the selected artifact and whether it was reused.
+Cortex checks that Cargo's default harness reports running the same artifact
+and that its bytes and the observed checkout digest stayed stable across
+the run. A Cargo-reused executable whose exact
+same command and checkout previously built those bytes on a different source
+digest triggers one retry in the existing verifier sandbox with a new private
+target directory. The checkout digest includes dirty deliverable bytes even if HEAD
+stays the same. The old result remains a diagnostic and the new result must
+establish its own artifact and pass the usual review and verification checks.
+This checks the observed checkout, including dirty tracked files. Custom runners
+and artifacts outside the checkout's ordinary target or Cortex's private target
+have unknown provenance. The ordinary command outcome remains in force for
+unknown or unsupported provenance. External and ignored build inputs are not part
+of the checkout digest.
+The retry does not clean or alter the shared Cargo target.
 Executable Bash receipts that overwrite a captured failure (`%n`, variable-expanded `printf -v`)
 remain unverified on `result_submit`, while safe `echo`/`tail` wrappers retain status
 propagation and exact-rerun coverage.
@@ -153,7 +172,7 @@ Focused default/provenance/gateway regressions are in the `workspace-service`, `
 A test-only unjailed launch replacement covers real subprocess receipts and
 cancellation, not real filesystem containment or Docker. Execute the real
 Landlock cases where the kernel enables Landlock; a run without it remains
-unverified containment. Docker qualification uses only disposable project-local
+unverified containment. Docker qualification uses only disposable project and private XDG state
 inputs and uniquely named disposable images/containers/volumes, never production
 workloads, daemon reconfiguration, privileged containers or host-root bind probes.
 Daemon-side path visibility, cleanup and identity must be observed separately.
@@ -221,7 +240,10 @@ beyond the inline limit, nonzero exit status, hash/size, one receipt after anoth
 restart and a single launch marker are asserted. A lost supervisor retains an
 unknown outcome and refuses a stop rather than signalling its old PID; once its
 recorded payload process group is empty its receipt is settled as
-`outcome_not_recorded`, never as a success. Run just
+`outcome_not_recorded`, never as a success. Each command restart case also
+requires a successful SIGTERM shutdown within five seconds. Background merge
+refreshes and exit rechecks leave the owner-control queue when shutdown begins,
+so the service can join their jobs while it holds that lock. Run just
 these cases with real namespaces (see above) with:
 
 ```sh
@@ -367,13 +389,13 @@ scripts/cortex-xtask.sh check-generated
 ```
 
 `profiles check` is the source-only verification: it fails if the generated worker
-skills or profiles differ from their `agent-sources/`, and it asserts the 23 profiles.
+skills or profiles differ from their `agent-sources/`, and it verifies exactly the five canonical profiles.
 `write` regenerates the derived files. `generate-instructions` covers the native
 instruction data derived from `skills/`, `generate-contract` the Workspace wire
 contract (schema `crates/workspace-protocol/schema/workspace.json`), and
 `check-generated` runs all three checks. Each takes one positional action, `check` or
-`write`; `check` never writes. Preserve all 23 profiles (22 specialists and the
-consultant) and their shared report protocol. `scripts/cortex-xtask.sh check-pins`
+`write`; `check` never writes. Keep the five base profiles and shared report protocol. Retained role identities
+resolve to these bases while preserving their access and evidence. `scripts/cortex-xtask.sh check-pins`
 verifies the reviewed Rust/CLI dependency pins without a build or network.
 
 ## Sequencing
@@ -474,7 +496,7 @@ case-observer scripts (`cortex_inspect_task`, `cortex_qualification_assert`,
 `cortex_qualification_observer`, `cortex_timeline`, `cortex_trace_view`) were removed
 without replacement on 2026-11-16, as were the `--wire-trace`, `route-preflight` and
 `binding` modes of the dev wrapper. A requested `cli` run therefore reads its outcome
-from the disposable project's `.cortex` store through the read-only
+from the disposable project's channel store through the read-only
 `cortex-paseo-tools` readers (`project-root`, `task-id`, `worker-history`,
 `worker-results`, `running-commands`, `pipeline`) and the Paseo timeline
 (see [the dev guide](dev-environment.md)); the owner-selected route is recorded with
@@ -778,6 +800,10 @@ task's Stop/Resume to completion. Native execution, settled processes and
 contained checks are observed in that disposable project's store; the result
 must also render. Exactly two distinct completed native task identities per
 scenario are required. The peer is test-only and never part of the Debian payload.
+The harness checks the project-side anchor and the matching format-12 database
+under the disposable user's channel state root before using store rows as
+evidence. Removal and upgrade checks compare the retained anchor and database
+hashes.
 
 The build-integrated equivalent is
 `scripts/cortex-xtask.sh build-deb --check-installed --prior-archive /absolute/path/to/previous-owner.deb` (the `scripts/build-dev-deb.sh` and `scripts/build-prod-deb.sh` wrappers pass the same options).
@@ -910,12 +936,12 @@ paid calls.
 The gate supports Docker and both Debian channels. `--channel dev` is the default
 and requires both archives to be `cortex-workspace-dev`; `--channel release` requires
 both to be `cortex-workspace`. Mixing channels fails before container launch.
-The release selection uses `.cortex` project stores, the `cortex-workspace` service
-and socket namespace, `~/.config/cortex` configuration and `~/.local/state/cortex`
-engine/catalog state; the project registry remains under
-`~/.local/state/cortex-workspace`. Dev retains `.cortex-dev`, its `-dev` service/socket,
-`~/.config/cortex-workspace-dev/cortex` configuration and
-`~/.local/state/cortex-workspace-dev/state/cortex` engine/catalog state.
+The release selection uses the `cortex-workspace` service/socket namespace,
+`~/.config/cortex` configuration and `~/.local/state/cortex` engine/catalog state.
+The project registry remains under `~/.local/state/cortex-workspace`. Dev uses its
+`-dev` service/socket, `~/.config/cortex-workspace-dev/cortex` configuration and
+`~/.local/state/cortex-workspace-dev/state/cortex` engine/catalog state. The two
+channels keep their live databases under their respective [project state roots](storage.md#where-the-database-lives-and-how-it-moves).
 All paths are relative to the disposable container user, never the owner.
 Supporting a channel is not evidence that an archive passed: the exact candidate
 and prior hashes, channel and complete four-scenario result must still be retained.
@@ -989,6 +1015,16 @@ device mapping for each run. Compare like percentiles and sample populations:
 `commit_return_to_covering_broadcast` is per source outbox row. Neither measures
 the separate-process fallback or the time until a window paints.
 
+Run the display batch diagnostic on a disposable filesystem. It reports the
+submit-to-body and submit-to-commit distributions, initial fragment latency,
+WAL growth and transaction count for the available and held writer cases.
+
+```sh
+umask 022
+timeout --kill-after=5s 900s "$HOME/.cargo/bin/cargo" test --locked --offline -p cortex-core --lib deferred_tests
+timeout --kill-after=5s 900s "$HOME/.cargo/bin/cargo" test --locked --offline -p cortex-core --features test-observations --test deferred_latency -- --ignored --nocapture
+```
+
 ### Additional Workspace checks
 
 Remote access and the Android app add these no-paid targeted checks (loopback only: no relay, no device, no emulator):
@@ -1049,21 +1085,51 @@ To measure from the fake peer rather than the history reply, add
 `--peer-timing yes --build-image no` to the `--only baseline --baseline yes`
 command. This is a separate population: it uses the unique
 `Post-question coordinator text` fragment, not the repeated progress marker.
-The existing local builder image compiles only a test library; neither image
-is pulled and none of the three retained executables are rebuilt. The library
+The existing local builder image compiles a test library and an X11 pixel sampler.
+The sampler targets an eight-millisecond period and records the actual capture interval.
+Neither image is pulled and the three retained executables keep their original hashes. The library
 is preloaded only into the fake peer, in a loopback-only container with the
 checkout stores masked and the same authenticated private display.
 
 The library brackets the successful write of the complete, exact ACP line
 with Linux monotonic timestamps. The disposable project's transcript and
 attempt binding must agree with that wire session and with the exact desktop
-history row for the opened task. History provides identity, not the start
+history row for the opened task. The focused baseline resolves the fixture's
+store before Start. It verifies a relocated store's anchor and destination or
+an archived checkout-local format-12 store naming that exact disposable project.
+History provides identity, not the start
 time. The pixel bound runs from the previous negative capture's start minus
 the write's end (floored at zero) to the first positive capture's end minus
 the write's start. Missing, ambiguous or out-of-order evidence fails the
 check; observer and sampling overhead are not subtracted. Omit
 `--peer-timing yes` for the existing history-reply boundary, or omit both
 observer flags for the capture-off control.
+
+For a matched direct-history comparison, use the same desktop, service and fake peer
+in both runs and add `--history-delivery pull` or `--history-delivery push` to the
+peer-timed command. Both runs must observe the real service advertising
+`native.history.follow`. The pull control removes that one method from the
+negotiation response. The push arm must receive the fixture row on a dedicated
+socket bound to its project, task and execution. The observer checks generation
+and forward-cursor continuity, the durable row identity and the first visible
+pixel bracket. A racing text-bearing pull reply or a private marker on the
+general notification stream fails the matched comparison.
+
+The result includes every desktop RPC grouped by method, private frame bytes,
+rows, scope, resyncs and the source of the first visible fragment. A service
+built with `test-observations` also reports its cumulative projection counters
+through the last delivered frame. Empty projections after that frame have no
+wire receipt. For independent SQL counts, compile
+`crates/cortex-xtask/src/rendered/baseline-sql.c` against the bundled SQLite
+header and link the service binary for a separate counting run using
+`cargo rustc -p workspace-service --bin workspace-service --release --locked --offline -- -C link-arg=/absolute/path/sql-count.o -C link-arg=-Wl,--wrap=sqlite3_open_v2`
+with the same build environment as the timing service. The observer reports
+read-only statements returning columns, total statement starts and row
+callbacks across all service-process rusqlite connections within its monotonic
+window. These counts include SQL executed for pushes and ordinary requests.
+Physical disk reads, other processes and work outside the window have separate
+measurement boundaries. Ordinary service binaries report `uninstrumented`;
+run the latency comparison on those unchanged executables.
 
 ## What automated evidence cannot close
 

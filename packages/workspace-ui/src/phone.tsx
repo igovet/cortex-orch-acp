@@ -6,7 +6,10 @@ import { machineLine, machineRefusal, UPDATE_NEEDED } from "./phone-words";
 import type { NotificationClicks } from "./notification-target";
 import { workspaceCopy } from "./copy";
 import { PAIR_LINK_PREFIX, type PhoneMachine, notificationWords, type PhoneNotificationState, type PhoneShell, type PhoneState, type PhoneTap } from "./phone-shell";
+import { LOCAL_MACHINE_ID } from "@cortex/workspace-domain";
+import { parseRoute } from "./router";
 import { createRealPort } from "./port/real";
+import { discardPairingDrafts } from "./local-drafts";
 import { relayProblem } from "./remote-access";
 import { createTheme, persisted, type Theme, type ThemePref } from "./theme";
 import { dropHover } from "./touch";
@@ -74,6 +77,10 @@ export function PhoneApp(props: PhoneAppProps) {
   const machines = () => state()?.machines ?? [];
   const activeId = createMemo(() => { const s = state(); return s?.active && s.machines.some(m => m.id === s.active) ? s.active : null; });
   const machineOf = (id: string) => machines().find(m => m.id === id);
+  const activePairing = createMemo(() => {
+    const id = activeId(), machine = id ? machineOf(id) : undefined;
+    return machine ? JSON.stringify([machine.id, machine.pairedAt ?? null]) : null;
+  });
   const topFlow = () => flow().at(-1);
   const topPage = () => pages().at(-1);
   const push = (step: Flow) => setFlow(list => [...list, step]);
@@ -172,7 +179,7 @@ export function PhoneApp(props: PhoneAppProps) {
   const select = (id: string) => { setSheet(false); if (id !== activeId()) void shell.select(id); };
   const frameFor = (id: string): PhoneFrame => ({
     kind: "phone",
-    machine: () => { const m = machineOf(id); return { name: m?.name ?? "", state: m?.state ?? "offline", path: m?.path ?? null, lastConnectedAt: m?.lastConnectedAt ?? null }; },
+    machine: () => { const m = machineOf(id); return { name: m?.name ?? "", state: m?.state ?? "offline", path: m?.path ?? null, lastConnectedAt: m?.lastConnectedAt ?? null, pairedAt: m?.pairedAt }; },
     openMachines: () => setSheet(true),
     openSettings: () => openPage({ kind: "settings" }),
     retry: () => void shell.retry(id).catch(() => undefined),
@@ -181,10 +188,13 @@ export function PhoneApp(props: PhoneAppProps) {
 
   return <div class="ph-app">
     <Show when={state()} fallback={<Show when={readIssue()} fallback={props.logo}>{why => <Screen label="Not loaded"><div class="ph-body center"><h1>The app could not start</h1><p class="muted">{why()}</p><button class="btn btn-primary ph-wide" onClick={() => void load()}>Try again</button></div></Screen>}</Show>}>
-      <Show when={activeId()} keyed fallback={<Show when={machines().length > 0} fallback={<Connect onScan={() => scan()} onPaste={() => paste()} />}>
+      <Show when={activePairing()} keyed fallback={<Show when={machines().length > 0} fallback={<Connect onScan={() => scan()} onPaste={() => paste()} />}>
         <Screen label="Machines"><Bar title="Machines" /><div class="ph-body"><MachineList machines={machines()} active={null} onPick={select} /></div>
           <div class="ph-foot"><button class="btn btn-line" onClick={() => push({ kind: "start" })}><I n="plus" s={14} />Add machine</button></div></Screen>
-      </Show>}>{id => <MachineWorkspace id={id} shell={shell} frame={frameFor(id)} theme={theme} logo={props.logo} clicks={clicksFor(id)} />}</Show>
+      </Show>}>{pairing => {
+        const [id] = JSON.parse(pairing) as [string, number | null];
+        return <MachineWorkspace id={id} shell={shell} frame={frameFor(id)} theme={theme} logo={props.logo} clicks={clicksFor(id)} />;
+      }}</Show>
       <Show when={pages().length > 0}><Switch>
         <Match when={topPage()?.kind === "settings"}><PhoneSettings shell={shell} theme={theme} machines={machines()} active={activeId()} notify={notifySettings} onBack={closePage} onOpen={openPage} onAdd={() => push({ kind: "start" })} /></Match>
         <Match when={(() => { const p = topPage(); return p?.kind === "machine" ? machineOf(p.id) : undefined; })()}>{m => <MachinePage shell={shell} machine={m()} active={m().id === activeId()} onBack={closePage}
@@ -235,12 +245,26 @@ export function PhoneApp(props: PhoneAppProps) {
 }
 
 /** The workspace of one machine. Created whole for that machine and disposed whole when another becomes active. */
+function pairingDraftNamespace(machine: { id: string; pairedAt?: number }) {
+  return Number.isSafeInteger(machine.pairedAt) && machine.pairedAt! > 0
+    ? ["phone", machine.id, String(machine.pairedAt)] : undefined;
+}
+
 function MachineWorkspace(props: { id: string; shell: PhoneShell; frame: PhoneFrame; theme: Theme; logo?: JSX.Element; clicks?: NotificationClicks }) {
-  // Each machine starts at its own Home: no route, tab or cached board of the machine before carries over.
+  const namespace = pairingDraftNamespace({ id: props.id, pairedAt: props.frame.machine().pairedAt });
+  // Every peer uses /m/local. Only this history entry’s pairing can identify which peer opened the URL.
+  let restore = false;
+  if (namespace && history.state?.phonePairing === JSON.stringify(namespace)) {
+    try {
+      const route = parseRoute(location.pathname, location.search);
+      restore = "machine" in route && route.machine === LOCAL_MACHINE_ID;
+    } catch { /* A malformed URL opens Home. */ }
+  }
   try { localStorage.removeItem("cw.ws.tabs"); } catch { /* no storage */ }
-  history.replaceState(null, "", "/");
+  if (!restore) history.replaceState(null, "", "/");
   const port = createRealPort({ transport: props.shell.transport(props.id), registry: true, actorId: "phone" });
-  return <Workspace port={port} shell={props.frame} theme={props.theme} logo={props.logo} voice={props.shell.voice} notificationClicks={props.clicks} />;
+  return <Workspace port={port} shell={props.frame} theme={props.theme} logo={props.logo} voice={props.shell.voice} notificationClicks={props.clicks}
+    draftNamespace={namespace} />;
 }
 
 function Connect(props: { onScan: () => void; onPaste: () => void; onBack?: () => void }) {
@@ -330,7 +354,13 @@ function MachinePage(props: { shell: PhoneShell; machine: PhoneMachine; active: 
     setSaving(true);
     props.shell.rename(props.machine.id, name).then(() => { setEditing(null); setIssue(null); }, error => setIssue(`Not saved: ${failure(error)}`)).finally(() => setSaving(false));
   };
-  const forget = () => props.shell.forget(props.machine.id).then(() => props.onBack(), error => { setAsking(false); setIssue(`Not forgotten: ${failure(error)}`); });
+  const forget = () => {
+    const namespace = pairingDraftNamespace(props.machine);
+    return props.shell.forget(props.machine.id).then(() => {
+      if (namespace) discardPairingDrafts(namespace);
+      props.onBack();
+    }, error => { setAsking(false); setIssue(`Not forgotten: ${failure(error)}`); });
+  };
   const line = () => machineLine(props.machine);
   return <Screen label={props.machine.name}><Bar title={props.machine.name} onBack={props.onBack} />
     <div class="ph-body">

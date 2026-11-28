@@ -4,12 +4,10 @@ import { addCoordinatorModel, consultationListed, kindLabel, ROLE_CATALOG, WORK_
 describe("automatic role tiers", () => {
   it("scales planning, general work and exploration by complexity", () => {
     const complexities = ["low", "normal", "high"] as const;
-    for (const role of ["worker-general", "worker-planner", "worker-technical-writer"]) {
+    for (const role of ["worker-general", "worker-explorer", "worker-planner", "worker-technical-writer"]) {
       expect(complexities.map(complexity => tierFor(role, false, complexity))).toEqual(["light", "standard", "deep"]);
     }
-    for (const escalate of [false, true]) {
-      expect(complexities.map(complexity => tierFor("worker-explorer", escalate, complexity))).toEqual(["light", "light", "standard"]);
-    }
+    expect(complexities.map(complexity => tierFor("worker-explorer", true, complexity))).toEqual(["standard", "deep", "flagship"]);
   });
 });
 

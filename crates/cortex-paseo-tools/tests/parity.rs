@@ -125,13 +125,16 @@ fn python(script: &str, args: &[&str]) -> (Vec<u8>, Option<i32>) {
 }
 
 fn rust(command: &str, args: &[&str]) -> (Vec<u8>, Option<i32>) {
+    let fixture_home = temp_dir("reader-home");
     let output = Command::new(TOOL)
         .arg(command)
         .args(args)
         .current_dir("/")
         .env_clear()
+        .env("HOME", &fixture_home)
         .output()
         .expect("cortex-paseo-tools");
+    fs::remove_dir(&fixture_home).expect("a store reader mutated its fixture home");
     (output.stdout, output.status.code())
 }
 
@@ -840,8 +843,13 @@ fn populate(db: &rusqlite::Connection, root: &str) {
 }
 
 fn make_store(root: &Path, fill: impl FnOnce(&rusqlite::Connection, &str)) {
+    let channel = if workspace_protocol::channel::current().is_dev() {
+        StoreChannel::Dev
+    } else {
+        StoreChannel::Release
+    };
     let store = Store::open(
-        ProjectKey::new(root, StoreChannel::Release).unwrap(),
+        ProjectKey::new(root, channel).unwrap(),
         OpenMode::Initialize,
     )
     .unwrap();
@@ -867,6 +875,8 @@ fn git(args: &[&str], cwd: &Path) -> bool {
 fn main() {
     let scripts = scripts();
     let recording = std::env::var_os("CORTEX_PARITY_RECORD").is_some();
+    assert!(!recording || !workspace_protocol::channel::current().is_dev(),
+        "the historical oracle records only the release channel");
     let mut cases = Cases {
         count: 0,
         failures: Vec::new(),
@@ -1155,7 +1165,9 @@ fn main() {
     );
 
     // The readers never write: the database bytes are unchanged by a full Rust pass.
-    let database = root.join(".cortex/cortex.sqlite3");
+    let database = root
+        .join(cortex_acp::startup::project_store_name())
+        .join("cortex.sqlite3");
     let before = digest_file(&database);
     for (command, args) in [
         (

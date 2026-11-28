@@ -1,80 +1,41 @@
-//! The orchestrator's worker-routing catalogue lists exactly the plannable
-//! roles of the advertised plan schema.
+//! Catalogue and instruction boundaries for canonical and retained profiles.
 use serde_json::Value;
 use std::{collections::BTreeSet, path::Path};
 
-fn find_role_enum(value: &Value) -> Option<Vec<String>> {
-    match value {
-        Value::Object(map) => {
-            if let Some(roles) = map.get("role").and_then(|r| r["enum"].as_array()) {
-                if roles.iter().any(|r| r == "backend-dev") {
-                    return Some(
-                        roles
-                            .iter()
-                            .filter_map(|r| r.as_str().map(str::to_owned))
-                            .collect(),
-                    );
-                }
-            }
-            map.values().find_map(find_role_enum)
-        }
-        Value::Array(items) => items.iter().find_map(find_role_enum),
-        _ => None,
+#[test]
+fn sprint_planning_questions_are_grounded_in_project_rules_and_evidence() {
+    let tools = cortex_engine::schema::catalogue("coordinator", None, None).unwrap();
+    for name in ["user_question_request", "sprint_plan_submit"] {
+        let description = tools.iter().find(|tool| tool["name"] == name).unwrap()["description"]
+            .as_str().unwrap();
+        assert!(description.contains("applicable project rules"));
+        assert!(description.contains("implementation"));
+        assert!(description.contains("mandatory independent review"));
+        assert!(description.contains("required profiles"));
     }
 }
 
 #[test]
-fn worker_routing_catalogue_equals_the_plannable_role_enum() {
+fn fresh_execution_and_review_fixes_only_offer_canonical_roles() {
     let schema: Value = serde_json::from_str(include_str!("../schema/tools.json")).unwrap();
-    // The plan's node roles; a review finding's proposed fix role is a subset.
-    let plan = schema["tools"]
-        .as_object()
-        .unwrap()
-        .values()
-        .find(|t| t["name"] == "plan_submit")
-        .expect("plan_submit");
-    let plannable: BTreeSet<String> = find_role_enum(plan)
-        .expect("plan node role enum")
-        .into_iter()
-        .collect();
+    let tools = schema["tools"].as_object().unwrap();
+    let plan = tools.values().find(|t| t["name"] == "plan_submit").unwrap();
+    let roles = &plan["inputSchema"]["properties"]["plan"]["properties"]["tasks"]["items"]["properties"]["role"]["enum"];
+    assert_eq!(roles, &serde_json::json!(["explorer", "general"]));
+    let mut fix_selectors = 0;
+    for tool in tools.values() {
+        let role = &tool["inputSchema"]["properties"]["findings"]["items"]["properties"]["role"]["enum"];
+        if !role.is_null() {
+            assert_eq!(role, &serde_json::json!(["general"]));
+            fix_selectors += 1;
+        }
+    }
+    assert!(fix_selectors > 0, "review findings expose the repair role");
     let routing = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../skills/orchestrator/references/worker-routing.md"),
-    )
-    .unwrap();
-    let catalogue: BTreeSet<String> = regex::Regex::new(r"(?m)^- `([^`]+)`:")
-        .unwrap()
-        .captures_iter(&routing)
-        .map(|c| c[1].to_owned())
-        .collect();
-    assert_eq!(catalogue, plannable);
-    // Every fix role a review finding may propose is a plannable writing role.
-    for tool in schema["tools"].as_object().unwrap().values() {
-        let proposed =
-            &tool["inputSchema"]["properties"]["findings"]["items"]["properties"]["role"]["enum"];
-        for role in proposed.as_array().into_iter().flatten() {
-            let role = role.as_str().unwrap();
-            assert!(plannable.contains(role), "{role}");
-            assert!(
-                ![
-                    "architect",
-                    "explorer",
-                    "planner",
-                    "security-auditor",
-                    "ux-designer",
-                    "accessibility-auditor",
-                    "database-architect",
-                    "performance-engineer"
-                ]
-                .contains(&role),
-                "{role}"
-            );
-        }
-    }
-    // The reserved roles (reviewer, build verification, consultant) are never plannable.
-    for reserved in ["code-reviewer", "build-verification", "senior-consultant"] {
-        assert!(!plannable.contains(reserved), "{reserved}");
-    }
+    ).unwrap();
+    assert!(routing.contains("live plan schema and routing menu"));
 }
 
 /// What a catalogue describes is what it serves: the consultant's tools name no

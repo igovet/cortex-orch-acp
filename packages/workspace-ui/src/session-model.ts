@@ -38,12 +38,12 @@ export function workerState(w: Worker): Face {
  * step) under it. A worker without a recorded step is its own group. The order of the list is kept.
  */
 export function attemptsByNode(workers: Worker[]): { latest: Worker; earlier: Worker[] }[] {
-  const groups: { key: string; latest: Worker; earlier: Worker[] }[] = [];
+  const groups = new Map<string, { latest: Worker; earlier: Worker[] }>();
   for (const w of workers) {
-    const key = w.node ? `node:${w.node}` : `worker:${w.id}`, group = groups.find(g => g.key === key);
-    if (group) group.earlier.push(w); else groups.push({ key, latest: w, earlier: [] });
+    const key = w.node ? `node:${w.node}` : `worker:${w.id}`, group = groups.get(key);
+    if (group) group.earlier.push(w); else groups.set(key, { latest: w, earlier: [] });
   }
-  return groups.map(({ latest, earlier }) => ({ latest, earlier }));
+  return [...groups.values()];
 }
 const ACTIVE: WorkerStatus[] = ["working", "waiting_you", "paused", "unknown"];
 const FINISHED: WorkerStatus[] = ["completed", "failed", "cancelled"];
@@ -342,11 +342,22 @@ export const closeBlocked = (m: SessionModel) =>
     : m.view.task.conflict !== "none" ? "A merge is in progress. Abort it first" : null;
 
 export const EXTERNAL_DONE_LABEL = "Done outside the app…";
+export const externalExitPending = (v: TaskView) => !!v.task.warnings?.includes("external_close_waiting_for_exit");
+export const pausedExternalClose = (v: TaskView) => v.task.status === "paused" && !v.task.automaticContinuation?.pause || externalExitPending(v);
 export const offersExternalDone = (v: TaskView) => !v.unknown && v.task.status !== "done" && v.column !== "closed_unverified";
 export const externalDoneBlocked = (m: SessionModel) =>
   m.view.task.process !== "stopped" || ["working", "needs_you", "stopping"].includes(m.view.task.status)
     ? "Stop the task and wait for every worker to stop first."
     : closeBlocked(m);
+
+export const pausedExternalCloseBlocked = (m: SessionModel) => {
+  const task = m.view.task;
+  if (!task.executionId || !task.sourceVersion || m.view.machine.connection !== "connected")
+    return "Refresh the task to confirm its current execution.";
+  if (task.warnings?.includes("contradictory_evidence")) return "This task's execution cannot be confirmed.";
+  if (m.mode === "archived" || m.mode === "closed" || task.conflict !== "none") return closeBlocked(m);
+  return null;
+};
 
 /**
  * Which existing run control a stopped, held or ended task offers, read from its projection alone. The card, the task menu,
@@ -377,6 +388,8 @@ export function resumeState(v: TaskView): ResumeState | null {
   const t = v.task, mode = composerMode(v), warnings = t.warnings ?? [];
   if (mode === "archived") return null;
   if (mode === "offline") return { kind: "unknown", action: null, text: "Machine disconnected", why: NOT_CONFIRMED };
+  if (externalExitPending(v)) return { kind: "evidence", action: null, text: "Waiting for exit evidence",
+    why: t.issue ? `Waiting for confirmed exit of ${t.issue}.` : "Wait for the runtime to confirm the process exit." };
   if (mode === "stopping") return { kind: "evidence", action: null, text: "Stopping", why: "Available once every worker is confirmed as stopped" };
   if (warnings.includes("process_exit_unconfirmed")) return { kind: "evidence", action: null, text: "Waiting for exit evidence",
     why: "A process of this task did not confirm that it stopped. Nothing can resume or continue while that is unknown; the service checks it again the next time it starts." };

@@ -171,13 +171,13 @@ export function Strip(props: { tone?: StripTone; icon?: JSX.Element; action?: JS
 
 const TONE_ORDER: Record<StripTone, number> = { fail: 0, warn: 1, info: 2, ok: 3 };
 /** Under a page head: the two most urgent strips, and the rest folded behind a count. */
-export function StatusLane(props: { items: readonly StripItem[] }) {
+export function StatusLane(props: { items: readonly StripItem[]; hideActions?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const ordered = () => [...props.items].sort((a, b) => TONE_ORDER[a.tone] - TONE_ORDER[b.tone]);
   const shown = () => open() ? ordered() : ordered().slice(0, 2);
   const folded = () => ordered().length - 2;
   return <div class="l-lane" data-open={open() ? "" : undefined}>
-    <For each={shown()}>{item => <Strip id={item.domId} class={item.readable ? "l-strip-readable" : undefined} role={item.role} tone={item.tone} icon={item.icon} action={item.action}>{item.text}</Strip>}</For>
+    <For each={shown()}>{item => <Strip id={item.domId} class={item.readable ? "l-strip-readable" : undefined} role={item.role} tone={item.tone} icon={item.icon} action={props.hideActions ? undefined : item.action}>{item.text}</Strip>}</For>
     <Show when={folded() > 0}><button class="lnk l-lane-more" aria-expanded={open()} onClick={() => setOpen(v => !v)}>{open() ? "Show less" : `${folded()} more`}</button></Show>
   </div>;
 }

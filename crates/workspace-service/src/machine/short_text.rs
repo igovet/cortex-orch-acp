@@ -186,8 +186,8 @@ pub(super) struct Chosen {
 /// [`crate::short_text_engine::complete`], or why there is none.
 fn choose(config: &crate::Config, root: &Path) -> std::result::Result<Chosen, &'static str> {
     let environment = super::config_read::environment(config).map_err(|_| "no_settings")?;
-    let key = context::key(root).map_err(|_| "no_project_store")?;
-    let resolver = crate::native_routes::RouteResolver::load(root, &key.directory(), environment)
+    let directory = context::directory(root).map_err(|_| "no_project_store")?;
+    let resolver = crate::native_routes::RouteResolver::load(root, &directory, environment)
         .map_err(|_| "no_routing")?;
     let (route, selected) = resolver.short_text_route().ok_or("no_route")?;
     let launch = selected

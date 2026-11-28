@@ -11,7 +11,7 @@ use cortex_core::{
     store::executor::StoreExecutor,
     CoreError, CoreResult,
 };
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::Transaction;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -57,6 +57,8 @@ pub(super) async fn execute(
     executor: Arc<StoreExecutor>,
     credential: Credential,
     arguments: Value,
+    root: std::path::PathBuf,
+    checkout: Option<Value>,
 ) -> CoreResult<Value> {
     let c = credential;
     recv(executor.write(move |db| {
@@ -72,9 +74,28 @@ pub(super) async fn execute(
             .ok_or(CoreError::Refused("tool_refused"))?;
         cortex_engine::schema::validate(&tool["inputSchema"], &arguments)
             .map_err(|_| CoreError::Refused("invalid_arguments"))?;
+        let key = arguments["request_key"]
+            .as_str()
+            .ok_or(CoreError::Refused("invalid_request_key"))?;
+        if arguments["final"] != false && !is_replay(db, &i.task, &c.channel_id, key)? {
+            let changed = crate::native_project::changed_plan_inputs(
+                db, &root, &i.task, &c.channel_id, checkout.as_ref(),
+            )?;
+            if !changed.is_empty() {
+                return Ok(crate::native_project::changed_plan_inputs_reply(changed));
+            }
+        }
         submit_in_tx(db, &i.task, &c.channel_id, &arguments)
     })?)
     .await
+}
+
+fn is_replay(db: &Transaction<'_>, task: &str, actor: &str, key: &str) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?)",
+        (task, actor, key),
+        |r| r.get(0),
+    )?)
 }
 
 /// One authenticated call, after its schema check: a part is checked with every
@@ -96,14 +117,7 @@ pub(crate) fn submit_in_tx(
     let last = arguments["final"].as_bool().unwrap_or(true);
     let tasks = &arguments["tasks"];
     // An exact retry replays its receipt whatever the draft became meanwhile.
-    let replay: bool = db
-        .query_row(
-            "SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
-            (task, actor, key),
-            |r| r.get::<_, i64>(0),
-        )
-        .optional()?
-        .is_some();
+    let replay = is_replay(db, task, actor, key)?;
     if !replay {
         if tasks.to_string().len() > MAX_PART_BYTES {
             return refused_submission(db, task, PlanError {

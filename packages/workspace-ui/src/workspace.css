@@ -697,16 +697,13 @@ input, textarea, [contenteditable="true"] { -webkit-user-select: text; user-sele
 /* Rows keep the same inner gap on both sides. */
 .gr { padding-right: 12px; }
 .proj, .task-row { padding-right: 8px; }
-.task-row > .trunc, .sb-row-title { flex: 1 1 0; min-width: 0; }
+.task-row > .trunc { flex: 1 1 0; min-width: 0; }
 .task-row.in-sprint { padding-inline-start: 30px; }
 .sb-view-head { height: auto; min-height: 36px; padding-bottom: 4px; gap: 8px; }
 .sb-view-head .seg { white-space: nowrap; }
 .sb-view-head .seg > [aria-pressed="true"] { background: var(--bg-canvas); color: var(--fg); box-shadow: 0 0 0 1px var(--line-strong); }
-.sb-work-group { margin: 0; padding: 4px 8px; color: var(--fg-2); font-size: var(--t-cap); font-weight: 400; }
-.sb-work .task-row { min-height: 40px; height: auto; padding-block: 4px; }
-.sb-row-title { display: grid; line-height: 16px; }
-.sb-row-project { color: var(--fg-2); font-size: var(--t-cap); }
 .task-row .sig { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-row .sb-sprint-progress { max-width: 65%; }
 /* The sidebar never scrolls sideways: a long title or status is cut with an ellipsis inside its row. */
 .sb-scroll { overflow-x: hidden; }
 .proj, .task-row { min-width: 0; max-width: 100%; }
@@ -776,7 +773,7 @@ input.chk { margin-top: 1px; }
 .chk .src { display: inline-flex; align-items: center; gap: 8px; }
 .chk .why { display: block; font-size: var(--t-cap); line-height: 16px; color: var(--fg-2); }
 .evid-b { display: block; padding: 0 0 4px; max-height: none; overflow: visible; }
-.evid summary { padding: 0 12px; }
+
 .evid .rv-checks:first-child { border-top: 0; }
 /* Informational evidence folds under a head like its siblings': no browser marker, a chevron on the rows' icon column and the
    title on their text edge, all on one line. The whole head is the toggle. Beats `.evid summary`, which styles the panel's own head. */
@@ -789,8 +786,6 @@ input.chk { margin-top: 1px; }
 .rv-adv-h .l-sect-lead { width: var(--row-lead, 16px); justify-content: center; margin-inline-start: 0; }
 .rv-adv-chev { transition: transform .12s; }
 .rv-advisory[open] > summary .rv-adv-chev { transform: rotate(90deg); }
-/* Inside the open Evidence panel, its own `.evid[open] .i-chevron-right` turn must not reach a closed fold's chevron. */
-.rv-advisory:not([open]) > summary .rv-adv-chev { transform: none; }
 .rv-advisory:not([open]) { padding-bottom: 0; }
 /* A file's path in its head shortens, and a press shows the whole of it. */
 .fhead .fhead-path { flex: 0 1 auto; color: var(--fg); font-size: 12px; }
@@ -994,13 +989,13 @@ html[data-hidden] *, html[data-hidden] *::after { animation-play-state: paused !
 .d-scroll, .sp-scroll, .cf-scroll, .ws-read-b, .inspector, .ebody, .dview, .hist, .cdetail, .terminal-screen { margin-right: var(--ws-edge); }
 .board-wrap { margin-right: var(--ws-edge); }
 .card-project { margin-top: 5px; color: var(--fg-2); font-size: var(--t-cap); overflow-wrap: anywhere; }
+.board-list-title { display: grid; min-width: 0; line-height: 14px; }
 
-/* The machine board reads in status order in a narrow pane, with one vertical scroller. */
+/* Leave the adjacent lane visible and let each card stack scroll beneath its header. */
 @container page (max-width: 600px) {
-  .machine-board { flex-direction: column; overflow: hidden auto; }
-  .machine-board > .col { flex: none; min-width: 0; max-width: none; border-right: 0; }
-  .machine-board > .col.strip { display: none; }
-  .machine-board .col-b { overflow: visible; }
+  .board-wrap { min-width: 0; overscroll-behavior-x: contain; }
+  .board-wrap > .col:not(.strip):not(.archive) { flex: 0 0 min(84%, 320px); min-width: 0; }
+  .board-wrap .col-b { overscroll-behavior-y: contain; }
 }
 .board-wrap, .ebody, .dview { margin-bottom: var(--ws-edge); }
 .ws-list, .ws-pal-b, .term-body { margin-bottom: 0; }
@@ -1494,3 +1489,36 @@ button.step-t { text-align: left; font: inherit; }
 /* The verification card stacks title, status and subtitle: a long status wraps on its own line instead of being cut beside the title. */
 .wcard .l2.ws-vstatus { display: block; white-space: normal; overflow-wrap: anywhere; margin-left: 23px; }
 .wcard .l1 > .trunc { flex: 1 1 auto; min-width: 0; }
+
+/* Current decisions flow with the history; the composer remains its own dock. */
+.conversation-actions { display: grid; gap: 14px; min-width: 0; }
+.conversation-actions[hidden], .conversation-actions:empty { display: none; }
+.conversation-actions > .owner-in-task { padding: 0; }
+
+.ws-object-id { display: inline-flex; flex: none; }
+.ws-object-id [aria-live] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.ws-object-id-manual { position: fixed; top: 54px; left: 50%; transform: translateX(-50%); z-index: 45; width: min(340px, calc(100vw - 32px)); padding: 12px; display: grid; gap: 8px; border: 1px solid var(--line); border-radius: var(--r-menu); background: var(--bg-raised); box-shadow: var(--shadow-menu); color: var(--fg); }
+.ws-revision-request { padding: 10px 12px; }
+.ws-revision-request summary { cursor: pointer; }
+.ws-revision-request .lnk { display: block; width: fit-content; margin-block: 6px; }
+
+/* Native disclosure rows keep the browser's keyboard and accessibility behavior. */
+details > summary {
+  display: flex; align-items: center; gap: 8px; min-height: 32px;
+  list-style: none; cursor: pointer; border-radius: var(--r-ctl);
+  color: var(--fg-2);
+}
+details > summary::-webkit-details-marker { display: none; }
+details > summary::marker { content: ""; }
+details > summary:not(.rv-adv-h, .evid-h)::before {
+  content: ""; flex: none; width: 7px; height: 7px;
+  margin-inline: 4px 5px; border: solid currentColor; border-width: 1.5px 1.5px 0 0;
+  transform: rotate(45deg); transition: transform .12s ease;
+}
+details[open] > summary:not(.rv-adv-h, .evid-h)::before { transform: rotate(135deg); }
+details > summary:hover { color: var(--fg); background: var(--bg-hover); }
+details > summary:focus-visible { outline: var(--focus-line); outline-offset: -2px; }
+html[data-shell="phone"] :is(details > summary, .fold-h > .fold, .step-row.ev-toggle) { min-height: 44px; }
+@media (prefers-reduced-motion: reduce) {
+  details > summary::before, details > summary .rv-adv-chev { transition: none !important; }
+}

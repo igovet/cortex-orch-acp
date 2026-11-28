@@ -22,6 +22,23 @@ async function mount(state: WorkspaceState, path: string) {
 const button = (text: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === text);
 const type = (el: HTMLTextAreaElement | HTMLInputElement, value: string) => { el.value = value; el.dispatchEvent(new Event("input", { bubbles: true })); };
 
+it("shows the selected project's migration only while its runtime reports it", async () => {
+  const state = withTask(emptyWorkspace(), "Work");
+  state.machines[0].connection = "connected";
+  const p = await mount(state, `/m/${LOCAL_MACHINE_ID}/p/p/board`);
+  const status = () => [...document.querySelectorAll("[role=status]")].find(node => node.textContent?.includes("Moving project history"));
+  expect(status()).toBeUndefined();
+  p.emit({ kind: "project_migration", projectId: "other", active: true });
+  await settle();
+  expect(status()).toBeUndefined();
+  p.emit({ kind: "project_migration", projectId: "p", active: true });
+  await settle();
+  expect(status()?.textContent).toContain("Moving project history");
+  p.emit({ kind: "project_migration", projectId: "p", active: false });
+  await settle();
+  expect(status()).toBeUndefined();
+});
+
 const check = (patch: Partial<Check> = {}): Check => ({ name: "Unit tests", detail: "", outcome: "failed", kind: "automated", command: ["npm", "test"], cwd: "/p", output: "1 failed", exitCode: 1, rerunnable: true, ...patch });
 const file = (path: string, add: number): FileDiff => ({ path, status: "M", add, del: 0, hunks: [{ header: "@@ -1 +1 @@", lines: Array.from({ length: add }, (_, i) => ({ kind: "add" as const, old: null, new: i + 1, text: `line ${i}` })) }] } as FileDiff);
 function inReview(checks: Check[], files: FileDiff[]) {

@@ -300,7 +300,8 @@ fn realistic_event_volume_stays_bounded_and_visible() {
         text.contains("Newest steering ζ"),
         "newest decision is kept"
     );
-    assert_eq!(v["command_events_not_restated"], 7999);
+    assert_eq!(v["command_events_not_restated"], 1024);
+    assert_eq!(v["command_events_not_restated_is_lower_bound"], true);
     assert!(
         text.contains("c3999"),
         "the unresolved command stays visible"
@@ -693,6 +694,141 @@ test result: FAILED. 2 passed; 1 failed\nStep 2: exit=101, 122.47s\nStep 3: exit
     })
     .unwrap();
     assert!(capsule(&s)["verification_failure"].is_null());
+}
+
+#[test]
+fn unresolved_commands_keep_legacy_receipt_precedence_and_start_order() {
+    let p = Project::new();
+    let s = p.open();
+    TaskMachine::new(&s).create("t", "Recovery goal", "owner").unwrap();
+    s.write(|db| {
+        let started = |reference| lifecycle::event_tx(
+            db, "t", "NATIVE_COMMAND_STARTED", json!({"ref": reference, "argv": ["test"]}),
+        );
+        let finished = |payload| lifecycle::event_tx(db, "t", "NATIVE_COMMAND_FINISHED", payload);
+        finished(json!({"ref": "earlier"}))?;
+        started("earlier")?;
+        started("modern")?;
+        started("legacy")?;
+        started("recovered")?;
+        started("unrelated")?;
+        finished(json!({"receipt": {"tool_call_ref": "modern"}, "ref": "unrelated"}))?;
+        finished(json!({"receipt": {"tool_call_ref": null}, "ref": "legacy"}))?;
+        lifecycle::event_tx(db, "t", "NATIVE_COMMAND_RECOVERED",
+            json!({"ref": "recovered", "handle_state": "unknown", "outcome": "unknown"}))?;
+        Ok(())
+    }).unwrap();
+    let capsule = s.read(|db| snapshot(db, "t")).unwrap();
+    let references: Vec<_> = capsule["unresolved_commands"].as_array().unwrap().iter()
+        .map(|row| row["ref"].as_str().unwrap()).collect();
+    assert_eq!(references, ["earlier", "unrelated"]);
+    assert_eq!(s.read(|db| Ok(db.query_row(
+        "SELECT json_extract(payload_json,'$.outcome') FROM runtime_events
+         WHERE task_id='t' AND type='NATIVE_COMMAND_RECOVERED'",
+        [], |row| row.get::<_, String>(0)
+    )?)).unwrap(), "unknown");
+}
+
+#[test]
+fn legacy_and_live_read_only_recovery_agree_without_installing_projection() {
+    use cortex_core::{OpenMode, Store};
+
+    let project = Project::new();
+    let store = project.open();
+    TaskMachine::new(&store).create("t", "Recovery goal", "owner").unwrap();
+    store.write(|db| {
+        for reference in ["settled", "unresolved"] {
+            lifecycle::event_tx(db, "t", "NATIVE_COMMAND_STARTED",
+                json!({"ref":reference,"argv":["test"]}))?;
+        }
+        lifecycle::event_tx(db, "t", "NATIVE_COMMAND_FINISHED",
+            json!({"receipt":{"tool_call_ref":"settled"}}))?;
+        Ok(())
+    }).unwrap();
+    let read = |s: &Store| s.read(|db| snapshot(db, "t")).unwrap();
+    let installed = read(&store);
+    assert_eq!(installed["unresolved_commands"].as_array().unwrap().len(), 1);
+    assert_eq!(installed["unresolved_commands"][0]["ref"], "unresolved");
+    drop(store);
+
+    let database = project.key().database().to_path_buf();
+    let db = rusqlite::Connection::open(&database).unwrap();
+    db.execute_batch(
+        "DROP TRIGGER runtime_open_commands_start;
+         DROP TRIGGER runtime_open_commands_settle;
+         DROP TRIGGER runtime_open_commands_change;
+         DROP TRIGGER runtime_open_commands_remove;
+         DROP TRIGGER runtime_open_commands_collision;
+         DROP TRIGGER runtime_open_commands_update_collision;
+         DROP INDEX runtime_command_outcomes_ref;
+         DROP TABLE runtime_open_commands;
+         DROP TABLE runtime_open_commands_dirty;",
+    ).unwrap();
+    drop(db);
+
+    let before = std::fs::read(&database).unwrap();
+    for mode in [OpenMode::LiveReadOnly, OpenMode::InspectImmutable] {
+        let reader = Store::open(project.key(), mode).unwrap();
+        assert_eq!(read(&reader), installed);
+        assert!(!reader.read(|db| Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='runtime_open_commands')",
+            [], |row| row.get::<_, bool>(0)
+        )?)).unwrap());
+    }
+    assert_eq!(std::fs::read(&database).unwrap(), before);
+    let writer = project.open();
+    assert_eq!(read(&writer), installed);
+    assert_eq!(writer.read(|db| Ok(db.query_row(
+        "SELECT count(*) FROM runtime_open_commands WHERE task_id='t'",
+        [], |row| row.get::<_, i64>(0)
+    )?)).unwrap(), 1);
+    writer.write(|db| {
+        db.execute("DELETE FROM runtime_events WHERE task_id='t' AND type='NATIVE_COMMAND_FINISHED'", [])?;
+        Ok(())
+    }).unwrap();
+    let reader = Store::open(project.key(), OpenMode::LiveReadOnly).unwrap();
+    let journal = read(&reader);
+    assert_eq!(journal["unresolved_commands"][0]["ref"], "settled");
+    assert_eq!(journal["unresolved_commands"][1]["ref"], "unresolved");
+    assert!(reader.read(|db| Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_open_commands_dirty WHERE task_id='t')",
+        [], |row| row.get::<_, bool>(0)
+    )?)).unwrap());
+    drop(reader);
+    drop(writer);
+    assert_eq!(read(&project.open()), journal);
+}
+
+#[test]
+fn command_count_marks_a_lower_bound_only_after_the_limit() {
+    let p = Project::new();
+    let s = p.open();
+    TaskMachine::new(&s).create("t", "Bounded goal", "owner").unwrap();
+    let read = || s.read(|db| snapshot(db, "t")).unwrap();
+    let add_commands = |count| {
+        s.write(|db| {
+            for _ in 0..count {
+                lifecycle::event_tx(db, "t", "NATIVE_COMMAND_DIAGNOSTIC", json!({}))?;
+            }
+            Ok(())
+        }).unwrap();
+    };
+    assert_eq!(read()["command_events_not_restated"], 0);
+    add_commands(1023);
+    let below = read();
+    assert_eq!(below["command_events_not_restated"], 1023);
+    assert!(below.get("command_events_not_restated_is_lower_bound").is_none());
+    s.write(|db| {
+        lifecycle::event_tx(db, "t", "native-command-legacy", json!({}))?;
+        Ok(())
+    }).unwrap();
+    let exact = read();
+    assert_eq!(exact["command_events_not_restated"], 1024);
+    assert!(exact.get("command_events_not_restated_is_lower_bound").is_none());
+    add_commands(1);
+    let above = read();
+    assert_eq!(above["command_events_not_restated"], 1024);
+    assert_eq!(above["command_events_not_restated_is_lower_bound"], true);
 }
 
 #[test]

@@ -917,7 +917,7 @@ fn unreachable_review_parts_get_one_narrow_follow_up_then_the_owner_decides() {
 }
 
 #[test]
-fn replans_count_since_the_owners_input_not_since_the_last_resume() {
+fn repeated_replans_without_failure_evidence_do_not_escalate() {
     let (_p, s, task) = start();
     s.write(|db| {
         for i in 0..3 {
@@ -942,7 +942,7 @@ fn replans_count_since_the_owners_input_not_since_the_last_resume() {
             "replan_request",
             &json!({"reason":"Further repair"}),
         )?;
-        assert_eq!(result["decision"], "senior_consultation");
+        assert_eq!(result["decision"], "replan");
         Ok(())
     })
     .unwrap();

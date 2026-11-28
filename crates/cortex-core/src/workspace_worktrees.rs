@@ -6,6 +6,8 @@ use std::path::Path;
 
 #[path = "workspace_worktree_git.rs"]
 mod checkout;
+#[path = "workspace_worktrees/assignments.rs"]
+pub mod assignments;
 pub use checkout::Worktree;
 pub(crate) use checkout::{plan, Witness};
 
@@ -743,6 +745,23 @@ pub fn finish_cleanup(
 /// A legacy path-only task binding is not evidence of native provision ownership.
 pub fn resolve(store: &Store, task: &str, owner: &OwnerEpoch) -> CoreResult<ExecutionCheckout> {
     store.read(|db| resolve_on(db, store.key(), task, owner))
+}
+
+pub fn resolve_for_assignment(
+    store: &Store, task: &str, owner: &OwnerEpoch, assignment: Option<&str>,
+) -> CoreResult<ExecutionCheckout> {
+    store.read(|db| resolve_for_assignment_on(db, store.key(), task, owner, assignment))
+}
+
+pub fn resolve_for_assignment_on(
+    db: &Connection, key: &ProjectKey, task: &str, owner: &OwnerEpoch, assignment: Option<&str>,
+) -> CoreResult<ExecutionCheckout> {
+    if let Some(assignment) = assignment {
+        if let Some(checkout) = assignments::resolve_on(key, db, task, owner, assignment)? {
+            return Ok(checkout);
+        }
+    }
+    resolve_on(db, key, task, owner)
 }
 
 /// Resolve on the caller's already authenticated transaction/connection so that

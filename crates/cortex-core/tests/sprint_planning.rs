@@ -259,6 +259,7 @@ fn a_submitted_plan_is_independently_reviewed_and_verified_by_the_runtime() {
     );
     s.write(|db| review::advance_tx(db, &task)).unwrap();
     assert_eq!(state(&s, &task), "VERIFYING");
+    assert!(s.read(|db| sprint_planning::verified_latest(db, &task)).unwrap().is_none());
     // The runtime verifies the reviewed plan itself: no model-declared command.
     assert!(s.write(|db| sprint_planning::verify_tx(db, &task)).unwrap());
     assert_eq!(state(&s, &task), "RECONCILING");
@@ -272,6 +273,14 @@ fn a_submitted_plan_is_independently_reviewed_and_verified_by_the_runtime() {
         .unwrap()
         .unwrap();
     assert_eq!(payload["plan_event"], latest);
+    assert_eq!(
+        s.read(|db| sprint_planning::verified_latest(db, &task)).unwrap(),
+        Some((latest, revised))
+    );
+    let pending = json!([{"key":"t1","title":"First","description":"An unreviewed revision","dependsOn":[]}]);
+    let args = json!({"tasks":pending,"request_key":"pending"});
+    s.write(|db| sprint_planning::submit_tx(db, &task, "c", "pending", &args, &pending)).unwrap();
+    assert!(s.read(|db| sprint_planning::verified_latest(db, &task)).unwrap().is_none());
 }
 
 #[test]

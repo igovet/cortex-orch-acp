@@ -1,3 +1,4 @@
+import { refOf } from "./attachment-reference";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { render } from "solid-js/web";
@@ -9,7 +10,7 @@ import { SIDEBAR_DEFAULT, SIDEBAR_MIN } from "../src/prefs";
 import { WsContext, type Ws } from "../src/ctx";
 import { buildIndex } from "../src/selectors";
 import { BranchChip } from "../src/task-chrome";
-import { capabilitiesWire, flush, refOf, scriptedTransport, snapshot, stoppedMerge, wireDecision, wireTask } from "./support";
+import { capabilitiesWire, flush, scriptedTransport, snapshot, stoppedMerge, wireDecision, wireTask } from "./support";
 import { reviewWorld } from "./layout-fit-review";
 
 /** The screens on the real port, with a machine that answers as the helper does, so what they show is what real data gives. */
@@ -1228,9 +1229,9 @@ describe("new task on real data", () => {
     s.answers["service.capabilities"] = () => ({ methods: ["machine.call", "executions.control"], machine: true, taskWorktrees: true });
     await open(s, NEW);
     expect(radio("Separate worktree").querySelector("input")!.disabled).toBe(false);
-    expect(radio("Separate worktree").textContent).toMatch(/currently open branch/);
+    expect(radio("Separate worktree").textContent).toContain("Created when the task starts");
     expect(radio("Separate worktree").querySelector("input")!.checked).toBe(true);
-    expect(radio("Project folder").textContent).toContain("dev");
+    expect($(".task-workspace__facts dd.mono")?.textContent).toBe("dev");
   });
 
   it("offers per-task routing and a target branch choice", async () => {

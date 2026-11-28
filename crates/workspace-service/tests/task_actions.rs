@@ -135,7 +135,18 @@ async fn sprint_close_reads_core_start_and_disputed_completion_before_archiving(
     product["sprints"][0]["taskIds"] = json!(["t1"]);
     product["tasks"]["t1"] = json!({"sprintId":id,"title":"Core member"});
     fs::write(f.path(), serde_json::to_vec(&product).unwrap()).unwrap();
+    let close = json!({"action":"close","sprintId":id,"confirmed":true});
     store.write(|db| {
+        db.execute("INSERT INTO workspace_starts(execution_id,task_id,project_id,actor_id,request_id,source_origin,source_event_id,state,created_at)
+            VALUES ('preparing','t1',?,'fixture','start','fixture','source','prepare','now')", [&f.id])?;
+        Ok(())
+    }).unwrap();
+    let reply = sprint(close.clone()).await.unwrap();
+    assert_eq!(reply["code"], "sprint_close_blocked", "{reply}");
+    assert!(reply["message"].as_str().unwrap().contains("task records disagree"), "{reply}");
+    assert_eq!(read(), product);
+    store.write(|db| {
+        db.execute("DELETE FROM workspace_starts WHERE execution_id='preparing'", [])?;
         db.execute("INSERT INTO tasks VALUES ('r1',?,'now')", [f.root.to_str()])?;
         db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at)
             VALUES ('r1','EXECUTING','Fixture','now','now')", [])?;
@@ -145,7 +156,6 @@ async fn sprint_close_reads_core_start_and_disputed_completion_before_archiving(
         db.execute("UPDATE workspace_tasks SET execution_id='started' WHERE task_id='t1'", [])?;
         Ok(())
     }).unwrap();
-    let close = json!({"action":"close","sprintId":id,"confirmed":true});
     let reply = sprint(close.clone()).await.unwrap();
     assert_eq!(reply["code"], "sprint_close_blocked", "{reply}");
     assert!(reply["message"].as_str().unwrap().contains("Core member (t1): started but not done"), "{reply}");
@@ -154,6 +164,10 @@ async fn sprint_close_reads_core_start_and_disputed_completion_before_archiving(
     // A saved Done overlay cannot hide contradictory authoritative evidence.
     product["tasks"]["t1"]["status"] = json!("done");
     fs::write(f.path(), serde_json::to_vec(&product).unwrap()).unwrap();
+    let reply = sprint(close.clone()).await.unwrap();
+    assert_eq!(reply["code"], "sprint_close_blocked", "{reply}");
+    assert!(reply["message"].as_str().unwrap().contains("execution or its effects have not settled"), "{reply}");
+    assert_eq!(read(), product);
     store.write(|db| {
         db.execute("UPDATE workspace_tasks SET execution_id='unknown-start' WHERE task_id='t1'", [])?;
         Ok(())
@@ -162,6 +176,78 @@ async fn sprint_close_reads_core_start_and_disputed_completion_before_archiving(
     assert_eq!(reply["code"], "sprint_close_blocked", "{reply}");
     assert!(reply["message"].as_str().unwrap().contains("Core member (t1): task records disagree"), "{reply}");
     assert_eq!(read(), product);
+    f.service.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sprint_close_refuses_unproven_checks_and_unknown_effects_before_owner_resolution() {
+    let f = Fixture::new().await;
+    let store = f.store();
+    seed(&f, &store);
+    let sprint = |params: Value| f.service.machine(serde_json::from_value(json!({
+        "op":"product.sprint","projectId":f.id,"params":params
+    })).unwrap());
+    let created = sprint(json!({"action":"create","description":"Sprint"})).await.unwrap();
+    let id = &created["result"]["sprintId"];
+    let mut product = serde_json::from_slice::<Value>(&fs::read(f.path()).unwrap()).unwrap();
+    product["sprints"][0]["taskIds"] = json!(["t1"]);
+    product["tasks"]["t1"] = json!({"sprintId":id,"title":"Evidenced member","status":"done","doneAt":1});
+    let save = |product: &Value| fs::write(f.path(), serde_json::to_vec(product).unwrap()).unwrap();
+    let assert_unchanged = |product: &Value| {
+        assert_eq!(serde_json::from_slice::<Value>(&fs::read(f.path()).unwrap()).unwrap(), *product);
+    };
+    save(&product);
+    store.write(|db| {
+        db.execute("INSERT INTO tasks VALUES ('r1',?,'now')", [f.root.to_str()])?;
+        db.execute("INSERT INTO runtime_tasks(task_id,state,revision,goal,plan_json,synthesis,created_at,updated_at)
+            VALUES ('r1','COMPLETED',1,'Fixture',?,'Result','now','now')",
+            [json!({"verification":[["cargo","test"]]}).to_string()])?;
+        db.execute("INSERT INTO task_owners VALUES ('r1','owner',1,'now')", [])?;
+        db.execute("INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)", [f.root.to_str()])?;
+        db.execute("INSERT INTO workspace_executions VALUES ('started','t1','r1','s1',1,1,'now')", [])?;
+        db.execute("UPDATE workspace_tasks SET execution_id='started' WHERE task_id='t1'", [])?;
+        Ok(())
+    }).unwrap();
+    let close = json!({"action":"close","sprintId":id,"confirmed":true});
+    for kind in [None, Some("VERIFICATION_PASSED"), Some("VERIFICATION_FAILED")] {
+        if let Some(kind) = kind {
+            store.write(|db| {
+                cortex_core::lifecycle::event_tx(db, "r1", kind, json!({
+                    "revision":1,"checks":[{"receipt_ref":"unbound","complete":false,"exit_code":0}]
+                }))?;
+                Ok(())
+            }).unwrap();
+        }
+        let reply = sprint(close.clone()).await.unwrap();
+        assert_eq!(reply["code"], "sprint_close_blocked", "{reply}");
+        assert!(reply["message"].as_str().unwrap().contains("missing or unsuccessful checks"), "{reply}");
+        assert_unchanged(&product);
+    }
+    store.write(|db| {
+        db.execute("INSERT INTO runtime_requests(task_id,actor,request_key,operation,digest,result_json)
+            VALUES ('r1','fixture','write','project_write','digest','{\"complete\":false}')", [])?;
+        Ok(())
+    }).unwrap();
+    product["tasks"]["t1"]["closedAs"] = json!("as_is");
+    product["tasks"]["t1"]["notVerifiedByCortex"] = json!(true);
+    save(&product);
+    let reply = sprint(close.clone()).await.unwrap();
+    assert_eq!(reply["code"], "sprint_close_blocked", "{reply}");
+    assert!(reply["message"].as_str().unwrap().contains("execution or its effects have not settled"), "{reply}");
+    assert_unchanged(&product);
+    store.write(|db| {
+        assert_eq!(db.execute(
+            "UPDATE runtime_requests SET result_json='{\"complete\":true}' WHERE task_id='r1' AND request_key='write'",
+            [],
+        )?, 1);
+        Ok(())
+    }).unwrap();
+    let reply = sprint(close).await.unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    let saved: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+    assert!(saved["sprints"][0]["archivedAt"].is_u64());
+    assert_eq!(saved["tasks"]["t1"]["notVerifiedByCortex"], true);
+    assert_eq!(saved["tasks"]["t1"]["closedAs"], "as_is");
     f.service.stop().await.unwrap();
 }
 
@@ -1629,6 +1715,12 @@ fn setup_git(f: &Fixture, fixture: &Value, case: &Value) {
     }
 }
 fn authority(store: &cortex_core::Store) -> Vec<Vec<String>> {
+    authority_before_observation_notice(store, None)
+}
+fn authority_before_observation_notice(
+    store: &cortex_core::Store,
+    previous_outbox_head: Option<i64>,
+) -> Vec<Vec<String>> {
     store
         .read(|db| {
             let mut snapshot = Vec::new();
@@ -1641,7 +1733,16 @@ fn authority(store: &cortex_core::Store) -> Vec<Vec<String>> {
                 "task_owners",
                 "workspace_outbox",
             ] {
-                let mut query = db.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))?;
+                let sql = match (table, previous_outbox_head) {
+                    ("runtime_events", Some(_)) => "SELECT * FROM runtime_events
+                         WHERE type != 'WORKSPACE_ACCEPTANCE_OBSERVATION_UNAVAILABLE' ORDER BY rowid".to_owned(),
+                    ("workspace_executions", Some(_)) => "SELECT execution_id,task_id,runtime_task_id,
+                         acp_session_id,owner_epoch,version-1,bound_at FROM workspace_executions ORDER BY rowid".to_owned(),
+                    ("workspace_outbox", Some(head)) => format!(
+                        "SELECT * FROM workspace_outbox WHERE sequence <= {head} ORDER BY rowid"),
+                    _ => format!("SELECT * FROM {table} ORDER BY rowid"),
+                };
+                let mut query = db.prepare(&sql)?;
                 let columns = query.column_count();
                 snapshot.push(
                     query
@@ -1891,6 +1992,13 @@ async fn check_actions(fixture: &Value) {
         if case["drift"] == true {
             fs::write(f.root.join("a.txt"), "late drift\n").unwrap();
         }
+        let observation_refusal = case["name"] == "accept-unobservable";
+        let previous_notice = observation_refusal.then(|| {
+            store.as_ref().unwrap().read(|db| Ok(db.query_row(
+                "SELECT (SELECT max(sequence) FROM workspace_outbox),version FROM workspace_executions",
+                [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )?)).unwrap()
+        });
         let authority_before = store.as_ref().map(authority);
         let index_before = fs::read(f.root.join(".git/index")).ok();
         let content_before = fs::read(f.root.join("a.txt")).ok();
@@ -1928,6 +2036,10 @@ async fn check_actions(fixture: &Value) {
         let mut expected = match case["name"].as_str().unwrap() {
             // The retained oracle predates non-destructive archiving of unfinished work.
             "archive-not-done" => json!({"ok":true,"result":{"done":true,"reclamation":null}}),
+            "accept-unobservable" => json!({
+                "ok":false,"code":"workspace_unobservable",
+                "message":"The workspace could not be read completely. Check access to the project folder and retry acceptance."
+            }),
             "resolution-plain" | "resolution-repeat" => json!({
                 "ok":false,"code":"handoff_required",
                 "message":"Use the owning execution's handoff_merge action."
@@ -1962,9 +2074,33 @@ async fn check_actions(fixture: &Value) {
                 json!({"status":"retained","path":retained_path,"reason":"worktree_not_owned"});
         }
         assert_eq!(reply, expected, "{} reply", case["name"]);
+        if let Some((head, previous_version)) = previous_notice {
+            let diagnostics: Vec<Value> = store.as_ref().unwrap().read(|db| {
+                let mut query = db.prepare(
+                    "SELECT payload_json FROM runtime_events
+                     WHERE type='WORKSPACE_ACCEPTANCE_OBSERVATION_UNAVAILABLE'",
+                )?;
+                let payloads = query.query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                payloads.iter().map(|payload| Ok(serde_json::from_str::<Value>(payload)?)).collect()
+            }).unwrap();
+            assert_eq!(diagnostics, vec![json!({"reason":"source_io_unavailable","diagnostic":null})]);
+            // One runtime observation notice publishes the task and execution.
+            let notices: Vec<(i64, String, String, i64)> = store.as_ref().unwrap().read(|db| {
+                let mut query = db.prepare("SELECT sequence,kind,entity_id,entity_version
+                    FROM workspace_outbox WHERE sequence>? ORDER BY sequence")?;
+                let rows = query.query_map([head], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            }).unwrap();
+            assert_eq!(notices, vec![
+                (head+1, "task".into(), "t1".into(), previous_version+1),
+                (head+2, "execution".into(), "e1".into(), previous_version+1),
+            ]);
+        }
         if fixture["clock"].is_number() {
             assert_eq!(
-                store.as_ref().map(authority),
+                store.as_ref().map(|store| authority_before_observation_notice(store, previous_notice.map(|(head, _)| head))),
                 authority_before,
                 "overlay changed authoritative runtime state"
             );
@@ -2142,9 +2278,14 @@ async fn check_actions(fixture: &Value) {
                     .collect::<Result<Vec<_>,_>>()?;
                 Ok(json!({"tasks":tasks,"options":options,"projects":projects}))
             }).unwrap();
+            let mut expected_store = f.replace(&case["observed"]);
+            if observation_refusal {
+                expected_store["tasks"][0][2] = json!(expected_store["tasks"][0][2].as_i64().unwrap() + 1);
+                expected_store["projects"][0][1] = json!(expected_store["projects"][0][1].as_i64().unwrap() + 1);
+            }
             assert_eq!(
                 observed,
-                f.replace(&case["observed"]),
+                expected_store,
                 "{} persisted SQLite",
                 case["name"]
             );
@@ -2781,4 +2922,149 @@ async fn owner_close_with_conflicting_records_survives_service_restart_without_r
     assert_eq!(f.call(json!({"action":"restore","taskId":"t1"})).await["ok"], true);
     assert_eq!(saved(&f)["tasks"]["t1"]["archiveHold"], "unconfirmed");
     restarted.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn paused_external_close_waits_for_exact_worker_and_keeps_git_and_queue_safe() {
+    let f = Fixture::new().await;
+    f.service.activate(&f.id).await.unwrap();
+    let run_git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&f.root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        out.stdout
+    };
+    run_git(&["init"]);
+    fs::write(f.root.join("file"), "before\n").unwrap();
+    run_git(&["add", "file"]);
+    run_git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "baseline"]);
+    fs::write(f.root.join("file"), "staged\n").unwrap();
+    run_git(&["add", "file"]);
+    fs::write(f.root.join("file"), "external result\n").unwrap();
+    let head = run_git(&["rev-parse", "HEAD"]);
+    let index = run_git(&["ls-files", "--stage"]);
+
+    let sprint = f.service.machine(serde_json::from_value(json!({
+        "op":"product.sprint","projectId":f.id,
+        "params":{"action":"create","description":"Fixture sprint","runMode":"automatic"}
+    })).unwrap()).await.unwrap();
+    assert_eq!(sprint["ok"], true, "{sprint}");
+    let sprint = &sprint["result"]["sprintId"];
+    let read_saved = || serde_json::from_slice::<Value>(&fs::read(f.path()).unwrap()).unwrap();
+    let mut product = read_saved();
+    product["sprints"][0]["taskIds"] = json!(["t1","t2"]);
+    product["sprints"][0]["queueState"] = json!("paused");
+    product["sprints"][0]["pauseReason"] = json!("You paused this task.");
+    product["sprints"][0]["automaticQueue"] = json!({"kind":"settlement_blocked","taskId":"t1","code":"task_paused","needsOwner":true});
+    product["tasks"]["t1"] = json!({"sprintId":sprint,"title":"Preserved external work","status":"ready_to_merge",
+        "acceptance":{"digest":"old"},"integration":{"method":"commit"}});
+    product["tasks"]["t2"] = json!({"sprintId":sprint,"dependencies":["t1"]});
+    fs::write(f.path(), serde_json::to_vec(&product).unwrap()).unwrap();
+
+    let store = f.store();
+    store.write(|db| {
+        let root = f.root.to_str().unwrap();
+        db.execute("INSERT INTO tasks VALUES ('r1',?,'now')", [root])?;
+        db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at)
+            VALUES ('r1','PAUSED','Goal','now','now')", [])?;
+        db.execute("INSERT INTO task_owners VALUES ('r1','owner',1,'now')", [])?;
+        db.execute("INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)", [root])?;
+        db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,execution_id,created_at)
+            VALUES ('t1',?,'Build task','e1','now')", [&f.id])?;
+        db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,created_at)
+            VALUES ('t2',?,'Dependent task','now')", [&f.id])?;
+        db.execute("INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',1,1,'now')", [])?;
+        cortex_core::lifecycle::event_tx(db, "r1", "TASK_CREATED", json!({"execution_host":"rust"}))?;
+        db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,assignment_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at)
+            VALUES ('work-key','r1','worker-fixture','attempt-fixture','backend-dev','ready','active',1,'now','now')", [])?;
+        Ok(())
+    }).unwrap();
+    let board = || f.service.native_query(json!({"protocol":{"major":2,"mapping":2},"requestId":"board",
+        "projectId":f.id,"operation":"tasks.board","payload":{"id":f.id}}));
+    let task_wire = || async {
+        board().await.unwrap()["data"]["value"]["items"].as_array().unwrap()
+            .iter().find(|task| task["taskId"] == "t1").unwrap().clone()
+    };
+    let request = |version: Value| json!({"action":"close_paused_external","taskId":"t1","executionId":"e1",
+        "expectedVersion":version,"requestId":"external-1","confirmed":true});
+    let paused = task_wire().await;
+    assert_eq!(paused["runtimeState"], "PAUSED", "{paused}");
+    assert_eq!(paused["waitReason"], "backend-dev (worker-fixture)", "{paused}");
+    let blocked = f.call(request(paused["version"].clone())).await;
+    assert_eq!(blocked["code"], "external_stop_pending", "{blocked}");
+    assert!(blocked["message"].as_str().unwrap().contains("worker-fixture"));
+    let legacy = f.call(json!({"action":"close","choice":"external","taskId":"t1","confirmed":true})).await;
+    assert_eq!(legacy["code"], "bound_external_close_required", "{legacy}");
+    store.write(|db| {
+        db.execute("UPDATE delegation_provisioning SET status='ambiguous' WHERE idempotency_key='work-key'", [])?;
+        Ok(())
+    }).unwrap();
+    let ambiguous = task_wire().await;
+    let pending = f.call(request(ambiguous["version"].clone())).await;
+    assert_eq!(pending["code"], "external_stop_pending", "{pending}");
+    assert_eq!(read_saved(), product);
+
+    store.write(|db| {
+        db.execute("UPDATE delegation_provisioning SET status='terminated' WHERE idempotency_key='work-key'", [])?;
+        db.execute("INSERT INTO runtime_requests VALUES ('r1','unknown','owner','outside_command','digest','{}')", [])?;
+        Ok(())
+    }).unwrap();
+    let settled = task_wire().await;
+    let declined = f.call(request(settled["version"].clone())).await;
+    assert_eq!(declined["code"], "native_outside_outcome_unknown", "{declined}");
+    store.write(|db| {
+        db.execute("UPDATE runtime_requests SET result_json='{\"complete\":true}' WHERE request_key='unknown'", [])?;
+        Ok(())
+    }).unwrap();
+    let version = task_wire().await["version"].clone();
+    let stale = f.call(request(json!("999999"))).await;
+    assert_eq!(stale["code"], "stale_version", "{stale}");
+    let mut wrong = request(version.clone());
+    wrong["executionId"] = json!("wrong");
+    assert_eq!(f.call(wrong).await["ok"], false);
+    let exact = request(version);
+    let closed = f.call(exact.clone()).await;
+    assert_eq!(closed["result"]["done"], true, "{closed}");
+    assert_eq!(f.call(exact).await, closed);
+    let resolution = store.read(|db| {
+        Ok(db.query_row(
+            "SELECT r.state,v.payload_json FROM runtime_tasks r JOIN runtime_events v USING(task_id)
+             WHERE r.task_id='r1' AND v.type='OWNER_TASK_RESOLVED' ORDER BY v.id DESC LIMIT 1",
+            [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?)
+    }).unwrap();
+    assert_eq!(resolution.0, "CANCELLED");
+    assert_eq!(serde_json::from_str::<Value>(&resolution.1).unwrap(),
+        json!({"certified":false,"disposition":"external"}));
+    store.write(|db| {
+        cortex_core::lifecycle::event_tx(db, "r1", "OWNER_TASK_RESOLVED", json!({"certified":false}))?;
+        Ok(())
+    }).unwrap();
+    assert!(task_wire().await["warnings"].as_array().unwrap().iter()
+        .any(|warning| warning == "owner_completed_externally"));
+    let refusal = f.call(json!({"action":"close","choice":"as_is","taskId":"t1","confirmed":true})).await;
+    assert_eq!(refusal["code"], "already_closed", "{refusal}");
+    let record = f.service.machine(serde_json::from_value(json!({
+        "op":"product.facts","projectId":f.id,"params":{"taskIds":["t1"]}
+    })).unwrap()).await.unwrap();
+    let task = &record["result"]["product"]["tasks"]["t1"];
+    assert_eq!(task["status"], "done", "{record}");
+    assert_eq!(task["closedAs"], "external", "{task}");
+    assert_eq!(task["notVerifiedByCortex"], true);
+    assert!(task["acceptance"].is_null());
+    assert!(task["integration"].is_null());
+    assert_eq!(read_saved()["sprints"][0]["runMode"], "automatic");
+    assert_eq!(read_saved()["sprints"][0]["queueState"], "paused");
+    assert_eq!(read_saved()["sprints"][0]["pauseReason"], "Paused by you");
+    assert!(read_saved()["sprints"][0]["automaticQueue"].is_null());
+    let board_after = board().await.unwrap();
+    assert!(board_after["data"]["value"]["items"].as_array().unwrap().iter()
+        .any(|task| task["taskId"] == "t2" && task["executionState"] == "not_started"));
+    assert_eq!(run_git(&["rev-parse", "HEAD"]), head);
+    assert_eq!(run_git(&["ls-files", "--stage"]), index);
+    assert_eq!(fs::read_to_string(f.root.join("file")).unwrap(), "external result\n");
+    f.service.stop().await.unwrap();
 }

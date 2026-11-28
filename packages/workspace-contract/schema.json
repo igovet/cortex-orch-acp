@@ -4,7 +4,7 @@
   "title": "Cortex Workspace wire subset",
   "x-wire-version": {
     "major": 1,
-    "minor": 12
+    "minor": 13
   },
   "x-mapping-version": "1",
   "x-limits": {
@@ -1650,6 +1650,26 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "draftBinding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "runtimeTaskId": {
+              "$ref": "#/$defs/Identity"
+            },
+            "ownerEpoch": {
+              "$ref": "#/$defs/PositiveDecimal"
+            },
+            "sessionId": {
+              "$ref": "#/$defs/Identity"
+            }
+          },
+          "required": [
+            "runtimeTaskId",
+            "ownerEpoch",
+            "sessionId"
           ]
         },
         "coordinatorRoute": {

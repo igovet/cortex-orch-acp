@@ -1,0 +1,50 @@
+/* The layout signal decides both where the controls mount and how their dock is displayed. */
+.ws-app[data-inspector="shown"] .inspector[data-task-workspace-dock] {
+  display: flex;
+  position: static;
+  width: var(--inspector-w);
+  border-inline-start: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+  z-index: auto;
+}
+.task-workspace {
+  --task-workspace-gap: 12px;
+  min-inline-size: 0;
+  font-size: var(--t-cap);
+  color: var(--fg);
+}
+.task-workspace__header,
+.task-workspace__section { padding: var(--task-workspace-gap) 14px; }
+.task-workspace__header { border-block-end: 1px solid var(--line); }
+.task-workspace__header h2 { margin: 0; font-size: var(--t-ui); }
+.task-workspace__section + .task-workspace__section { border-block-start: 1px solid var(--line); }
+.task-workspace__section h3 { margin: 0 0 6px; font-size: var(--t-cap); }
+.task-workspace__section .two { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.task-workspace__section .rc { min-inline-size: 0; overflow-wrap: anywhere; }
+.task-workspace__facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr);
+  gap: 5px 8px;
+  margin: 10px 0;
+}
+.task-workspace__facts dt,
+.task-workspace__muted,
+.task-workspace__tasks small { color: var(--fg-2); }
+.task-workspace__facts dd { margin: 0; min-inline-size: 0; overflow-wrap: anywhere; }
+.task-workspace__muted { margin: 4px 0; }
+.task-workspace__files,
+.task-workspace__tasks { margin: 0; padding: 0; list-style: none; overflow-wrap: anywhere; }
+.task-workspace__files li { padding: 4px 6px; background: var(--bg-hover); }
+.task-workspace__files li + li,
+.task-workspace__tasks li + li { border-block-start: 1px solid var(--line); }
+.task-workspace__effect { margin: 8px 0 0; padding: 6px 8px; background: var(--bg-hover); border-radius: var(--r-ctl); }
+.task-workspace__tasks li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto); gap: 1px 8px; padding: 5px 0; }
+.task-workspace__task-title { font-weight: 550; }
+.task-workspace__tasks small { grid-column: 1 / -1; font-size: inherit; }
+.task-workspace__inline { border: 1px solid var(--line); border-radius: var(--r-ctl); }
+.task-workspace__machine > summary { padding: 10px 14px; cursor: pointer; border-block-start: 1px solid var(--line); }
+
+.task-workspace__section .fld.ws-inline { grid-template-columns: minmax(0, 1fr); gap: 5px; }
+.task-workspace__section .ws-inline > .row { min-inline-size: 0; flex-wrap: wrap; }
+.task-workspace__section .pick { max-inline-size: 100%; }

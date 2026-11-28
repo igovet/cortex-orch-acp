@@ -15,6 +15,7 @@ const SURFACE_LIGHT: Color = Color(0xff, 0xff, 0xff, 0xff);
 
 #[derive(Default)]
 struct Native {
+    history: crate::history::History,
     extracted: bool,
     bridge: Mutex<Option<Arc<Bridge>>>,
     drop: Arc<std::sync::Mutex<Option<(std::time::Instant, Result<Value, String>)>>>,
@@ -30,6 +31,49 @@ impl Native {
         }
         Ok(current.as_ref().unwrap().clone())
     }
+}
+
+#[tauri::command]
+fn workspace_history_open(
+    window: WebviewWindow,
+    state: State<'_, Native>,
+    id: String,
+    params: Value,
+) -> Result<(), String> {
+    history_origin(&window)?;
+    state.history.open(id, params)
+}
+
+#[tauri::command]
+async fn workspace_history_next(
+    window: WebviewWindow,
+    state: State<'_, Native>,
+    id: String,
+) -> Result<Value, String> {
+    history_origin(&window)?;
+    let bridge = state.bridge().await?;
+    state.history.next(&bridge, &id).await
+}
+
+fn history_origin(window: &WebviewWindow) -> Result<(), String> {
+    if window.label() == "main"
+        && policy::local_url(window.url().map_err(|_| "bridge_origin_refused")?.as_str())
+    {
+        Ok(())
+    } else {
+        Err("bridge_origin_refused".into())
+    }
+}
+
+#[tauri::command]
+fn workspace_history_close(
+    window: WebviewWindow,
+    state: State<'_, Native>,
+    id: String,
+) -> Result<(), String> {
+    history_origin(&window)?;
+    state.history.close(&id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -360,6 +404,11 @@ pub fn run() {
         .on_window_event(|window, event| {
             // Native/WM close must not bypass the frontend guard or WebKit teardown.
             if window.label() == "main" {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    if let Some(state) = window.try_state::<Native>() {
+                        state.history.clear();
+                    }
+                }
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                 }
@@ -367,6 +416,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             workspace_request,
+            workspace_history_open,
+            workspace_history_next,
+            workspace_history_close,
             workspace_notify,
             workspace_open_result_target,
             workspace_close
@@ -388,6 +440,11 @@ pub fn run() {
                     .disable_drag_drop_handler()
                     .devtools(false)
                     .on_navigation(|url| policy::local_url(url.as_str()))
+                    .on_page_load(|window, page| {
+                        if matches!(page.event(), tauri::webview::PageLoadEvent::Started) {
+                            window.state::<Native>().history.clear();
+                        }
+                    })
                     .on_new_window(|_, _| NewWindowResponse::Deny)
                     .build()?;
             let dropped = app.state::<Native>().drop.clone();

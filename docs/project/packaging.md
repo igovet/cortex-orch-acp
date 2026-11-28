@@ -25,8 +25,8 @@ sources and composed with shared protocol text. The package no longer includes
 redundant `agents/*.toml` worker profiles or generated copies under
 `agents/references/`; `profiles.json` maps role entries to Markdown sources, and
 `scripts/cortex-xtask.sh profiles check` validates generated
-instruction artifacts. The 23 role instructions remain; the duplicate TOML
-serialization format does not.
+instruction artifacts. The package ships five base profiles and the competency
+modules.
 
 ### Launch-time environment variables
 
@@ -263,6 +263,16 @@ the existing bounded optional npm download; absent npm stays idle.
 Native accounts remain in `~/.codex` and `~/.claude`, never copied; OpenCode
 remains optional. Installation without network does not make model use offline.
 
+The desktop service and Settings use the same read-only setup observation.
+The global setup lock serializes the background pass. Transient progress is
+shown only while the installer holds the lock for that specific engine.
+If the pass stops with a transient receipt still on disk, Settings shows it
+as interrupted. Settings keeps the last outcome, and shows the stage and a
+safe diagnostic when available, alongside the separate current adapter and
+connection state. The desktop banner clears when the next read finds no active
+phase. Task launch warnings come from the affected execution. An earlier setup
+failure does not block an otherwise usable route.
+
 [Licence inventory and owner distribution-risk decision](bundled-engine-licenses.md).
 The no-paid real launch check is:
 
@@ -328,7 +338,7 @@ scripts/cortex-paseo-tools.sh install-paseo-plugin
 - **`init-storage`** creates/verifies the owner-private
   `$XDG_CONFIG_HOME/cortex`/`$XDG_STATE_HOME/cortex` roots (`0700`,
   symlink-refusing) and installs the absent default preset (it calls the native settings API's `apply_default_preset`). It never touches
-  any project's own `.cortex` store.
+  any project's task database.
 - **Default preset seeding.** `init-storage` creates absent `routing.json`,
   `defaults.json` and `mcp-servers.json` files, plus one applied `default` profile in
   an absent `routing-profiles.json` when the working settings match the preset. MCP
@@ -444,13 +454,12 @@ scripts/cortex-paseo-tools.sh uninstall --project /path/to/project \
     --remove-project-store --i-confirm-removal
 ```
 
-It deletes only `$XDG_CONFIG_HOME/cortex`, `$XDG_STATE_HOME/cortex`, and
-(only when `--project` is given) that one project's own `.cortex` store —
-each re-verified as an owner-private, non-symlinked real directory
-immediately before deletion. It never touches engine installs, real
-credentials outside those Cortex-owned roots, user history, project files
-other than `.cortex`, or Git branches/working changes
-(the `owner_tools` unit tests in `crates/cortex-paseo-tools` check the removal refusals and the project-store removal).
+User-scope uninstall removes Cortex configuration and non-project state in
+the selected channel. It preserves the channel's home project-store tree.
+`--project PATH --remove-project-store` handles a legacy project-local store
+after checking its location. A relocated store uses the exact-ID
+[owner commands](storage.md#administering-home-stores). These paths are
+independent of engine installation, native engine accounts and Git history.
 
 ## Zed and codeg registration
 
@@ -582,7 +591,7 @@ manifest pin, register a missing native-account connection only when its login m
 exists, then load its models without a prompt. Owner-removed engines stay opted out
 of automatic registration. Settings polls progress and keeps manual download/connect
 and model-refresh actions available. Concurrent startup passes share an owner-private
-lock; npm installs are bounded to 600 seconds each (manual download: 60 seconds),
+lock. The desktop checks setup every three seconds. When a pass stops mid-step, Settings → Connections shows the interruption alongside the observed adapter and connection state. Its progress banner clears on the next status read. Preparing a qualified adapter can reuse an installed or bundled copy. Workspace startup checks are machine-wide and apply across tasks. npm installs are bounded to 600 seconds each (manual download: 60 seconds),
 model-discovery RPCs to 20 seconds each. A model-discovery failure keeps the
 connection; its per-engine status (`first-run-<engine>.json` in the Cortex config
 root) and Settings name a fixed failure code such as `engine_home_read_only`

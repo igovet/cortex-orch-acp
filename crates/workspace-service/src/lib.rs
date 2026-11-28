@@ -5,6 +5,7 @@ pub mod config_read_dispatch;
 pub mod config_read_model;
 pub mod config_refresh;
 mod core_host;
+mod native_store_policy;
 #[doc(hidden)]
 pub mod dev_extraction;
 mod directories;
@@ -30,6 +31,7 @@ mod native_access;
 #[cfg(test)]
 mod native_account_fixture;
 mod native_activity;
+mod native_history_follow;
 #[doc(hidden)]
 pub mod native_askpass;
 mod native_attachments;
@@ -50,6 +52,7 @@ mod native_controls;
 mod native_documents;
 mod native_driver;
 mod native_effects;
+mod native_cargo;
 mod native_engine_policy;
 mod native_instructions;
 pub mod native_mcp;
@@ -72,10 +75,12 @@ pub mod native_runtime;
 mod native_sandbox;
 pub mod native_sessions;
 mod native_skills;
+mod native_skill_receipts;
 mod native_sources;
 mod native_sprint_plan;
 mod native_sprint_revision;
 mod native_tool_errors;
+mod native_timing;
 mod native_turn_guard;
 mod native_work_set;
 mod notifier;
@@ -87,6 +92,7 @@ mod session_bus;
 pub mod short_text_engine;
 pub mod side_chat_files;
 mod terminal;
+pub mod store_locations;
 pub mod tool_path;
 mod voice;
 pub use launch::LaunchSpec;
@@ -111,6 +117,46 @@ use tokio::{
     time::timeout,
 };
 
+/// Observe the Unix peer closing without consuming the next frame. A peer can
+/// shut down its write half while still waiting to read the acceptance reply.
+async fn wait_for_accept_disconnect(reader: &tokio::net::unix::OwnedReadHalf) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut descriptor = libc::pollfd {
+        fd: reader.as_ref().as_raw_fd(),
+        events: 0,
+        revents: 0,
+    };
+    loop {
+        // Nonblocking and scoped to this already-authorized RPC connection.
+        let status = unsafe { libc::poll(&mut descriptor, 1, 0) };
+        if status < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return Err(io::Error::last_os_error());
+        }
+        if status > 0 && descriptor.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(start_paused = true)]
+async fn accept_disconnect_wait_preserves_next_frame_and_half_close() {
+    use tokio::io::AsyncWriteExt;
+    let (mut peer, socket) = UnixStream::pair().unwrap();
+    let (reader, _writer) = socket.into_split();
+    peer.write_all(b"x").await.unwrap();
+    assert!(timeout(Duration::from_millis(150), wait_for_accept_disconnect(&reader)).await.is_err());
+    let mut saved = [0];
+    reader.readable().await.unwrap();
+    assert_eq!(reader.try_read(&mut saved).unwrap(), 1);
+    assert_eq!(&saved, b"x");
+    peer.shutdown().await.unwrap();
+    assert!(timeout(Duration::from_millis(150), wait_for_accept_disconnect(&reader)).await.is_err());
+    drop(peer);
+    timeout(Duration::from_secs(1), wait_for_accept_disconnect(&reader)).await.unwrap().unwrap();
+}
+
 #[derive(Clone)]
 pub struct Config {
     /// Usually $XDG_RUNTIME_DIR/cortex-workspace; must be private and same-user.
@@ -133,6 +179,7 @@ impl Config {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .ok_or_else(|| failure("runtime_directory_unavailable"))?;
         let state = std::env::var_os("XDG_STATE_HOME")
+            .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
             .ok_or_else(|| failure("state_directory_unavailable"))?;
@@ -197,6 +244,8 @@ pub struct Service {
     stopping: AtomicBool,
     shutdown: watch::Sender<bool>,
     events: broadcast::Sender<Value>,
+    history_follows: tokio::sync::Semaphore,
+    moving_history: Arc<std::sync::Mutex<BTreeSet<String>>>,
     /// Wakes the sprint loop for one project after a change that can move a sprint on.
     sprint_wake: native_driver::sprints::SprintWake,
     retention_wake: tokio::sync::Notify,
@@ -307,6 +356,8 @@ impl Service {
             stopping: AtomicBool::new(false),
             shutdown,
             events,
+            history_follows: tokio::sync::Semaphore::new(8),
+            moving_history: Arc::default(),
             sprint_wake: Default::default(),
             retention_wake: Default::default(),
             helper: machine::Helper::default(),
@@ -394,10 +445,19 @@ impl Service {
         json!({"prompts":prompts,"phoneAnswers":native_askpass::phone_allowed()})
     }
     pub async fn projects(&self) -> Value {
-        json!(self.state.lock().await.projects)
+        let state = self.state.lock().await;
+        let moving = self.moving_history.lock().unwrap();
+        Value::Array(
+            state.projects.iter().map(|project| {
+                let mut view = json!(project);
+                if moving.contains(&project.project_id) {
+                    view["movingHistory"] = json!(true);
+                }
+                view
+            }).collect(),
+        )
     }
     fn engine_setup(&self) -> Value {
-        use std::os::unix::fs::MetadataExt;
         let base = self.config.launch.dev_config.clone().or_else(|| {
             std::env::var_os("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
@@ -409,22 +469,9 @@ impl Service {
                 .as_ref()
                 .and_then(|base| {
                     let directory = local::canonical_directory(&base.join("cortex")).ok()?;
-                    let path = directory.join(format!("first-run-{engine}.json"));
-                    let info = std::fs::symlink_metadata(&path).ok()?;
-                    if !info.is_file()
-                        || info.uid() != uid()
-                        || info.mode() & 0o077 != 0
-                        || info.len() > 8192
-                    {
-                        return None;
-                    }
-                    let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-                    let phase = value["phase"].as_str()?;
-                    match phase {
-                        "downloading" | "connecting" | "refreshing_models" | "ready"
-                        | "download_failed" | "login_required" | "opted_out" | "catalog_failed"
-                        | "setup_failed" | "downloaded" => Some(phase.to_owned()),
-                        _ => None,
+                    match config_read_model::engine_setup_observation(&directory, engine) {
+                        Ok((phase, _, _)) => phase.as_str().map(str::to_owned),
+                        Err(_) => Some("setup_failed".to_owned()),
                     }
                 })
                 .unwrap_or_else(|| "not_started".into());
@@ -450,6 +497,9 @@ impl Service {
             );
         }
         let failed = state.failures.get(id);
+        if self.moving_history.lock().unwrap().contains(id) {
+            return Ok(json!({"ready":false,"state":"starting","recovery":"unknown","movingHistory":true}));
+        }
         let mut reply = if state.activating.contains(id) {
             json!({"ready":false,"state":"starting","recovery":"unknown","reason":failed.map(|f| &f.reason)})
         } else if let Some(failure) = failed {
@@ -780,12 +830,14 @@ impl Service {
                     .clone()
                     .unwrap_or_else(|| Arc::new(native_runtime::UnqualifiedRoutes));
                 let maintenance_state = self.config.state_dir.clone();
+                let observe = self.relocation_observer(id.clone());
                 tokio::task::spawn_blocking(move || {
-                    native_runtime::Runtime::open_workspace(&root, &id, routes, maintenance_state)
+                    let key = native_runtime::key(&root)?.observe_relocation(observe);
+                    native_runtime::Runtime::open_workspace(&root, key, &id, routes, maintenance_state)
                 })
                 .await
-                .map_err(|_| failure("storage_unavailable"))?
-                .map_err(local::core_failure)
+                .map_err(|_| failure("storage_unavailable"))
+                .and_then(|result| result.map_err(local::core_failure))
             };
             let opened = match opened {
                 Ok(mut runtime) => {
@@ -831,6 +883,19 @@ impl Service {
         let _ = self
             .events
             .send(json!({"projectId":id,"type":"project_state"}));
+    }
+    fn relocation_observer(&self, project: String) -> impl Fn(bool) + Send + Sync + 'static {
+        let moving = self.moving_history.clone();
+        let events = self.events.clone();
+        move |active| {
+            let mut moving = moving.lock().unwrap();
+            if active {
+                moving.insert(project.clone());
+            } else {
+                moving.remove(&project);
+            }
+            let _ = events.send(json!({"projectId":project,"type":"project_state","movingHistory":active}));
+        }
     }
     /// Starts what an earlier activation authorized and the service does not have running: after
     /// a restart or a folder coming back. Never a task, only its runtime.
@@ -1122,6 +1187,7 @@ impl Service {
         let (mut reader, mut writer) = stream.into_split();
         let mut subscription = None;
         let mut code_events = None;
+        let mut first_request = true;
         loop {
             let message = {
                 // read_exact is not cancellation-safe after consuming a frame prefix.
@@ -1166,6 +1232,10 @@ impl Service {
                 }
                 _ => return Err(failure("invalid_request")),
             };
+            if request.method == "native.history.follow" {
+                return self.serve_history_follow(reader, writer, request.id, request.params, first_request).await;
+            }
+            first_request = false;
             // A paired phone's owner-moment subscription holds the rest of this connection.
             if request.method == "notifications.subscribe" && request.params == json!({}) {
                 self.accepting()?;
@@ -1196,6 +1266,16 @@ impl Service {
                     self.accepting()?;
                     subscription = Some(self.subscribe());
                     Ok(json!({"subscribed":true}))
+                }
+                _ if workspace_protocol::read::owner_accept_request(&request.method, &request.params) => {
+                    tokio::select! {
+                        biased;
+                        closed = wait_for_accept_disconnect(&reader) => {
+                            closed?;
+                            return Ok(());
+                        }
+                        result = self.dispatch(&request.method, request.params) => result,
+                    }
                 }
                 _ => self.dispatch(&request.method, request.params).await,
             };
@@ -1253,7 +1333,7 @@ impl Service {
             "service.status" if params == json!({}) => Ok(self.status().await),
             "service.stop" if params == json!({}) => Ok(json!({"outcome":"stop_requested"})),
             "service.capabilities" if params == json!({}) => Ok(
-                json!({"channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,"methods":["native.query","native.board","service.status","service.capabilities","service.subscribe","service.subscribe.code","service.stop","projects.list","projects.register","projects.rename","projects.remove","projects.activate","projects.status","workspace","executions.cancel","executions.prompt","executions.control","machine.call","directories.search","directories.cancel","terminal.open","terminal.read","terminal.write","terminal.resize","terminal.close","voice.settings","voice.setLanguage","voice.start","voice.download","voice.read","voice.stop","voice.cancel","remote.status","remote.enable","remote.pairing.start","remote.pairing.cancel","remote.pairing.decide","remote.devices.revoke","remote.relay.set","remote.sudo.set","askpass.list","askpass.answer","owner_actions.list","owner_actions.act","notifications.report","notifications.opened","notifications.take"],"machine":true,"permissions":false,"sessionOptions":false,
+                json!({"channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,"methods":["native.query","native.board","native.history.follow","service.status","service.capabilities","service.subscribe","service.subscribe.code","service.stop","projects.list","projects.register","projects.rename","projects.remove","projects.activate","projects.status","workspace","executions.cancel","executions.prompt","executions.control","machine.call","directories.search","directories.cancel","terminal.open","terminal.read","terminal.write","terminal.resize","terminal.close","voice.settings","voice.setLanguage","voice.start","voice.download","voice.read","voice.stop","voice.cancel","remote.status","remote.enable","remote.pairing.start","remote.pairing.cancel","remote.pairing.decide","remote.devices.revoke","remote.relay.set","remote.sudo.set","askpass.list","askpass.answer","owner_actions.list","owner_actions.act","notifications.report","notifications.opened","notifications.take"],"machine":true,"permissions":false,"sessionOptions":false,
                     "taskWorktrees":true,"codeLsp":true,"codeLspDevOverrides":workspace_protocol::channel::current().is_dev()}),
             ),
             "projects.list" if params == json!({}) => Ok(self.projects().await),

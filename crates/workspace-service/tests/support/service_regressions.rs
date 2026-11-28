@@ -525,7 +525,7 @@ pub(super) async fn peer() {
                         json!({"name":"verification_submit","arguments":{"request_key":"revise-check","verification":[FIXED]}})
                     } else {
                         json!({"name":"plan_submit","arguments":{"request_key":"initial-plan","plan":{
-                            "tasks":[{"id":"work","role":"backend-dev","objective":"Write the output","dependencies":[],"scope":["work.txt"],"model":"auto"}],
+                            "tasks":[{"id":"work","role":"general","objective":"Write the output","dependencies":[],"scope":["work.txt"],"model":"auto"}],
                             "verification":[FAILED]}}})
                     }
                 } else if body.contains(ANSWERS[0]) {

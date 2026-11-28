@@ -420,6 +420,7 @@ pub(super) struct Stack {
     pub observer: Option<super::baseline::Observer>,
     pub baseline: bool,
     pub peer_timing: bool,
+    pub history_delivery: Option<String>,
     pub service: Option<Child>,
     pub app: Option<Child>,
     pub sequence: u32,
@@ -461,6 +462,7 @@ impl Stack {
             observer: None,
             baseline: false,
             peer_timing: false,
+            history_delivery: None,
             service: None,
             app: None,
             sequence: 0,
@@ -538,8 +540,12 @@ impl Stack {
             .append(true)
             .open(self.scratch.join("service.log"))
             .map_err(|e| e.to_string())?;
+        let mut command = Command::new(self.artifacts.join(self.ns("service_binary")));
+        if self.peer_timing {
+            command.env("CORTEX_FIXTURE_SQL_TRACE", self.scratch.join("sqlite.trace"));
+        }
         self.service = Some(
-            Command::new(self.artifacts.join(self.ns("service_binary")))
+            command
                 .arg(std::env::var("HOME").map_err(|_| "HOME unset")?)
                 .arg(&self.checkout)
                 .stdin(Stdio::null())

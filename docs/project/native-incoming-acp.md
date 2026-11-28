@@ -1044,10 +1044,11 @@ the task's pipeline. The runtime publishes that pipeline itself (below); a task
 created before it did, which has not reached a new driver boundary since, still
 answers the `pipeline_missing` tool error, which points to `list_reports`.
 
-Each task has one runtime-owned `pipeline.md` (`<project>/.cortex/<task>/`,
-metadata in the store's `reports`/`editions` rows), published through the same
-journaled, hash-checked publication path as ordinary reports, newest edition
-first with older editions below a `---` separator. The native driver publishes
+Each task has one runtime-owned `pipeline.md` in its private home store. The
+runtime publishes generated Markdown directly with a journaled, hash-checked
+installation and records metadata in the store's `reports` and `editions` rows.
+The newest edition appears first with older editions below a `---` separator.
+The native driver publishes
 it at its boundaries, for desktop and incoming ACP tasks alike: before each
 coordinator turn and at each step of the task loop
 (`cortex_core::pipeline::sync`, called from `native_runtime.rs`). The first

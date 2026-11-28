@@ -1512,6 +1512,16 @@ async fn sprint_close_guards_and_archives_members_atomically() {
     let mut product = read();
     product["sprints"][0]["taskIds"] = json!(["working", "waiting", "review", "failed", "draft", "finished", "old"]);
     product["sprints"][0]["queueState"] = json!("running");
+    let store = f.store();
+    store.write(|db| {
+        for task in ["working", "waiting", "review", "failed", "draft", "reverse", "finished", "old"] {
+            db.execute(
+                "INSERT INTO workspace_tasks(task_id,project_id,description,created_at) VALUES (?,?,?,'now')",
+                (task, &f.id, task),
+            )?;
+        }
+        Ok(())
+    }).unwrap();
     let day = 86_400_000;
     let done = 2 * day;
     product["tasks"] = json!({
@@ -1521,8 +1531,8 @@ async fn sprint_close_guards_and_archives_members_atomically() {
         "failed":{"status":"failed","title":"Failed member"},
         "draft":{"status":"draft","sprintId":sprint,"title":"Queued member"},
         "reverse":{"status":"draft","sprintId":sprint},
-        "finished":{"status":"done","doneAt":done,"work":"merged"},
-        "old":{"status":"done","doneAt":0,"archive":{"at":1,"previousStatus":"done"}}
+        "finished":{"status":"done","closedAs":"external","notVerifiedByCortex":true,"doneAt":done},
+        "old":{"status":"done","closedAs":"cancel","doneAt":0,"archive":{"at":1,"previousStatus":"done"}}
     });
     write(&product);
     let close = json!({"action":"close","sprintId":sprint,"confirmed":true});
@@ -1541,7 +1551,18 @@ async fn sprint_close_guards_and_archives_members_atomically() {
     assert_eq!(refusal["code"], "sprint_close_blocked", "{refusal}");
     assert!(refusal["message"].as_str().unwrap().contains("Review member (review): task records disagree"));
     assert_eq!(read(), product);
-    product["tasks"]["review"]["closedAs"] = Value::Null;
+    let at = 4 * day;
+    for task in ["working", "waiting", "review", "failed"] {
+        product["tasks"][task]["closedAs"] = json!("cancel");
+        product["tasks"][task]["doneAt"] = json!(at);
+    }
+    product["tasks"]["review"]["prAttempt"] = json!({"state":"unknown"});
+    write(&product);
+    let refusal = f.call("product.sprint", close.clone()).await;
+    assert_eq!(refusal["code"], "sprint_close_blocked", "{refusal}");
+    assert!(refusal["message"].as_str().unwrap().contains("merge or pull request has an unresolved outcome"));
+    assert_eq!(read(), product);
+    product["tasks"]["review"].as_object_mut().unwrap().remove("prAttempt");
     write(&product);
     f.ok("product.sprint", close.clone()).await;
     let closed = read();
@@ -1561,7 +1582,7 @@ async fn sprint_close_guards_and_archives_members_atomically() {
     let expired = cortex_core::store::expired_closed_archive;
     assert!(!expired(finished, done + 37 * day - 1, 30));
     assert!(expired(finished, done + 37 * day, 30));
-    assert!(!expired(&closed["tasks"]["working"], at + 100 * day, 30), "unknown completion is not a purge clock");
+    assert!(!expired(&closed["tasks"]["working"], 4 * day + 37 * day - 1, 30));
     let head = f.git(&["rev-parse", "HEAD"]);
     let purge = f.call("product.task", json!({"action":"purge","taskId":"draft","confirmed":true})).await;
     assert_eq!(purge["code"], "unmerged_work", "{purge}");

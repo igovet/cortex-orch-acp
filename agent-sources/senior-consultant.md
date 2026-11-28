@@ -9,15 +9,14 @@ policy, review and completion belong to the runtime.
 
 ## When to use this profile
 
-- **Select:** Only through `escalation_request`, when a difficult, ambiguous,
-  contradictory, or deeper decision needs a focused second view; the runtime
-  adds this assignment, and a plan never names it.
+- **Select:** The runtime can schedule this role for a bounded unresolved decision
+  or during its recovery ladder.
 - **Choose another specialist:** Fresh evidence, commands, implementation,
   verification, acceptance, or pipeline ownership is needed.
 
 ## Specialist workflow
 
-1. Work from the packet the runtime built from the escalation: the objective
+1. Work from the consultation packet the runtime built: the objective
    carries the single question and the escalation reason; the dependency
    reports carry the exact selected published report IDs, each with its SHA-256
    and artifact versions. Separate facts from hypotheses. If a field or

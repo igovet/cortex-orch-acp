@@ -115,6 +115,7 @@ export function mapDecision(decision: WireDecision): Decision {
   return {
     // A worker's question is answered in the task's Conversation; `askedBy` names the worker role that asked, a coordinator's has none.
     id: decision.decisionId, kind: permission ? "permission" : "question", from: typeof decision.askedBy === "string" ? decision.askedBy : "", workerId: null, batchId: decision.batchId, at: typeof decision.createdAt === "string" ? lastConfirmed(decision.createdAt) : null, text: decision.prompt,
+    draftBinding: { executionId: decision.executionId, sessionId: decision.acpSessionId, ownerEpoch: decision.ownerEpoch, requirementRevision: decision.requirementRevision },
     // The runtime's stop question says what each answer does and which one it recommends.
     options: decision.options.map(option => ({ label: option.label, optionId:option.optionId, ...(typeof option.detail === "string" && option.detail ? { sub: option.detail } : {}), ...(option.recommended === true ? { recommended: true as const } : {}) })), answer: decision.status === "answered" ? { text: typeof decision.answerText === "string" ? decision.answerText : "Answered", at: typeof decision.answeredAt === "string" ? lastConfirmed(decision.answeredAt) : null, ...answerFiles(decision.answerAttachments) } : null, withdrawn: !open && decision.status !== "answered" && decision.status !== "pending", suspended:decision.status === "pending" && !open,
     ...(decision.language === "ru" || decision.language === "en" ? { language: decision.language } : {}),
@@ -173,15 +174,17 @@ export function mapTask(task: WireTask, context: { projectId: string }, result?:
   const ownerResolved = phase === "stopped" && task.runtimeState === "CANCELLED" && task.warnings.includes("owner_resolved_without_certification") && !task.warnings.includes("contradictory_evidence");
   const closedUnconfirmed = !consistent && task.executionId !== null && task.warnings.includes("owner_closed_unconfirmed");
   const status = closedUnconfirmed ? "closed_unverified" : ownerResolved ? "done" : interrupted ? "needs_you" : STATUS_OF_PHASE[phase] ?? (task.executionId ? "working" : "draft");
+  const binding = task.draftBinding as Task["draftBinding"] | undefined;
   return {
     id: task.taskId, projectId: context.projectId, sprintId: null, description: task.description, sourceVersion: task.version,
+    ...(task.executionId && typeof binding?.runtimeTaskId === "string" && typeof binding.sessionId === "string" && typeof binding.ownerEpoch === "string" ? { draftBinding: binding } : {}),
     ...(typeof task.planningSprintId === "string" && task.planningSprintId.length > 0 ? { planningSprintId: task.planningSprintId } : {}),
     title: task.title ?? descriptionLabel(task.description), titleState: task.title === null ? "pending" : "generated",
     checkout: { kind: "main", branch: "" }, targetBranch: null, dependencies: [], status, resumeStatus: "working",
     ...(continuation ? { automaticContinuation: continuation } : {}),
     ...(task.warnings.includes("waiting_for_files") ? { filesWait: { message: task.waitReason, ...(task.filesWait ? { holder: task.filesWait } : {}) } } : {}),
     observedPhase:phase, coordinatorRoute: task.coordinatorRoute ?? null, warnings:task.warnings, issue: task.waitReason, executionId: task.executionId, result: mapped, workspaceDigest: mapped?.digest ?? null, acceptance: null,
-    conflict: "none", merge: null, resolvedBy: null, integration: null, closedAs: closedUnconfirmed ? "unconfirmed" : ownerResolved ? "as_is" : null, notVerifiedByCortex: ownerResolved || closedUnconfirmed, doneAt: ownerResolved || closedUnconfirmed ? lastConfirmed(task.lastConfirmedAt) : null,
+    conflict: "none", merge: null, resolvedBy: null, integration: null, closedAs: closedUnconfirmed ? "unconfirmed" : ownerResolved ? (task.warnings.includes("owner_completed_externally") ? "external" : "as_is") : null, notVerifiedByCortex: ownerResolved || closedUnconfirmed, doneAt: ownerResolved || closedUnconfirmed ? lastConfirmed(task.lastConfirmedAt) : null,
     archive: null, work: "unmerged",
     process: closedUnconfirmed || !known ? "unknown" : status === "working" || status === "needs_you" ? "live" : "stopped",
     unexpectedChanges: false, purgeBlocker: null, settings: { model: "", effort: "", mode: "guarded", language: "auto" }, lastConfirmedAt: lastConfirmed(task.lastConfirmedAt),

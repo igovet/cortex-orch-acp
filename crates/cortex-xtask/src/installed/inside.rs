@@ -21,6 +21,7 @@ pub fn user_command(argv: &[&str]) -> Vec<String> {
         "--",
         "env",
         "HOME=/home/acceptance",
+        "XDG_STATE_HOME=/home/acceptance/.local/state",
         "XDG_RUNTIME_DIR=/run/user/1001",
         "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus",
     ]

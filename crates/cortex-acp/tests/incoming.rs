@@ -575,7 +575,7 @@ async fn outside_client_consent() {
                 assert_eq!(
                     frame["params"]["toolCall"]["title"],
                     format!(
-                        "Owner decision: worker-backend-dev wants to write {} because it writes outside the project",
+                        "Owner decision: worker-general wants to write {} because it writes outside the project",
                         path.display()
                     )
                 );
@@ -1509,7 +1509,7 @@ async fn permission() {
                 assert_eq!(
                     request["params"],
                     json!({"sessionId":sid,
-                    "toolCall":{"toolCallId":"fixture-permission","title":"Owner decision: worker-backend-dev wants to run Fixture permission because it is not provably contained in the project"},
+                    "toolCall":{"toolCallId":"fixture-permission","title":"Owner decision: worker-general wants to run Fixture permission because it is not provably contained in the project"},
                     "options":[{"optionId":"yes","name":"Allow once","kind":"allow_once"},
                         {"optionId":"no","name":"Reject once","kind":"reject_once"}]})
                 );

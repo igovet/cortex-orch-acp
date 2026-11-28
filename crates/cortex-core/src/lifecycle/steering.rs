@@ -130,16 +130,21 @@ pub struct Denial {
     pub path: String,
     pub set_at: String,
 }
+// Each branch walks one type in id order via runtime_events_type. The merge
+// preserves the original order when changes alternate between types.
+const DENIAL_EVENTS_SQL: &str =
+    "SELECT type,payload_json,created_at,id FROM runtime_events WHERE type='USER_STEERING' AND task_id=?1
+     UNION ALL
+     SELECT type,payload_json,created_at,id FROM runtime_events WHERE type='OWNER_WRITE_ALLOWED' AND task_id=?1
+     ORDER BY id";
+
 /// The owner's write denials in force for this task, oldest first. Messages add
 /// (`deny_write`) and lift (`allow_write`) them in the order recorded; the desktop's
 /// Remove control lifts one (`OWNER_WRITE_ALLOWED`). A lift removes only an exact
 /// recorded path. A denial an earlier runtime stored (wildcards included) is kept.
 pub fn denial_records(db: &Connection, task: &str) -> CoreResult<Vec<Denial>> {
     let rows = db
-        .prepare(
-            "SELECT type,payload_json,created_at FROM runtime_events WHERE task_id=?
-            AND type IN ('USER_STEERING','OWNER_WRITE_ALLOWED') ORDER BY id",
-        )?
+        .prepare(DENIAL_EVENTS_SQL)?
         .query_map([task], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -636,7 +641,46 @@ an explicit `deny-write:` path is already enforced by the runtime.")
 
 #[cfg(test)]
 mod tests {
-    use super::parse_denials;
+    use super::*;
+
+    #[test]
+    fn write_denial_events_match_ordered_scan_and_seek_both_types() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(crate::store::schema::SQL).unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             WITH RECURSIVE sample(n, seed) AS (
+                VALUES (1, 77) UNION ALL
+                SELECT n+1, (seed*48271)%2147483647 FROM sample WHERE n<5000
+             )
+             INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+             SELECT 't'||(seed%23),
+                CASE seed%19 WHEN 1 THEN 'USER_STEERING'
+                             WHEN 2 THEN 'OWNER_WRITE_ALLOWED' ELSE 'NOISE' END,
+                'runtime',json_object('path','p'||(seed%3),'deny_write',json_array('p'||(seed%3))),n
+             FROM sample;
+             ANALYZE;",
+        ).unwrap();
+        let rows = |sql, task: &str| {
+            db.prepare(sql).unwrap()
+                .query_map([task], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                                            row.get::<_, String>(2)?))).unwrap()
+                .collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        for n in 0..24 {
+            let task = format!("t{n}");
+            assert_eq!(rows(DENIAL_EVENTS_SQL, &task), rows(
+                "SELECT type,payload_json,created_at FROM runtime_events WHERE task_id=?
+                 AND type IN ('USER_STEERING','OWNER_WRITE_ALLOWED') ORDER BY id", &task
+            ));
+        }
+        let mut plan = db.prepare(&format!("EXPLAIN QUERY PLAN {DENIAL_EVENTS_SQL}")).unwrap();
+        let uses = plan.query_map(["t0"], |row| row.get::<_, String>(3)).unwrap()
+            .map(Result::unwrap)
+            .filter(|detail| detail.contains("runtime_events_type") && detail.contains("type=? AND task_id=?"))
+            .count();
+        assert_eq!(uses, 2);
+    }
 
     #[test]
     fn explicit_directives_only_in_every_quoted_form() {

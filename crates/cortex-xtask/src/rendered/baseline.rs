@@ -5,7 +5,7 @@ use super::session::{outcome, stop, Stack};
 use crate::installed::util::*;
 use crate::json::{parse, Res};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -16,6 +16,7 @@ const PEER_HOOK: &str = include_str!("peer-timing.c");
 
 pub(super) fn compile_peer_hook(directory: &Path, uid: u32, gid: u32) -> Res<()> {
     write(&directory.join("peer-timing.c"), PEER_HOOK)?;
+    write(&directory.join("baseline-frame.c"), FRAME)?;
     let done = capture(
         Command::new("docker")
             .args([
@@ -34,18 +35,10 @@ pub(super) fn compile_peer_hook(directory: &Path, uid: u32, gid: u32) -> Res<()>
             ))
             .args([
                 "--entrypoint",
-                "/usr/bin/cc",
+                "/bin/sh",
                 super::BUILDER,
-                "-shared",
-                "-fPIC",
-                "-O2",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-o",
-                "/out/peer-timing.so",
-                "/out/peer-timing.c",
-                "-ldl",
+                "-ec",
+                "cc -shared -fPIC -O2 -Wall -Wextra -Werror -o /out/peer-timing.so /out/peer-timing.c -ldl && cc -O2 -Wall -Wextra -Werror -o /out/baseline-frame /out/baseline-frame.c -lX11",
             ]),
         std::time::Duration::from_secs(60),
     )?;
@@ -81,6 +74,12 @@ pub(super) fn timed_peer(scratch: &Path, checkout: &Path, peer: &Path) -> Res<Pa
         "peer timing requires a loopback-only network namespace",
     )?;
     let trace = scratch.join("peer.trace");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(scratch.join("sqlite.trace"))
+        .map_err(|e| e.to_string())?;
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -209,7 +208,10 @@ impl Observer {
             .arg(st.socket())
             .arg(endpoint.join("service.sock"));
         if st.peer_timing {
-            command.arg(st.scratch.join("peer.trace"));
+            command.arg(st.scratch.join("peer.trace")).arg(st.scratch.join("sqlite.trace"));
+            if let Some(arm) = &st.history_delivery {
+                command.arg(arm);
+            }
         }
         let child = command
             .stdin(Stdio::null())
@@ -283,7 +285,53 @@ pub(super) fn begin(j: &mut J) -> Res<()> {
     observer.wait("started", 15)
 }
 
-fn peer_binding(j: &mut J) -> Res<String> {
+/// The comparison can use an older archive with a checkout-local format-12 store.
+/// A relocation marker must still pass the installed harness's full binding checks.
+pub(super) fn fixture_store(j: &J, project: &Path) -> Res<PathBuf> {
+    let project = project
+        .canonicalize()
+        .map_err(|_| "fixture project unavailable")?;
+    require(
+        project.starts_with(&j.home) && project != j.home,
+        "store project is outside the disposable home",
+    )?;
+    let anchor = j.channel.store_anchor(&project);
+    let metadata = anchor
+        .symlink_metadata()
+        .map_err(|_| "fixture store file missing")?;
+    require(
+        metadata.is_file()
+            && metadata.uid()
+                == project
+                    .metadata()
+                    .map_err(|_| "fixture project unavailable")?
+                    .uid()
+            && metadata.nlink() == 1
+            && metadata.mode() & 0o077 == 0
+            && anchor.canonicalize().ok().as_deref() == Some(anchor.as_path()),
+        "fixture store file is unsafe",
+    )?;
+    use crate::installed::native::query;
+    match query(&anchor, "PRAGMA application_id; PRAGMA user_version;")?.as_str() {
+        "1129467218\n12001" => j.channel.store_db(&j.home, &project),
+        "1129467218\n12" => {
+            require(
+                matches!(j.channel.store_destination(&j.home, &project).join("cortex.sqlite3").symlink_metadata(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                "checkout-local fixture has a competing relocated store",
+            )?;
+            require(
+                query(&anchor, "SELECT project_root FROM workspace_projects;")?
+                    == project.to_string_lossy(),
+                "checkout-local store does not name the fixture project",
+            )?;
+            Ok(anchor)
+        }
+        _ => Err("wrong project-store format for the baseline fixture".into()),
+    }
+}
+
+fn peer_binding(j: &mut J, db: &Path) -> Res<String> {
     let route = j.path()?;
     let task = route.rsplit('/').next().unwrap_or_default();
     require(
@@ -293,11 +341,10 @@ fn peer_binding(j: &mut J) -> Res<String> {
         "invalid fixture task binding",
     )?;
     // Query only the disposable project, read-only, after the real question appeared.
-    let db = j.channel.store_db(&j.home.join("journey"));
     let binding = crate::installed::native::query(
-        &db,
+        db,
         &format!(
-            "SELECT json_group_array(json_object('taskId', w.task_id, 'projectId', w.project_id,
+            "SELECT json_group_array(json_object('taskId', w.task_id, 'projectId', w.project_id, 'executionId', e.execution_id,
             'runtimeTaskId', e.runtime_task_id, 'attemptId', d.attempt_id,
             'sessionId', d.engine_session_ref, 'displaySessionId', h.session_id,
             'sourceSequence', h.seq))
@@ -314,14 +361,17 @@ fn peer_binding(j: &mut J) -> Res<String> {
     Ok(binding)
 }
 
-pub(super) fn finish(j: &mut J) -> Res<()> {
+pub(super) fn finish(j: &mut J, baseline_db: Option<&Path>) -> Res<()> {
     if j.st.observer.is_none() {
         return Ok(());
     }
     // Record the settled task view as well as the active Start→question journey.
     sleep_ms(2000);
     let binding = if j.st.peer_timing {
-        peer_binding(j)?
+        peer_binding(
+            j,
+            baseline_db.ok_or("missing fixture store for peer timing")?,
+        )?
     } else {
         String::new()
     };

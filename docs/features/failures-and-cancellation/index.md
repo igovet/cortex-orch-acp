@@ -151,16 +151,7 @@ Without reconciliation, `decide` always refuses retry
 (`reconciliation_required_but_not_performed`); callers then record an
 `indeterminate` outcome rather than ever claiming exactly-once.
 
-This formalizes patterns already present in the codebase:
-`OrchestratingRuntime._attempt_worker_route_fallback` reconciles the old
-attempt (`lookup_owned`/`terminate_owned`, channel revocation) *before*
-opening a replacement session; the runtime
-checks for an already-published `worker_result` before writing
-`recovery_worker_lost`, re-checked inside the same transaction as that
-write so a concurrently-published result always wins;
-the runtime/the runtime use idempotency keys for
-every durable publication. No blanket exactly-once guarantee is made
-anywhere for an external mutation whose fate cannot be observed.
+Replacement requires evidence that superseded work has settled. The Rust recovery path preserves unsettled effects as unknown and uses durable attempt and request identities. See [native recovery](../../../crates/workspace-service/src/native_recovery.rs).
 
 ### Transient engine failures
 
@@ -401,7 +392,14 @@ updates are retained and replayed if the client disconnected before seeing them.
 
 Every path that stops or replans live work records the live set in the same transaction that cancels the pending and running nodes: `session/cancel` interruption, `propose_replan`, `return_to_coordinator` and both stop-question branches. Each writes a `LIVE_ASSIGNMENTS_CANCELLED` event naming the assignment references it cancelled. The RECOVERING step reads the captures not yet settled, cancels and terminates exactly those assignments, and sweeps only the owned provisioning attempts whose idempotency keys match them. Completed and failed assignments, and any assignment an earlier recovery already settled, are not touched. A completed worker still settling its result is left to its own settlement.
 
-Recovery needs each captured attempt's capacity released, which happens only when its session process has been shut down. A worker turn that is still running when its channel is revoked or its owner epoch replaced is therefore ended by the runtime rather than left to finish by itself: besides the engine's own authority monitor, which closes the transport on observed authority loss, the active prompt checks once a second whether its worker channel was revoked, gives a revoked turn 10 seconds to end by itself (its closing reply after its own accepted replan or escalation), then sends ACP `session/cancel`, and lets the turn settle with stop reason `cancelled`. If the engine does not reply within 25 seconds, the turn ends with its outcome unknown and the session's ordinary shutdown terminates and settles the process (`SessionDriver::prompt` in `crates/workspace-service/src/native_sessions.rs`). Coordinator sessions and workers whose authority is intact are not affected.
+Recovery releases capacity only after it observes process settlement. The engine
+authority monitor closes the transport on revocation. For an exact pending
+worker reply after a committed result, it waits up to ten seconds while the
+owner epoch, plan revision, attempt, session and checkout remain current.
+Sessions with attached external MCP servers retain immediate termination.
+Broker calls and permission checks still require a live channel. The active
+prompt also supervises revocation and cancellation. A missing final reply
+leaves the turn outcome unknown and cannot complete its write attribution.
 
 The captures survive a restart in RECOVERING. The RECOVERING-to-PLANNING transaction writes `LIVE_CANCELLATIONS_SETTLED` for the captures it covered. If a live worker's termination is not confirmed, the task moves to BLOCKED with `replanning_worker_termination_unconfirmed`, and a later recovery rechecks the same captured attempts. A node cancelled by a stop recorded before captures existed is captured on its first recovery with reason `unrecorded` and handled the same way.
 
@@ -559,7 +557,7 @@ recorded for it since, adds no event.
 
 ## Terminal resource cleanup
 
-`OrchestratingRuntime.start_prompt` and explicit `answer_question` turns check
+The native driver checks
 durable terminal state in their exit paths and invoke task-owned teardown for
 COMPLETED, FAILED and CANCELLED.
 It does not call the task cancellation transition for successful or failed work.
@@ -602,120 +600,9 @@ and writer reuse, not paid engine or rendered client behavior.
 
 ## 4. Disconnect
 
-The transport's reader EOF event signals that input ended, not that its
-disconnect callback finished. On the stdin-EOF path, the runtime joins
-the reader before joining prompt workers and shutting down the runtime.
-This preserves recording/cancellation before process exit even when the EOF
-callback is still running. The writer-closed event likewise precedes its
-disconnect callback; on that path, `main` joins the writer before joining
-prompt workers and shutting down the runtime. SIGTERM runs its disconnect
-callback synchronously on the main thread. SIGTERM and writer-close must not
-join a reader blocked on still-open stdin.
+The Rust ACP entry handles stdin closure and process termination through its server shutdown path. The incoming host shuts down the runtime and waits for its owned jobs. Evidence left after abrupt process loss is reconciled by the next writable project owner. A lost engine turn is not replayed. See the [ACP entry](../../../crates/cortex-acp/src/main.rs), [server](../../../crates/cortex-acp/src/lib.rs), [runtime shutdown](../../../crates/workspace-service/src/native_runtime.rs) and [native recovery](../../../crates/workspace-service/src/native_recovery.rs).
 
-`_handle_eof`/`handle_writer_closed` (host transport EOF or
-writer-closed) already invalidate every session's `cancel_event` and close
-the connection's `HostRequester` (resolving every pending host round trip —
-permission, elicitation, fs — as closed). The runtime adds
-`OrchestratingRuntime.disconnect_session(session_id)` (reached via
-`ProductionOrchestratingRuntime.disconnect`): invalidates the coordinator's
-own permission binding the same way `cancel` does, records a durable
-`progress` event naming what was paused/cancelled/unconfirmed, then runs
-the bounded owned-resource reaper. No adapter
-currently supports a confirmed pause, so cancel is the correct default per
-the task's own "confirmed pause, else cancel" rule — never hidden
-continuing paid work.
-
-A disconnect cancels the in-flight engine turns, never the task's outcome.
-A Paseo plugin update restarts the plugin process and closes every open
-Cortex connection at once; Paseo then marks each open chat, including
-already completed ones, with `Provider connection closed`. That message is
-host-owned and cannot be suppressed from inside the plugin. Inside Cortex:
-
-- The disconnected task is marked before its turn is woken, so the
-  controller ends the turn without `policy.interrupt`: no
-  `TURN_INTERRUPTED`, no `turn_interrupted` assignment cancellation, and
-  task, node and assignment state stay as persisted. Only a user's cancel
-  pauses the task that way.
-- `OrchestratingRuntime.shutdown()` sets a teardown flag first. A worker
-  whose engine the teardown kills, even one whose turn event the
-  disconnect cannot reach, is not recorded as `engine_failure`, is not
-  routed to fallback and is not re-dispatched during teardown.
-- A coordinator turn that ends with an unhandled error tears down its workers the same way. The task is marked host-disconnected before its cancellation, so a worker that teardown kills is recorded as transport loss, never `engine_failure`, and gets no fallback. Its work stays as persisted for recovery.
-- The durable record is a `progress` event of kind `host_disconnected`
- with the exact `session_id`,
-  `task_id`, `coordinator_attempt_id`, each interrupted worker's
-  `node_id`/`assignment_ref`/`attempt_id`, each gateway action whose
-  receipt is still open (`unknown_outcome_actions`: operation,
-  `tool_call_ref`, attempt), the task state at disconnect, the runtime
-  package version and `history`: `complete`, `truncated` (more than 50
-  entries) or `unavailable:<error>`. A chat only restored by `session/load`
-  in this process, with no turn here, is recorded by the ACP agent with
-  `turn: no_turn_in_process`. `trigger` names what the process observed
-  first: `sigterm`, `stdin_eof` or `writer_closed`. In the isolated dev
-  Paseo 0.9.2, `plugin reload cortex-acp` produced `sigterm` (the load shim
-  forwards it); the record was written about 0.4 s after the reload began
-  and the process released its engines and exited before any SIGKILL.
-- Every worker launch also records the Cortex ACP process that owns it
-  (an `acp_host` row beside the worker's `attempt_process_registry` row).
-  When no signal reached the old process (SIGKILL, OOM), there is no
-  `host_disconnected` record; a later reader treats a worker with no
-  terminal event whose owning process is provably gone as interrupted. A
-  live or unidentifiable owner never qualifies, and the read writes nothing.
-- Paseo 0.9.2 does not reload the session after a plugin reload and sends
-  nothing until the next prompt, so a worker card would otherwise keep its
-  last `running` status through a page reload. The plugin's card polls the
-  durable attempt status while the host shows it running and settles on
-  Interrupted (or any other settled status) without a new message; the
-  Pipeline panel reads the same projection.
-- After restart, persisted state is the authority. The next prompt runs
-  coordinator recovery: interrupted workers are recorded
-  `recovery_worker_lost`, and `retry_lost` retries a lost node at most
-  twice only after observed process absence and only when it owns no open
-  gateway receipt. A receipt is closed when it is complete, or settled with an
-  observed end: the supervisor's final status (an exit code, a signal, an owner
-  stop, a timeout, or an unverifiable output with a finished supervisor), a
-  launch that provably never started (`launched: false`), or a read-only
-  command whose PID namespace ended. A receipt settled only because its process
-  is provably gone, with no observed end (outcome `unknown`), stays open for
-  this rule: the action may have taken effect, and a fresh attempt of the same
-  node could repeat it. A node that owns an open receipt is returned to the coordinator with
-  `lost_worker_action_outcome_unknown`; the coordinator's planning request
-  lists each such action and states that it was not re-run. The
-  gateway's own `request_key` fence still refuses a repeat of the same call.
-  A worker written off as `recovery_worker_lost`, and the replan
-  cancellation that follows, still displays as Interrupted, never as a
-  generic failure; the retry is a new card. The recovery turn sends no update
-  for a lost card the host already shows, because Paseo 0.9.2 renders an
-  update from a later turn as a second row.
-- A restarted runtime never re-dispatches a delegation request that
-  recovery already closed with `assignment_failed`/`assignment_cancelled`.
-- On `session/load`, while this session's latest `host_disconnected`
-  record has no later `user_message`, the agent appends one read-only,
-  localized notice after the replayed history (message id
-  `cortex-connection:<event id>`, `_meta.cortexConnectionNotice`), but only
-  when that disconnect interrupted something: a running worker or a worker
-  action in flight (open receipt on a still-open worker channel). A finished,
-  paused or idle chat reopens without it, and actions an earlier stop already
-  fenced are not re-counted. It states the saved task state (and that a
-  completed result is unchanged) and those two counts from the disconnect
-  record. External MCP calls to a tool the server lists in `read_only_tools`
-  are never counted as unknown outcomes. Loading writes nothing.
-
-Native engine tools are not gated per call, so a native edit or shell
-command in flight at the disconnect has no gateway receipt and cannot be
-listed as an unknown outcome; recovery still never replays the lost turn.
-The `plugin reload` path was exercised in the isolated dev Paseo 0.9.2 on
-2026-09-26 (see [verification status](../../project/verification.md)); until the
-deployed package carries it, apply plugin updates between active tasks.
-
-After the agent joins its prompt workers at daemon teardown, it also calls
-`ProductionOrchestratingRuntime.shutdown()` (and each cached
-`OrchestratingRuntime.shutdown()`). This closes the owned engine processes
-and releases confirmed capacity for an ordinary EOF or writer-close. A hard
-host kill can still leave an ambiguous registry row; the next
-`session/prompt` uses the existing cross-process recovery path, while
-`session/load` only applies the read-only card correction described in
-`input-history-and-replay.md`.
+Rendered behavior after a plugin reload remains unverified on the current client.
 
 ## 5. Session worker capacity and stale-slot reclamation
 
@@ -755,6 +642,8 @@ itself launch/own.
 
 ## 7. Fault injection
 
+> Historical test points from the retired runtime. Their equivalents in Rust have not been verified.
+
 Fault-injection checkpoints `t028_*` (`_fault_injection.checkpoint`, same
 env-var-gated `os._exit(137)` mechanism):
 `t028_cancel_before_permission_invalidate`, `t028_disconnect_before_cancel`,
@@ -770,13 +659,7 @@ The former Python suites covered classification (including the rate-limit/auth-l
 
 ## Known limitations
 
-No adapter currently implements a confirmed engine-turn pause (only
-cancel); `OrchestratingRuntime.cancel`/`disconnect_session` are in-process
-only (a session started on a different, now-crashed Cortex process is not
-reachable this way — the reaper's cross-process capacity/workspace sweep is
-the durable fallback for that case, not a substitute for live
-cancellation). Live disconnect/kill-signal behavior against a real engine
-is not covered by the automated suite.
+Live disconnect and kill-signal behavior against real engines remains unverified here. The next owner uses durable recovery evidence for work left by a crashed process.
 
 Recovery dispatch excludes superseded and terminal delegation requests,
 including results bound through the exact provisioning attempt. An old

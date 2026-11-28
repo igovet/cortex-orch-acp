@@ -1,16 +1,18 @@
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, Show, useContext } from "solid-js";
+import { Portal } from "solid-js/web";
 import { capabilityOf, effectiveCeiling, FEATURES, machineDefaults, machineEffort, resolveEffort, routingFor, type CommandReceipt, type SprintRunMode, type TaskSettings } from "@cortex/workspace-domain";
 import { createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
 import { createRequestFeedback, RequestStatus } from "./request-feedback";
 import { FieldEdit } from "./field-edit";
-import { createUnsent } from "./freshness";
+import { createUnsent, ScreenActive } from "./freshness";
 import { Tile } from "./frame";
 import { I, MenuItem, Pop } from "./kit";
 import { ActionBar, Toolbar } from "./layout";
 import { sessionOptions } from "./port/real";
 import type { Route } from "./router";
 import { sprintModeDescription, projectsOn, readyStep, sprintTitle } from "./selectors";
+import { TaskWorkspaceDock, TaskWorkspacePanel } from "./task-workspace";
 
 /** A branch-safe name, cut at a word so a long title never ends mid-word. */
 function slug(text: string) {
@@ -50,6 +52,9 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   // With no choice per task, this is the machine's own, which may arrive after the page opens.
   const settings = () => ws.can(FEATURES.taskRoute) ? chosenRoute() : machineDefaults(ws.machine()).settings;
   const [sprintId, setSprintId] = createSignal<string | null>(props.route.sprint ?? null);
+  const formId = createUniqueId();
+  const targetMenu = `new-target-${formId}`;
+  const checkoutGroup = `checkout-${formId}`;
   const [target, setTarget] = createSignal<string | null>(null);
   const [otherBranch, setOtherBranch] = createSignal<string | null>(null);
   const [titleState, setTitleState] = createSignal<TitleState>("empty");
@@ -81,8 +86,9 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const kind = () => props.route.kind;
   const defaultBranch = () => summary()?.project.defaultBranch ?? "";
   const openBranch = () => summary()?.project.openBranch ?? "";
-  const branches = () => summary() ? [...new Set([summary()!.project.defaultBranch, summary()!.project.openBranch])].filter(Boolean) : [];
-  const mergeInto = () => target() ?? defaultBranch();
+  const branches = () => summary() ? [...new Set([summary()!.project.defaultBranch, summary()!.project.openBranch, pickedSprint()?.targetBranch ?? ""])].filter(Boolean) : [];
+  const inheritedTarget = () => pickedSprint()?.targetBranch ?? defaultBranch();
+  const mergeInto = () => target() ?? inheritedTarget();
   // The step the task header will name: a project-folder task on the branch it would merge into is finished in place.
   const step = () => readyStep({ checkout: checkout() === "main" ? { kind: "main", branch: openBranch() } : { kind: "worktree", branch: branch(), path: "" } }, mergeInto(), summary()?.project.hasGit);
   const sprints = () => summary()?.sprints.filter(s => s.planning === "created") ?? [];
@@ -103,6 +109,12 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   onCleanup(() => clearTimeout(naming));
   // A memo of the id: every command publishes fresh snapshot objects, and that must not clear what the owner picked.
   const projectId = createMemo(() => summary()?.project.id);
+  const shown = useContext(ScreenActive);
+  const dock = useContext(TaskWorkspaceDock);
+  const hasTaskPanel = () => kind() === "task" && ws.shell.kind === "desktop" && ws.store.mode === "real" && !ws.demo;
+  createEffect(on(() => hasTaskPanel() && shown() ? projectId() : undefined, id => {
+    if (id) onCleanup(ws.store.interest(id, "facts"));
+  }));
   // Only a real switch of project clears them, not the first projection arriving under a deep link.
   createEffect(on(projectId, (_id, previous) => { if (previous === undefined) return; setSprintId(null); setTarget(null); }, { defer: true }));
   /** The title is kept here until the draft is saved, so Save on it writes nothing to the machine yet. */
@@ -149,27 +161,45 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const plane = () => form?.querySelector<HTMLElement>(".mc-send") ?? null;
 
   const Target = (p: { hint: string }) => <Show when={mergeInto() && !noGit()}><div class="fld ws-inline">
-    <span class="lab">Merge into</span>
-    <span class="row"><button class="pick mono" popovertarget="m-new-target" style={{ height: "28px" }} aria-label={`Merge into ${mergeInto()}`}><I n="branch" s={14} class="faint" /><span class="trunc">{mergeInto()}</span><I n="chevron-down" s={12} /></button>
+    <span class="lab">{ws.t("taskWorkspaceMergeInto")}</span>
+    <span class="row"><button class="pick mono" popovertarget={targetMenu} style={{ height: "28px" }} aria-label={`${ws.t("taskWorkspaceMergeInto")} ${mergeInto()}`}><I n="branch" s={14} class="faint" /><span class="trunc">{mergeInto()}</span><I n="chevron-down" s={12} /></button>
       <span class="hint">{p.hint}</span></span>
+    <Pop id={targetMenu} class="pop-anchor" align="left" label={ws.t("taskWorkspaceMergeInto")} style={{ width: "280px" }}>
+      <div class="mi-h">{ws.t("taskWorkspaceMergeInto")}</div>
+      <For each={branches()}>{b => <MenuItem label={<span class="mono">{b}</span>} sub={b === defaultBranch() ? ws.t("taskWorkspaceGitDefault") : undefined} check={b === mergeInto()} onSelect={() => setTarget(b === inheritedTarget() ? null : b)} />}</For>
+      <div class="mi-sep"></div>
+      <MenuItem label={ws.t("taskWorkspaceOtherBranch")} onSelect={() => setOtherBranch(target() ?? "")} />
+    </Pop>
     <Show when={otherBranch() !== null}><span class="row ws-other">
-      <input class="inp mono" aria-label="Other branch" placeholder="branch name" value={otherBranch()!} onInput={e => setOtherBranch(e.currentTarget.value)} ref={el => queueMicrotask(() => el.focus())}
+      <input class="inp mono" aria-label={ws.t("taskWorkspaceOtherBranch")} placeholder={ws.t("taskWorkspaceBranchName")} value={otherBranch()!} onInput={e => setOtherBranch(e.currentTarget.value)} ref={el => queueMicrotask(() => el.focus())}
         onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); if (otherBranch()!.trim()) { setTarget(otherBranch()!.trim()); setOtherBranch(null); } } else if (e.key === "Escape") { e.stopPropagation(); setOtherBranch(null); } }} />
     </span></Show>
   </div></Show>;
 
-  const Checkout = () => <div class="fld">
-    <span class="lab">Where it works</span>
-    <div class="two">
-      <label class={`rc${separate() ? "" : " ws-rc-off"}`}><input type="radio" name="checkout" disabled={!separate()} checked={checkout() === "worktree"} onChange={() => chooseCheckout("worktree")} /><span><span class="t">{kind() === "sprint" ? "Worktree" : "Separate worktree"}</span><span class="d"><Show when={separate()} fallback={noWorktree()}>{kind() === "sprint" ? "One branch named after the sprint" : "New task branch"}<Show when={kind() === "task"}> <span class="mono">{ws.demo ? branch() : "cw/…"}</span></Show> from the currently open branch <span class="mono">{openBranch()}</span>. Your open checkout is not touched.</Show></span></span></label>
-      <label class="rc"><input type="radio" name="checkout" checked={checkout() === "main"} onChange={() => chooseCheckout("main")} /><span><span class="t">Project folder</span><span class="d">{kind() === "sprint" ? "All tasks work" : "Works"} in <span class="mono">{summary()?.project.repository ?? "the project"}</span><Show when={openBranch() && !noGit()}> on the open branch <span class="mono">{openBranch()}</span></Show>.</span></span></label>
+  const Checkout = (p: { panel?: boolean }) => <div class="fld">
+    <Show when={!p.panel}><span class="lab">Where it works</span></Show>
+    <div class="two" role="radiogroup" aria-label={ws.t("taskWorkspaceFolder")}>
+      <label class={`rc${separate() ? "" : " ws-rc-off"}`}><input type="radio" name={checkoutGroup} disabled={!separate()} checked={checkout() === "worktree"} onChange={() => chooseCheckout("worktree")} /><span><span class="t">{kind() === "sprint" ? "Worktree" : ws.t("taskWorkspaceWorktree")}</span><span class="d"><Show when={separate()} fallback={noWorktree()}><Show when={!p.panel} fallback={ws.t("taskWorkspaceCreatedAtStart")}>{kind() === "sprint" ? "One branch named after the sprint" : "New task branch"}<Show when={kind() === "task"}> <span class="mono">{ws.demo ? branch() : "cw/…"}</span></Show> from the currently open branch <span class="mono">{openBranch()}</span>. Your open checkout is not touched.</Show></Show></span></span></label>
+      <label class="rc"><input type="radio" name={checkoutGroup} checked={checkout() === "main"} onChange={() => chooseCheckout("main")} /><span><span class="t">{ws.t("taskWorkspaceProjectFolder")}</span><Show when={!p.panel}><span class="d">{kind() === "sprint" ? "All tasks work" : "Works"} in <span class="mono">{summary()?.project.repository ?? "the project"}</span><Show when={openBranch() && !noGit()}> on the open branch <span class="mono">{openBranch()}</span></Show>.</span></Show></span></label>
     </div>
     <Show when={kind() === "sprint" && checkout() === "worktree" && !pickedSprint()}><div class="two" role="radiogroup" aria-label="Worktree scope">
       <label class="rc"><input type="radio" name="worktree-scope" checked={scope() === "sprint"} onChange={() => setScope("sprint")} /><span><span class="t">One worktree for the whole sprint</span><span class="d">Every task works in the same worktree and branch. Finishing a task commits its own files there.</span></span></label>
       <label class="rc"><input type="radio" name="worktree-scope" checked={scope() === "task"} onChange={() => setScope("task")} /><span><span class="t">Separate worktree per task</span><span class="d">Each task gets its own branch and worktree. Runs in Manual mode only.</span></span></label>
     </div></Show>
-    <Show when={checkout() === "main"}><div class="note-box"><I n="alert" s={14} class="st-warn" /><span>{kind() === "sprint" ? "All tasks edit" : "The task edits"} the same files you have open, and your uncommitted changes count as part of the work. Rules for two tasks writing here at once are not settled yet.</span></div></Show>
+    <Show when={checkout() === "main" && !p.panel}><div class="note-box"><I n="alert" s={14} class="st-warn" /><span>{kind() === "sprint" ? "All tasks edit" : "The task edits"} the same files you have open, and your uncommitted changes count as part of the work. Rules for two tasks writing here at once are not settled yet.</span></div></Show>
   </div>;
+  const TaskCheckout = (p: { panel?: boolean }) => <Show when={!pickedSprint()?.checkout}
+    fallback={<div class="cap muted">{ws.t("taskWorkspaceFollowsSprint")} {ws.t(checkout() === "worktree" ? "taskWorkspaceWorktree" : "taskWorkspaceProjectFolder")}.<Show when={checkout() === "worktree" && noWorktree()}> {noWorktree()}</Show></div>}>
+    <Checkout panel={p.panel} />
+  </Show>;
+  const taskTargetHint = () => {
+    if (pickedSprint() || !openBranch() || !mergeInto()) return ws.t("taskWorkspaceTargetHint");
+    const gate = ws.t(step() === "Ready to merge" ? "taskWorkspaceGateMerge" : "taskWorkspaceGateFinish");
+    return target() ? gate : `${ws.t("taskWorkspaceGitDefault")}. ${gate}`;
+  };
+  const TaskWorkspace = () => <TaskWorkspacePanel summary={summary()} checkout={checkout()} sharedSprintCheckout={pickedSprint()?.checkout?.shared === true}
+    target={mergeInto()} checkoutControls={<TaskCheckout panel />} targetControls={<Target hint={taskTargetHint()} />} />;
+  const docked = () => shown() ? dock() : undefined;
 
   return <div class="create"><div class="create-in">
     <Toolbar class="create-top" label="What to create and where" start={<>
@@ -195,12 +225,6 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
       <div class="mi-h">Project on {ws.machine().name}</div>
       <For each={projects()}>{s => <MenuItem label={s.project.name} sub={s.offline ? "Offline" : undefined} check={s === summary()} onSelect={() => setPicked(s.project.id)} />}</For>
     </Pop>
-    <Show when={!noGit()}><Pop id="m-new-target" class="pop-anchor" align="left" label="Merge into" style={{ width: "280px" }}>
-      <div class="mi-h">Merge into</div>
-      <For each={branches()}>{b => <MenuItem label={<span class="mono">{b}</span>} sub={b === defaultBranch() ? "Git default branch" : undefined} check={b === mergeInto()} onSelect={() => setTarget(b === defaultBranch() ? null : b)} />}</For>
-      <div class="mi-sep"></div>
-      <MenuItem label="Other branch…" onSelect={() => setOtherBranch(target() ?? "")} />
-    </Pop></Show>
 
     {/* The plane saves a draft, or for a sprint starts planning. Saving never starts the task: Start now below is its own explicit choice. */}
     <div ref={form}><MessageComposer label={kind() === "sprint" ? "Describe the sprint" : "Describe the task"} placeholder={kind() === "sprint" ? "Describe the sprint. Tag @files, use /skills, paste images and logs, or attach files." : "Describe the task. Tag @files, use /skills, paste images and logs, or attach files."}
@@ -233,8 +257,11 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
           <Show when={titleState() === "named"}><dd><FieldEdit label="Task title" value={title()} save={saveTitle} closed={{ class: "tt ws-edit", text: saved => saved }} /></dd></Show>
           <Show when={titleState() === "failed"}><dd><FieldEdit label="Task title" value={draftTitle()} save={saveTitle} closed={{ class: "tt muted ws-edit", text: saved => saved }} /></dd><dd class="row"><span class="cap st-warn">Title not generated</span><button class="btn btn-sm" onClick={generate}>Retry</button></dd></Show>
         </dl></Show>
-        <Show when={!pickedSprint()?.checkout} fallback={<div class="cap muted">Checkout follows this sprint: {checkout() === "worktree" ? "Separate worktree per task" : "Project folder"}.<Show when={checkout() === "worktree" && noWorktree()}> {noWorktree()}</Show></div>}><Checkout /></Show>
-        <Target hint={`Git default branch. The task stops at ${step()} for your confirmation.`} />
+        <Show when={hasTaskPanel()} fallback={<><TaskCheckout /><Target hint={`Git default branch. The task stops at ${step()} for your confirmation.`} /></>}>
+          <Show when={docked()} fallback={<div class="task-workspace__inline"><TaskWorkspace /></div>}>{mount =>
+            <Portal mount={mount()}><TaskWorkspace /></Portal>}
+          </Show>
+        </Show>
       </div>
     </Show>
 

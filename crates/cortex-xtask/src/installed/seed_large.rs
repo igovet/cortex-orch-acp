@@ -70,6 +70,12 @@ fn seed_file() -> PathBuf {
 }
 
 pub fn api(channel: &Channel) -> Res<()> {
+    let renamed = rpc(
+        &channel.socket,
+        "machine.call",
+        parse(r#"{"op":"machine.update","params":{"patch":{"name":"Local"}}}"#)?,
+    )?;
+    require(renamed.get("ok").is_some_and(Value::truthy), "machine rename refused")?;
     let root = Path::new(HOME).join("large-project");
     let registered = rpc(
         &channel.socket,
@@ -154,7 +160,7 @@ pub fn store(channel: &Channel) -> Res<()> {
         .to_vec();
     require(ids.len() == 68, "seed does not hold 68 tasks")?;
     let root = Path::new(HOME).join("large-project");
-    let db = channel.store_db(&root);
+    let db = channel.store_db(Path::new(HOME), &root)?;
     let padding = "x".repeat(1000);
     let update = format!("{{\"sessionUpdate\": \"usage_update\", \"padding\": \"{padding}\"}}");
     let sql = format!(
@@ -177,11 +183,11 @@ pub fn store(channel: &Channel) -> Res<()> {
         done.code == 0,
         &format!("history rows failed: {}", tail(&done.stderr)),
     )?;
-    let rows = super::native::query(
+    let rows = super::native::count(
         &db,
         "SELECT count(*) FROM host_updates WHERE session_id='unrelated-fixture-history'",
-    )
-    .unwrap_or_default();
+    )?;
+    require(rows == 100_000, "large-history fixture row count differs")?;
     let sprint = obj(vec![
         ("id", s("sp_large")),
         ("projectId", s(&project)),
@@ -209,6 +215,6 @@ pub fn store(channel: &Channel) -> Res<()> {
         ])),
     )?;
     chmod(&product, 0o600)?;
-    emit("large_store_rows", vec![("host_updates", s(rows))]);
+    emit("large_store_rows", vec![("host_updates", n(rows))]);
     Ok(())
 }

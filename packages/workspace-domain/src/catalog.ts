@@ -83,13 +83,19 @@ export const ROLE_CATALOG: readonly Role[] = [
   role("build-verification", "Build Verification", "read_only", "testing"),
   role("code-reviewer", "Code Reviewer", "read_only", "review"),
   role("database-architect", "Database Architect", "read_only", "design", "deep"),
-  role("explorer", "Explorer", "read_only", "investigation", "light"),
+  role("explorer", "Explorer", "read_only", "investigation"),
   role("performance-engineer", "Performance Engineer", "read_only", "debugging"),
   role("planner", "Planner", "read_only", "planning"),
   role("security-auditor", "Security Auditor", "read_only", "review", "deep"),
   role("ux-designer", "UX Designer", "read_only", "design"),
   role("senior-consultant", "Senior Consultant", "consultant", "consultation", "deep"),
 ];
+/** New plan nodes select General or Explorer. Three other profiles belong to runtime-owned stages. */
+export function roleUse(id: string): "plan" | "runtime" | "retained" {
+  if (id === "worker-general" || id === "worker-explorer") return "plan";
+  if (["worker-code-reviewer", "worker-build-verification", "worker-senior-consultant"].includes(id)) return "runtime";
+  return "retained";
+}
 export const RESERVED_ROLE = "worker-build-verification";
 export const ACCESS_LABELS: Record<RoleAccess, string> = { writing: "Writing", read_only: "Read-only", consultant: "Consultant" };
 export const RESERVED_WORDS = ["auto", "default", "model", "best", "fast", "cheap"];

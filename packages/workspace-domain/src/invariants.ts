@@ -265,18 +265,35 @@ function parseRevisions(rows: unknown[]): SprintRevision[] {
   for (const r of rows.slice(-20)) {
     if (!record(r) || typeof r.revisionId !== "string" || !REVISION_STATUS.includes(r.status as string)) continue;
     const changes: SprintRevisionChange[] = (Array.isArray(r.changes) ? r.changes : []).filter(record).filter(c => ["update", "add", "propose_cancel"].includes(c.op as string)).map(c => ({
-      op: c.op as SprintRevisionChange["op"], memberId: text(c.member_id, 128), key: text(c.key, 100), title: text(c.title, 200),
+      op: c.op as SprintRevisionChange["op"], ...(typeof c.corrects === "string" && c.corrects ? { corrects: c.corrects } : {}), memberId: text(c.member_id, 128), key: text(c.key, 100), title: text(c.title, 200),
       description: text(c.description, 8000), dependsOn: Array.isArray(c.dependsOn) ? c.dependsOn.filter((d): d is string => typeof d === "string") : null, reason: text(c.reason, 2000),
     }));
     out.push({ revisionId: r.revisionId, taskId: typeof r.taskId === "string" ? r.taskId : null, status: r.status as SprintRevision["status"], applied: r.applied === true,
-      reason: text(r.reason, 2000) ?? "", changes, held: ids(r.held), updated: ids(r.updated), added: ids(r.added) });
+      reason: text(r.reason, 2000) ?? "", ...(Array.isArray(r.startedAffected) ? { startedAffected: ids(r.startedAffected) } : {}), changes, held: ids(r.held), updated: ids(r.updated), added: ids(r.added) });
   }
   return out;
 }
+/** Output readiness is a separate service decision from completion of the producer task. */
+export function deliverableWaitText(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  if (reason === "invalid_deliverable_contract") return "The required output contract is invalid";
+  if (!reason.startsWith("deliverable_")) return null;
+  return ({
+    deliverable_missing: "Waiting for the required output",
+    deliverable_not_declared: "The required output was not declared",
+    deliverable_unreviewed: "The required output is awaiting review",
+    deliverable_unverified: "The required output is awaiting verification",
+    deliverable_producer_unsettled: "Waiting for the task producing the required output",
+    deliverable_ambiguous: "The required output has more than one match",
+    deliverable_stale_evidence: "The evidence for the required output is out of date",
+    deliverable_invalid_evidence: "The evidence for the required output is invalid",
+  } as Record<string, string>)[reason] ?? "The required output could not be confirmed";
+}
+
 /** Why a not-started member has no place in the order, in words. Unknown codes stay generic rather than guessed. */
 export function orderReasonText(reason: string | null): string | null {
   if (reason === null) return null;
-  return ({
+  return deliverableWaitText(reason) ?? ({
     task_missing: "Task details not loaded", task_state_unknown: "Task state unknown", sprint_closed: "Sprint closed",
     queue_paused: "Queue paused", queue_held: "Queue held", queue_complete: "Queue complete", queue_blocked: "Queue blocked",
     dependencies_blocked: "Waits for a prerequisite", native_worktree_unavailable: "Worktree unavailable",

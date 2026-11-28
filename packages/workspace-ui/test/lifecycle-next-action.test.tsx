@@ -44,9 +44,10 @@ it("a failed native plan exposes its reason beside Retry, outside the scrollable
   const alert = document.querySelector('[role="alert"]');
   expect(alert?.textContent).toContain(reason);
   expect(alert?.textContent).toContain("While starting the planning task");
-  expect(alert?.textContent).toContain("Change request");
+  const actions = document.querySelector('[aria-label="Planning actions"]');
+  expect(actions?.textContent).toContain("Change request");
   expect(alert?.closest(".sp-body")).toBeNull();
-  control("Retry planning")!.click(); await settle();
+  [...actions!.querySelectorAll("button")].find(button => button.textContent === "Retry planning")!.click(); await settle();
   expect(ops(p)).toEqual(["resume_planning"]);
 });
 
@@ -261,7 +262,7 @@ it("an empty sprint board offers New task for that sprint, already selected", as
 
 it("a new task in a folder without Git works in the folder and offers no branch choices", async () => {
   await mount(world({}, { hasGit: false }), `/m/${LOCAL_MACHINE_ID}/new?project=p`);
-  const worktree = document.querySelector<HTMLInputElement>('input[name="checkout"]')!;
+  const worktree = document.querySelector<HTMLInputElement>('[role="radiogroup"][aria-label="Working folder"] input[type="radio"]')!;
   expect(worktree.disabled).toBe(true);
   expect(text()).toContain("A separate worktree needs a Git repository.");
   expect(text()).not.toContain("Merge into");

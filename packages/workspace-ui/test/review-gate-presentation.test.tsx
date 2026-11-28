@@ -40,6 +40,26 @@ it.each([true, false])("acceptance presentation identifies automatic=%s without 
   expect(text()).not.toContain(automatic ? "accepted by you" : "accepted automatically");
   expect(buttons("Accept v1")).toHaveLength(0);
 });
+it("keeps the merged result after confirmed cleanup and still shows observed drift or an incomplete merge", async () => {
+  const s = withResult("done"), task = s.tasks[0];
+  task.checkout = { kind: "worktree", path: "/linked", branch: "linked", unavailable: true };
+  task.work = "merged";
+  task.acceptance = { version: 1, digest: "digest" };
+  task.integration = { method: "squash", digest: "digest", targetBranch: "main", worktreeCleanup: "removed" };
+  task.workspaceDigest = null;
+  const port = await mount(s, taskPath);
+  const card = () => document.querySelector(".rcard")!.textContent!;
+  expect(card()).toContain("accepted by you");
+  expect(card()).not.toContain("Stale result");
+  for (const [index, patch] of [{ workspaceDigest: "different" }, { status: "ready_to_merge" as const },
+    { integration: { ...task.integration, worktreeCleanup: "retained" } },
+    { result: { ...task.result!, warnings: ["workspace_drift"] } }].entries()) {
+    const state = structuredClone(s);
+    Object.assign(state.tasks[0], patch);
+    port.emit(projection(String(index + 2), state)); await settle();
+    expect(card()).toContain("Stale result");
+  }
+});
 const REPAIR_ASK = "Let the agent fix this and publish a fresh result. Automatic checks it again and finishes the task when it passes.";
 const repairHold = (code: string, reason: string) => ({ kind: "settlement_blocked" as const, taskId: "t", code, reason, needsOwner: true,
   nextActor: "owner" as const, ownerActions: ["allow_repair" as const, "close_as_is" as const], asks: [REPAIR_ASK], holdId: `hold-${code}` });
@@ -85,7 +105,7 @@ it.each(["task_content_unknown", "task_files_changed"])("shows %s in the open ch
   port.emit(projection("2", held)); await settle();
   const panel = document.querySelector<HTMLElement>(".chat-review-hold");
   expect(panel?.textContent).toContain(reason);
-  expect(panel?.closest(".timeline")).toBeNull();
+  expect(panel?.closest(".timeline > .tl-in > .conversation-actions")).not.toBeNull();
   expect(buttons("Let the agent fix it")).toHaveLength(1);
   buttons("Let the agent fix it")[0].click();
   await settle();

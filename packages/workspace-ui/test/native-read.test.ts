@@ -232,6 +232,36 @@ describe("native read path", () => {
     expect(updates).toHaveLength(before);
     stop();
   });
+  it("reads history only once for a delayed native delta covered by the same history snapshot", async () => {
+    const { s, p } = fixture();
+    s.answers["service.capabilities"] = () => ({ methods: ["native.query", "native.board"] });
+    const board = { protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "generation", version: "2", highWatermark: "3",
+      data: { type: "board", value: { items: [wireTask({ executionId: "execution" })], nextCursor: null, highWatermark: "3" } } };
+    s.answers["native.board"] = () => board;
+    let pages = 0;
+    s.answers["native.query"] = raw => {
+      const operation = (raw as { operation: string }).operation;
+      expect(operation).toMatch(/^history\.(earlier|page)$/);
+      const first = ++pages === 1;
+      return { ...board, highWatermark: first ? "4" : "5",
+        data: { type: "history", value: { items: [historyRow(first ? 0 : 1, "assistant", first ? "Already confirmed" : "Newer text")],
+          nextCursor: null, highWatermark: first ? "1" : "2", tailCursor: first ? "tail-old" : "tail-new" } } };
+    };
+    const updates: PortUpdate[] = [], stop = p.subscribe(u => updates.push(u));
+    const taskVersion = (version: string) =>
+      updates.some(u => u.kind === "delta" && u.update.version === version);
+    try {
+      await p.query("capabilities.get", {});
+      await p.query("project.snapshot", {});
+      await vi.waitFor(() => expect(JSON.stringify(updates)).toContain("Already confirmed"));
+      s.send({ type: "native_delta", ...delta("2", "4", "4", "1") });
+      await vi.waitFor(() => expect(taskVersion("4")).toBe(true));
+      expect(pages).toBe(1);
+      s.send({ type: "native_delta", ...delta("3", "5", "5", "2") });
+      await vi.waitFor(() => expect(JSON.stringify(updates)).toContain("Newer text"));
+      expect(pages).toBe(2);
+    } finally { stop(); }
+  });
   it("treats details superseded by a Working task's events as obsolete, not a read failure, and rereads them", async () => {
     const { s, p } = fixture();
     s.answers["service.capabilities"] = () => ({ methods: ["native.query", "native.board"] });
@@ -329,6 +359,143 @@ describe("native read path", () => {
       await vi.waitFor(() => expect(updates).toContainEqual({ kind: "refresh", projectId: "p" }));
       expect(updates.some(u => u.kind === "delta")).toBe(false); stop();
     }
+  });
+  it("merges buffered running updates while publishing both sides of a state change", async () => {
+    const { s, p } = fixture();
+    s.answers["service.capabilities"] = () => ({ methods: ["native.query", "native.board"] });
+    const task = (v: number, recovering = false) => wireTask({ version: String(v), executionId: "execution",
+      lastConfirmedAt: new Date(v * 1000).toISOString(), phase: recovering ? "recovery" : "execution",
+      executionState: recovering ? "recovering" : "running", runtimeState: recovering ? "RECOVERING" : "EXECUTING",
+      waitReason: recovering ? "turn_interrupted" : null });
+    s.answers["native.board"] = () => ({ protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "generation",
+      version: "2", highWatermark: "3", data: { type: "board", value: { items: [task(1)], nextCursor: null, highWatermark: "3" } } });
+    await p.query("capabilities.get", {});
+    await p.query("project.snapshot", {});
+    const updates: PortUpdate[] = [], stop = p.subscribe(u => updates.push(u));
+    try {
+      for (let v = 2; v <= 150; v++) {
+        const sequence = String(v + 2);
+        const event = delta(String(v), sequence, sequence, String(v - 1));
+        event.batch.changes[0].operation = { type: "upsert", data: { kind: "task_projection", data: task(v, v === 75) } };
+        s.send({ type: "native_delta", ...event });
+      }
+      const published = () => updates.flatMap(u => u.kind === "delta" && u.update.scope === "project"
+        ? [[u.update.version, u.update.slice.tasks[0].observedPhase]] : []);
+      await vi.waitFor(() => expect(published()).toEqual([["76", "execution"], ["77", "recovery"], ["152", "execution"]]));
+      expect(updates.some(u => u.kind === "refresh")).toBe(false);
+      expect(s.calls.filter(c => c.operation === "native.board")).toHaveLength(1);
+    } finally { stop(); }
+  });
+  it("drains native updates after the last observer is immediately replaced", async () => {
+    const { s, p } = fixture();
+    await p.query("capabilities.get", {});
+    await p.query("project.snapshot", {});
+    const first = p.subscribe(() => {});
+    const event = { type: "native_delta" as const, ...delta() };
+    s.send(event);
+    first();
+    const updates: PortUpdate[] = [], stop = p.subscribe(u => updates.push(u));
+    try {
+      s.send(event);
+      await vi.waitFor(() => expect(updates.some(u => u.kind === "delta" && u.update.version === "5")).toBe(true));
+      expect(updates.some(u => u.kind === "refresh")).toBe(false);
+    } finally { stop(); }
+  });
+  it("subscribes only for the open conversation, gates pages on the board and recovers a missed cursor", async () => {
+    const {s,p} = fixture();
+    const running = wireTask({executionId:"execution",executionState:"running"});
+    const board = { protocol:{major:2,mapping:2},projectId:"p",generation:"generation",version:"2",highWatermark:"3",
+      data:{type:"board",value:{items:[running],nextCursor:null,highWatermark:"3"}} };
+    const revision = "5".repeat(64);
+    s.answers["service.capabilities"] = () => ({methods:["native.query","native.board","native.history.follow"]});
+    s.answers["capabilities.get"] = () => capabilitiesWire(["capabilities.get","project.snapshot","history.page","decisions.list"],13);
+    s.answers["native.board"] = () => board;
+    s.answers["decisions.list"] = () => ({items:[],nextCursor:null,highWatermark:"0",decisionRevision:revision});
+    s.answers["native.query"] = () => ({...board,data:{type:"history",value:{items:[historyRow(4,"assistant","Fallback")],
+      nextCursor:null,highWatermark:"5",decisionRevision:revision,tailCursor:"tail-5"}}});
+    const end = vi.fn(), follow = vi.fn<NonNullable<typeof s.transport.followHistory>>(() => end);
+    s.transport.followHistory = follow;
+    const updates: PortUpdate[] = [], stop = p.subscribe(u=>updates.push(u));
+    let release = p.interest!("p","facts","task-1",true);
+    const packet = (throughSequence: string, fromCursor: string | null, position: number, text: string) => ({
+      type:"native_history_page",projectId:"p",taskId:"task-1",executionId:"execution",generation:"generation",throughSequence,fromCursor,
+      page:{items:[historyRow(position-1,"assistant",text)],nextCursor:null,prevCursor:null,tailCursor:"tail-"+position,
+        highWatermark:String(position),decisionRevision:revision},
+      decisions:{items:[],nextCursor:null,highWatermark:"0",decisionRevision:revision},
+    });
+    const transcript = () => JSON.stringify(updates.filter(u=>u.kind==="conversation"));
+    try {
+      await p.query("capabilities.get",{});
+      await p.query("project.snapshot",{});
+      await vi.waitFor(()=>expect(follow).toHaveBeenCalledTimes(1));
+      const [request, receive] = follow.mock.calls[0];
+      expect(request).toMatchObject({projectId:"p",taskId:"task-1",executionId:"execution",generation:"generation",cursor:null});
+      receive(packet("3",null,1,"First delivered"));
+      await vi.waitFor(()=>expect(transcript()).toContain("First delivered"));
+      receive(packet("5","tail-1",2,"Awaiting the board"));
+      expect(transcript()).not.toContain("Awaiting the board");
+      s.send({type:"native_delta",...delta()});
+      await vi.waitFor(()=>expect(transcript()).toContain("Awaiting the board"));
+      expect(s.calls.filter(c=>c.operation==="native.query")).toHaveLength(0);
+      release();
+      expect(end).toHaveBeenCalledTimes(1);
+      receive(packet("6","tail-2",3,"Retired view"));
+      expect(transcript()).not.toContain("Retired view");
+      release = p.interest!("p","facts","task-1",true);
+      expect(follow.mock.calls[1][0].cursor).toBe("tail-2");
+      follow.mock.calls[1][1](packet("6","different-cursor",4,"Untrusted row"));
+      await vi.waitFor(()=>expect(s.calls.some(c=>c.operation==="native.query")).toBe(true));
+      expect(transcript()).not.toContain("Untrusted row");
+    } finally {release();stop();}
+  });
+  it("accepts only bounded, identity-matched history hints and keeps a valid batch without them", () => {
+    const head = { taskId: "task-1", executionId: "execution", position: "9007199254740993", questionsEmpty: true };
+    expect(nativeDelta({ ...delta(), historyHeads: [head] })?.historyHeads).toEqual([head]);
+    for (const heads of [[{ ...head, executionId: "different" }], [{ ...head, position: "01" }],
+      [{ ...head, questionsEmpty: "true" }], [head, head], Array(65).fill(head)]) {
+      expect(nativeDelta({ ...delta(), historyHeads: heads })).toEqual(delta());
+    }
+  });
+
+  it("skips duplicate text heads, leads on new text and still reads when questions are unknown", async () => {
+    const { s, p } = fixture();
+    s.answers["service.capabilities"] = () => ({ methods: ["native.query", "native.board"] });
+    s.answers["capabilities.get"] = () => capabilitiesWire(["capabilities.get", "project.snapshot", "history.page", "decisions.list"], 12);
+    const running = wireTask({ executionId: "execution", executionState: "running" });
+    const board = { protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "generation", version: "2", highWatermark: "3",
+      data: { type: "board", value: { items: [running], nextCursor: null, highWatermark: "3" } } };
+    s.answers["native.board"] = () => board;
+    let pages = 0, position = 1, watermark = 3;
+    const decisionRevision = "0".repeat(64);
+    s.answers["decisions.list"] = () => ({ items: [], nextCursor: null, highWatermark: "0", decisionRevision });
+    s.answers["native.query"] = () => {
+      pages++;
+      return { ...board, highWatermark: String(watermark), data: { type: "history",
+        value: { items: [historyRow(position, "assistant", "Head " + position)], nextCursor: null,
+          highWatermark: String(position), tailCursor: "tail-" + position, decisionRevision } } };
+    };
+    const updates: PortUpdate[] = [], stop = p.subscribe(u => updates.push(u));
+    const notify = async (version: number, questionsEmpty: boolean) => {
+      watermark = version + 2;
+      const event = delta(String(version), String(watermark), String(watermark), String(version - 1));
+      event.batch.changes[0].operation = { type: "upsert", data: { kind: "task_projection", data: { ...running, version: String(version) } } };
+      event.historyHeads = [{ taskId: "task-1", executionId: "execution", position: String(position), questionsEmpty }];
+      s.send({ type: "native_delta", ...event });
+      await vi.waitFor(() => expect(updates.some(u => u.kind === "delta" && u.update.version === String(watermark))).toBe(true));
+    };
+    try {
+      await p.query("capabilities.get", {});
+      await p.query("project.snapshot", {});
+      await vi.waitFor(() => expect(JSON.stringify(updates)).toContain("Head 1"));
+      await notify(2, true);
+      expect(pages).toBe(1);
+      position = 2;
+      await notify(3, true);
+      await vi.waitFor(() => expect(JSON.stringify(updates)).toContain("Head 2"));
+      expect(pages).toBe(2);
+      await notify(4, false);
+      await vi.waitFor(() => expect(pages).toBe(3));
+    } finally { stop(); }
   });
   it("rejects malformed or identity-conflicting batches before applying anything", () => {
     expect(nativeDelta(delta())).not.toBeNull();

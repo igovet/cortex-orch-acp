@@ -160,15 +160,27 @@ pub(super) fn sprint_read(
         crate::native_documents::authenticate(store, credential, identity)?;
         return crate::native_commands::defer_json(store, identity, value);
     }
+    let root = store.key().root();
     let scope = store
-        .read(|db| Scope::load(db, state, &identity.task))?
+        .read(|db| Scope::load(db, state, root, &identity.task))?
         .ok_or(CoreError::Refused("sprint_membership_required"))?;
     let value = match name {
         "sprint_graph" => scope.graph(args)?,
-        "sprint_task_result" => sprint_result::read(store, &scope, args, recipient)?,
+        "sprint_task_result" => match (
+            args["deliverable_name"].as_str(),
+            args["deliverable_version"].as_str(),
+        ) {
+            (None, None) => sprint_result::read(store, &scope, args, recipient)?,
+            (Some(name), Some(version)) if args["report_id"].is_null() && args["cursor"].is_null() => {
+                let producer = args["member_id"].as_str().ok_or(CoreError::Refused("invalid_arguments"))?;
+                scope.member(producer)?;
+                crate::machine::sprint_deliverables::read(store, state, &identity.task, producer, name, version)?
+            }
+            _ => return Err(CoreError::Refused("invalid_arguments")),
+        },
         _ => return Err(CoreError::Refused("tool_refused")),
     };
-    let current = store.read(|db| Scope::load(db, state, &identity.task))?;
+    let current = store.read(|db| Scope::load(db, state, root, &identity.task))?;
     if !current
         .as_ref()
         .is_some_and(|current| scope.same_members(current))
@@ -176,6 +188,25 @@ pub(super) fn sprint_read(
         return Err(CoreError::Refused("sprint_membership_changed"));
     }
     crate::native_documents::authenticate(store, credential, identity)?;
+    if name == "sprint_task_result" && value["binding_status"] == "prospective_replan" {
+        let token = value["binding_token"].as_str().ok_or(CoreError::Refused("deliverable_binding_missing"))?;
+        store.write(|db| {
+            let auth = cortex_core::channels::authenticate(db, &credential.channel_id, credential.secret(), true)?;
+            if &auth != identity || auth.stage.is_some() {
+                return Err(CoreError::Refused("channel_identity_changed"));
+            }
+            let current = cortex_core::deliverables::read_for_consumer(
+                store, db, &identity.task, args["member_id"].as_str().unwrap(),
+                args["deliverable_name"].as_str().unwrap(), args["deliverable_version"].as_str().unwrap(),
+            )?;
+            if current["binding_token"] != token || current["binding_status"] != "prospective_replan" {
+                return Err(CoreError::Refused("deliverable_binding_changed"));
+            }
+            cortex_core::lifecycle::event_tx(db, &identity.task, "SPRINT_INPUT_PROSPECTIVE_READ",
+                json!({"binding_token":token,"channel_id":credential.channel_id}))?;
+            Ok(())
+        })?;
+    }
     crate::native_commands::defer_json(store, identity, value)
 }
 
@@ -185,6 +216,9 @@ pub(super) fn sprint_read(
 /// not fit a batch item or the inline budget never hides the outcomes.
 pub(super) fn plan_outcomes(value: &Value) -> Value {
     let mut compact = json!({"state":value["state"],"revision":value["revision"]});
+    if let Some(advice) = value.get("previous_consultation") {
+        compact["previous_consultation"] = advice.clone();
+    }
     if !value["plan_summary"]["outcomes"].is_null() {
         compact["plan_outcomes"] = value["plan_summary"]["outcomes"].clone();
         compact["plan_outcomes_note"] = value["plan_summary"]["outcomes_note"].clone();

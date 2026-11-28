@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Changed: Each project/channel stores SQLite, Markdown and drafts in its private XDG state directory. Linked worktrees share that store. The checkout retains a location marker, so a checkout archive alone does not contain task history. See [storage and recovery](docs/project/storage.md#where-the-database-lives-and-how-it-moves).
+
 - Changed: A command's start no longer waits for a project walk or digest. Landlock preparation takes the project's secret files from a per-checkout service index (the last finished walk plus a fresh top-level read, refreshed in the background) and looks for none when the grant is the whole checkout. The "before" project digest and dirty-path listing run beside the launch; one still running at the payload's release is checked by an inode change-time sweep from that instant, which keeps it, drops its digest or attributes the touched paths. The digest skips Git-ignored files, which never fed it. `digest_ms` and `tree_walk_ms` are no longer launch stages; the finish observation records `before_observation`.
 
 - Changed: Workspace invalidation hooks coalesce per transaction: the first write to a bound task or session in a transaction bumps versions and appends the outbox events once, instead of once per written row (a 50-row batch costs about 1.5 times an unhooked one, down from 4.7). Public versions of a task advance once per commit, not once per row.

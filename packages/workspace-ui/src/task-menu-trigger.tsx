@@ -18,10 +18,13 @@ function afterRelease(open: () => void) {
 
 /** Keep secondary clicks and context keys separate from link activation and selection. */
 export function taskContextMenu(taskId: () => string | undefined) {
-  const ws = useWs();
+  return rowContextMenu(taskId, useWs().openTaskMenu);
+}
+
+export function rowContextMenu<T>(targetOf: () => T | undefined, open: (target: T, trigger: HTMLElement, point?: { x: number; y: number }) => void) {
   return {
     onContextMenu(e: MouseEvent & { currentTarget: HTMLElement }) {
-      const id = taskId();
+      const id = targetOf();
       if (!id) return;
       e.preventDefault();
       const target = e.target instanceof Element ? e.target.closest<HTMLElement>("a,button") : null;
@@ -29,15 +32,15 @@ export function taskContextMenu(taskId: () => string | undefined) {
       const point = e.button === 2 || e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : undefined;
       // Where the context menu comes on the press (Linux), the release that follows lands outside the menu and its popover
       // light dismiss closed it at once. With the button still held, the menu opens once the press has ended.
-      if (e.buttons & 2) afterRelease(() => ws.openTaskMenu(id, trigger, point));
-      else ws.openTaskMenu(id, trigger, point);
+      if (e.buttons & 2) afterRelease(() => open(id, trigger, point));
+      else open(id, trigger, point);
     },
     onKeyDown(e: KeyboardEvent & { currentTarget: HTMLElement }) {
-      const id = taskId();
+      const id = targetOf();
       if (!id || e.defaultPrevented) return;
       if (e.key !== "ContextMenu" && !(e.shiftKey && e.key === "F10")) return;
       e.preventDefault();
-      ws.openTaskMenu(id, e.target instanceof HTMLElement ? e.target : e.currentTarget);
+      open(id, e.target instanceof HTMLElement ? e.target : e.currentTarget);
     },
   };
 }

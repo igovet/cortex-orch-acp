@@ -1885,7 +1885,7 @@ impl Runtime {
             let runtime = self.clone();
             return tokio::spawn(async move {
                 let (_slot, _serial) = (slot, serial);
-                runtime.apply_control(project, request, capture).await
+                runtime.apply_control(project, request, capture, None).await
             }).await.map_err(|_| failure("native_control_outcome_unknown"))?;
         }
         // Retain the operation if its socket/window disappears. Unknown effects are
@@ -1901,18 +1901,36 @@ impl Runtime {
                 &runtime.controls
             };
             let _serial = lane.lock().await;
-            let result = runtime.apply_control(project, request, capture).await;
+            let result = runtime.apply_control(project, request, capture, None).await;
             let _ = send.send(result);
         });
         reply
             .await
             .map_err(|_| failure("native_control_outcome_unknown"))?
     }
+
+    pub(super) async fn control_planning_prompt(
+        self: &Arc<Self>,
+        project: String,
+        request: Value,
+        fence: crate::machine::task_rework::SprintPlanningPrompt,
+    ) -> io::Result<Value> {
+        if self.host.workspace_state.is_none() {
+            return Err(failure("planning_observation_stale"));
+        }
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let _serial = runtime.controls.lock().await;
+            runtime.apply_control(project, request, None, Some(fence)).await
+        }).await.map_err(|_| failure("native_control_outcome_unknown"))?
+    }
+
     async fn apply_control(
         self: &Arc<Self>,
         project: String,
         request: Value,
         capture: Option<cortex_core::input::Capture>,
+        planning: Option<crate::machine::task_rework::SprintPlanningPrompt>,
     ) -> io::Result<Value> {
         if *self.stop.borrow() {
             return Err(failure("service_stopping"));
@@ -1959,7 +1977,7 @@ impl Runtime {
         }
         let execution = request["executionId"].as_str().unwrap_or_default().to_owned();
         let settle = matches!(request["action"].as_str(), Some("pause" | "stop" | "close_task" | "mark_resolved"));
-        let result = self.apply_runtime_control(project.clone(), request, capture, None, None).await;
+        let result = self.apply_runtime_control(project.clone(), request, capture, None, None, planning).await;
         if settle {
             // Core's checked Stop receipt, not a UI action or a cancelled future,
             // decides whether the merge's writers are gone.
@@ -1975,6 +1993,7 @@ impl Runtime {
         capture: Option<cortex_core::input::Capture>,
         merge: Option<&MergeDispatch<'_>>,
         stop_wait: Option<std::time::Duration>,
+        planning: Option<crate::machine::task_rework::SprintPlanningPrompt>,
     ) -> io::Result<Value> {
         if request.as_object().is_none_or(|m| {
             m.keys().any(|k| {
@@ -2036,9 +2055,10 @@ impl Runtime {
                 let lock = held_lock.clone();
                 let project = project.clone();
                 let execution = request["executionId"].as_str().unwrap_or_default().to_owned();
+                let planning = planning.clone();
                 self.host.executor.publication(move |store| {
                     crate::machine::task_rework::with_plain_prompt_guard(
-                        store, &state, &project, &execution, lock.as_deref(), || Ok(()),
+                        store, &state, &project, &execution, lock.as_deref(), planning.as_ref(), || Ok(()),
                     )
                 }).map_err(err)?.await.map_err(|_| failure("native_host_closed"))?.map_err(err)?;
             }
@@ -2059,7 +2079,7 @@ impl Runtime {
                 if let Some(state) = workspace_state.as_ref().filter(|_| message) {
                     crate::machine::task_rework::with_plain_prompt_guard(
                         s, state, &p, r["executionId"].as_str().unwrap_or_default(),
-                        held_lock.as_deref(), admit,
+                        held_lock.as_deref(), planning.as_ref(), admit,
                     )
                 } else {
                     admit()
@@ -2310,7 +2330,7 @@ impl Runtime {
         let input = json!({"projectId":project,"executionId":execution,"requestId":runtime_key,
             "action":"incoming_prompt","text":text,"attachments":[]});
         let dispatch = MergeDispatch { task, owner_request: request, handoff, initial_goal };
-        let result = self.apply_runtime_control(project.to_owned(), input, capture, Some(&dispatch), None).await;
+        let result = self.apply_runtime_control(project.to_owned(), input, capture, Some(&dispatch), None, None).await;
         if result.is_err() {
             // A route/admission refusal need not strand the owner. A recorded but
             // unconfirmed input stays unknown instead of launching it again.
@@ -2342,10 +2362,12 @@ impl Runtime {
     }
 
     pub(super) async fn reconcile_after_merge_driver(&self, runtime: &str) {
-        if self.host.workspace_state.is_none() || *self.stop.borrow() {
+        if self.host.workspace_state.is_none() {
             return;
         }
-        let _control = self.controls.lock().await;
+        let Some(_control) = self.background_control().await else {
+            return;
+        };
         let task = runtime.to_owned();
         let Ok(read) = self.host.executor.read(move |db| {
             Ok(db.query_row(
@@ -2632,6 +2654,9 @@ impl Runtime {
         let (send, reply) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let _serial = runtime.controls.lock().await;
+            let execution = request["payload"]["executionId"].as_str().unwrap_or_default().to_owned();
+            let key = request["requestId"].as_str().unwrap_or_default().to_owned();
+            let answer_project = project.clone();
             let result = async {
                 if *runtime.stop.borrow() {
                     return Err(failure("service_stopping"));
@@ -2661,6 +2686,14 @@ impl Runtime {
             let committed = result.is_ok();
             let _ = send.send(result);
             if committed {
+                let deferred = runtime.host.executor.read(move |db| {
+                    control::deferred_answer_task(db, &answer_project, &execution, &key)
+                });
+                if let Ok(receive) = deferred {
+                    if let Ok(Ok(Some(task))) = receive.await {
+                        let _ = runtime.settle_task(&task).await;
+                    }
+                }
                 // The answer already has a durable receipt. Continuing other tasks
                 // may take longer than the client deadline; the safety tick retries it.
                 let _ = runtime.continue_owed_tasks().await;
@@ -2764,7 +2797,7 @@ impl Runtime {
                     .min(std::time::Duration::from_secs(60));
                 tokio::select! {
                     _ = tokio::time::sleep(wait) => {},
-                    _ = stop.changed() => return,
+                    _ = stop.wait_for(|stopping| *stopping) => return,
                 }
             }
             loop {
@@ -2777,7 +2810,7 @@ impl Runtime {
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {},
-                    _ = stop.changed() => return,
+                    _ = stop.wait_for(|stopping| *stopping) => return,
                 }
                 delay = (delay * 2).min(std::time::Duration::from_secs(30));
             }
@@ -2870,10 +2903,11 @@ impl Runtime {
             let ready = self
                 .host
                 .executor
-                .write(move |db| {
+                .publication(move |store| store.write(|db| {
                     cortex_core::ownership::check_tx(db, &t, &o)?;
+                    cortex_core::deliverables::continue_tx(store, db, &t)?;
                     automatic::resume_tx(db, &t, event)
-                })?
+                }))?
                 .await
                 .map_err(|_| CoreError::Refused("native_host_closed"))?;
             match ready {
@@ -3003,10 +3037,11 @@ impl Runtime {
         let ready = self
             .host
             .executor
-            .write(move |db| {
+            .publication(move |store| store.write(|db| {
                 cortex_core::ownership::check_tx(db, &t, &o)?;
+                cortex_core::deliverables::require_available(store, db, &t)?;
                 automatic::resume_tx(db, &t, event)
-            })?
+            }))?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))?;
         let evidence = match ready {
@@ -3063,7 +3098,10 @@ impl Runtime {
             self.follow_continuation(task).await;
         }
         for task in tasks {
-            self.continue_owed(task).await?;
+            match self.continue_owed(task).await {
+                Err(error) if error.code().starts_with("deliverable_") => continue,
+                result => result?,
+            }
         }
         Ok(())
     }
@@ -3083,7 +3121,7 @@ impl Runtime {
         let continued = self
             .host
             .executor
-            .write(move |db| {
+            .publication(move |store| store.write(|db| {
                 if !domain::stop_continuation_owed_tx(db, &t)? {
                     let owner = db
                         .query_row(
@@ -3099,6 +3137,7 @@ impl Runtime {
                     domain::stop_tx(db, &t, &code)?;
                     return Ok(Ok(None));
                 }
+                cortex_core::deliverables::require_available(store, db, &t)?;
                 if let Err(error) = domain::native_continue_tx(db, &t) {
                     domain::native_recovery_required_tx(db, &t, error.code())?;
                     return Ok(Ok(None));
@@ -3118,7 +3157,7 @@ impl Runtime {
                     },
                 )?;
                 Ok(Ok(Some((OwnerEpoch { owner, epoch }, goal, answer))))
-            })?
+            }))?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
         let continued = match continued {
@@ -3146,7 +3185,7 @@ impl Runtime {
             "requestId":format!("archive-stop-{key}"),"action":"pause"});
         matches!(
             self.apply_runtime_control(
-                project.to_owned(), request, None, None, Some(std::time::Duration::from_secs(5)),
+                project.to_owned(), request, None, None, Some(std::time::Duration::from_secs(5)), None,
             ).await,
             Ok(receipt) if receipt["outcome"] == "recorded" && receipt["state"] == "PAUSED"
         )

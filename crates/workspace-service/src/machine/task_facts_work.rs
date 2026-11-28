@@ -991,7 +991,11 @@ fn evaluate_exact(
         warnings = true;
         acknowledge = false;
     }
+    let mut shown = std::collections::BTreeSet::new();
+    blocking.retain(|note| shown.insert(note.clone()));
     if !superseded.is_empty() {
+        shown.clear();
+        superseded.retain(|note| shown.insert(note.clone()));
         review_warnings.push(format!(
             "The runtime's own verification of this version passed. {} self-reported check{} it does not cover {} shown for information and do{} not block acceptance:",
             superseded.len(),

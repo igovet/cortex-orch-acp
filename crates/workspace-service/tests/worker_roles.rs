@@ -15,6 +15,9 @@ mod hermetic;
 #[path = "support/namespace_host.rs"]
 mod namespace_host;
 #[allow(unused_imports)]
+#[path = "../../../tests/fixtures/plan-choice-defaults.rs"]
+mod fixture_choices;
+
 use namespace_host::native_effects;
 #[allow(unused_imports)]
 use workspace_service::tool_path;
@@ -36,7 +39,7 @@ use workspace_service::native_sessions::{NativeHost, SessionDriver, SessionRole,
 const PEER: &str = "role-peer";
 const REPO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 const FIXTURE_INSTRUCTIONS: &str = "Fixture route instructions; no model or credentials.";
-/// Every planner-assignable specialist (`lifecycle::plan::role`).
+/// Canonical execution roles and all retained legacy execution identities.
 const PLANNED: [&str; 20] = [
     "explorer",
     "accessibility-auditor",
@@ -254,6 +257,19 @@ async fn role_peer() {
                         };
                         refused |= reply.get("error").is_some();
                         replies.push(reply);
+                        if call["name"] == "escalation_request" {
+                            // An accepted escalation retires the channel. Preserve the
+                            // observed broker reply before awaiting relay shutdown.
+                            record["replies"] = json!(&replies);
+                            std::fs::write(
+                                home.join(format!("turn-{turns}.json")),
+                                record.to_string(),
+                            )
+                            .unwrap();
+                            // Give the real authority monitor time to close the
+                            // retired ACP prompt before the peer sends end_turn.
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                        }
                     }
                     record["replies"] = json!(replies);
                     relay.kill().await.ok();
@@ -518,6 +534,9 @@ async fn turn(d: &SessionDriver, home: &Path, calls: &[Value]) -> Turn {
 /// A fixture call with the goal-outcome fields the advertised contract requires
 /// filled in when the fixture leaves them out (one outcome `goal`, delivered and done).
 fn call(name: &str, mut arguments: Value) -> Value {
+    if name == "plan_submit" {
+        fixture_choices::fill_plan_choices(&mut arguments["plan"]);
+    }
     match name {
         "plan_submit" if arguments["plan"]["outcomes"].is_null() => {
             arguments["plan"]["outcomes"] = json!([{"id":"goal","statement":"The requested work is done"}]);
@@ -555,13 +574,15 @@ fn report_template(role: &str) -> String {
     let profiles: Value =
         serde_json::from_str(&std::fs::read_to_string(format!("{REPO}/profiles.json")).unwrap())
             .unwrap();
-    let name = role.trim_start_matches("worker-").replace('-', "_");
+    let plain = role.trim_start_matches("worker-");
+    let name = plain.replace('-', "_");
     profiles["profiles"]
         .as_array()
         .unwrap()
         .iter()
         .find(|p| p["name"] == name.as_str())
         .and_then(|p| p["report_template"].as_str())
+        .or_else(|| profiles["legacy_report_templates"][format!("worker-{plain}")].as_str())
         .unwrap_or_else(|| panic!("no profile {name}"))
         .to_owned()
 }
@@ -723,7 +744,9 @@ async fn battery(
             compact(&first.meta),
         );
     }
-    let profile = &instructions()["profiles"][&w.role];
+    let base = cortex_core::lifecycle::plan::legacy_profile(&w.role)
+        .map_or(w.role.as_str(), |(base, _)| base);
+    let profile = &instructions()["profiles"][base];
     let body = profile["body"].as_str().unwrap_or("");
     ledger.check(
         role,
@@ -1885,15 +1908,8 @@ fn assignment_of(step: &Value) -> Vec<(String, String, String, String, Vec<Strin
 }
 /// Writers get their own new area; a read-only step must name an existing path.
 fn scope_for(role: &str) -> Vec<String> {
-    let profiles: Value =
-        serde_json::from_str(&std::fs::read_to_string(format!("{REPO}/profiles.json")).unwrap())
-            .unwrap();
-    let name = role.replace('-', "_");
-    let read_only = profiles["profiles"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|p| p["name"] == name.as_str() && p["access_class"] == "read_only");
+    let prefixed = format!("worker-{role}");
+    let read_only = READ_ONLY.contains(&prefixed.as_str());
     if read_only {
         vec!["src".into()]
     } else {
@@ -1904,8 +1920,8 @@ fn objective_for(role: &str) -> String {
     format!("Fixture objective for {role}: observe the project and report.")
 }
 
-/// All 20 plannable specialists behind one explorer predecessor, then the
-/// mandatory reviewer over every node with APPROVE.
+/// A retained pre-migration plan with its legacy identities behind an explorer
+/// predecessor, then a fresh mandatory reviewer over every node with APPROVE.
 async fn all_planned_roles(ledger: &mut Ledger) {
     let p = Project::new("planned");
     let h = p.host().await;
@@ -1926,8 +1942,24 @@ async fn all_planned_roles(ledger: &mut Ledger) {
         tasks.push(json!({"id":role,"role":role,"objective":objective_for(role),"dependencies":["explorer"],
             "scope":scope_for(role),"model":"auto"}));
     }
-    let plan = json!({"tasks":tasks,"verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]});
-    if !coordinator_plan(ledger, &p, &h, &o, task, plan, "plan").await {
+    let plan = call("plan_submit", json!({"plan":{
+        "tasks":tasks,"verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]
+    }}))["arguments"]["plan"].clone();
+    let legacy = p.store().write(|db| {
+        cortex_core::lifecycle::plan::accept_tx(db, task, "fixture", "retained-plan", &plan)?;
+        let raw: String = db.query_row("SELECT plan_json FROM runtime_tasks WHERE task_id=?", [task], |row| row.get(0))?;
+        let mut stored: Value = serde_json::from_str(&raw)?;
+        for node in stored["tasks"].as_array_mut().unwrap() {
+            let node = node.as_object_mut().unwrap();
+            node.remove("competencies");
+            node.remove("base_sufficiency_reason");
+        }
+        db.execute("UPDATE runtime_tasks SET plan_json=? WHERE task_id=?", (stored.to_string(), task))?;
+        Ok(())
+    });
+    ledger.check("runtime", "retained plan fixture", legacy.is_ok(),
+        legacy.as_ref().err().map(|e| e.code()).unwrap_or(""));
+    if legacy.is_err() {
         close(h).await;
         return;
     }
@@ -2068,7 +2100,7 @@ async fn single_review(ledger: &mut Ledger, verdict: &str, engine: EngineKind) {
         .create(task.into(), "Review verdict fixture".into(), "owner".into())
         .await
         .unwrap();
-    let plan = json!({"tasks":[{"id":"work","role":"backend-dev","objective":objective_for("work"),"dependencies":[],
+    let plan = json!({"tasks":[{"id":"work","role":"general","objective":objective_for("work"),"dependencies":[],
         "scope":scope_for("work"),"model":"auto"}],"verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]});
     if !coordinator_plan(ledger, &p, &h, &o, task, plan, &format!("plan-{verdict}")).await {
         close(h).await;
@@ -2206,7 +2238,7 @@ async fn consultant(ledger: &mut Ledger) {
         .create(task.into(), "Consultation fixture".into(), "owner".into())
         .await
         .unwrap();
-    let plan = json!({"tasks":[{"id":"work","role":"backend-dev","objective":objective_for("work"),"dependencies":[],
+    let plan = json!({"tasks":[{"id":"work","role":"general","objective":objective_for("work"),"dependencies":[],
         "scope":scope_for("work"),"model":"auto"}],"verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]});
     if !coordinator_plan(ledger, &p, &h, &o, task, plan.clone(), "plan-consult").await {
         close(h).await;
@@ -2228,27 +2260,98 @@ async fn consultant(ledger: &mut Ledger) {
         .dispatch(
             task.into(),
             o.clone(),
-            SessionRole::Worker { assignment: a },
+            SessionRole::Worker {
+                assignment: a.clone(),
+            },
             route,
         )
         .await
         .unwrap();
-    let t = turn(
-        &d,
-        &home,
-        &[call(
-            "escalation_request",
-            json!({"reason":"Fixture needs an independent opinion.",
-        "question":"Is the fixture approach sound?","report_ids":[],"request_key":"escalate"}),
-        )],
-    )
-    .await;
+    let proposal = json!({
+        "reason":"Choose whether to keep the current fixture approach or revise it. The work packet does not establish whether the approach is sound.",
+        "question":"Should the fixture keep the current approach or revise it?",
+        "report_ids":[],
+        "request_key":"escalate"
+    });
+    let t = turn(&d, &home, &[call("escalation_request", proposal.clone())]).await;
+    let receipt = json!({
+        "accepted":true,"decision":"senior_consultation","scope_granted":false,"state":"RECOVERING"
+    });
     ledger.check(
         "worker-senior-consultant",
-        "escalation_request accepted",
-        t.replies.first().map(classify).is_some_and(|r| r.is_ok()),
-        t.replies.first().map(compact).unwrap_or_default(),
+        "retired prompt stops as expected",
+        t.stop == "error:native_turn_outcome_unknown",
+        &t.stop,
     );
+    let request_digest = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&json!({"operation":"escalation_request","payload":proposal}))
+                .unwrap(),
+        )
+    );
+    let durable: (i64, i64) = p
+        .store()
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT
+                    (SELECT count(*) FROM runtime_requests r
+                     JOIN trusted_channels c ON c.task_id=r.task_id AND c.channel_id=r.actor
+                     JOIN delegation_provisioning p ON p.task_id=c.task_id AND p.channel_id=c.channel_id
+                       AND p.attempt_id=c.attempt_id AND p.owner_epoch=c.owner_epoch
+                     WHERE r.task_id=?1 AND c.assignment_id=?2 AND p.engine_session_ref=?3
+                       AND c.revoked_at IS NOT NULL AND r.operation='escalation_request'
+                       AND r.request_key='escalate' AND r.digest=?4 AND r.result_json=?5),
+                    (SELECT count(*) FROM runtime_events e
+                     JOIN runtime_tasks t ON t.task_id=e.task_id
+                     WHERE e.task_id=?1 AND e.type='REPLAN_REQUEST_ACCEPTED'
+                       AND json_extract(e.payload_json,'$.operation')='escalation_request'
+                       AND json_extract(e.payload_json,'$.revision')=t.revision
+                       AND json_extract(e.payload_json,'$.proposal')=json(?6)
+                       AND json_extract(e.payload_json,'$.decision')=json(?5)
+                       AND t.state='RECOVERING')",
+                (
+                    task, &a, d.session_id(), &request_digest, receipt.to_string(),
+                    proposal.to_string(),
+                ),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    ledger.check(
+        "worker-senior-consultant",
+        "escalation committed once for this attempt",
+        durable == (1, 1),
+        format!("bound receipts {}, accepted events {}", durable.0, durable.1),
+    );
+    match t.replies.as_slice() {
+        [reply] => {
+            ledger.check(
+                "worker-senior-consultant",
+                "escalation broker receipt",
+                reply["jsonrpc"] == "2.0"
+                    && reply["id"] == 2
+                    && reply["result"]["isError"] == false
+                    && classify(reply).is_ok_and(|result| result["structuredContent"] == receipt),
+                compact(reply),
+            );
+        }
+        [] if durable == (1, 1) && t.stop == "error:native_turn_outcome_unknown" => {
+            ledger.not_run(
+                "worker-senior-consultant",
+                "escalation broker receipt",
+                "accepted request revoked the session before the peer observed its reply",
+            );
+        }
+        replies => {
+            ledger.check(
+                "worker-senior-consultant",
+                "escalation broker receipt",
+                false,
+                format!("prompt stop {}; replies {replies:?}", t.stop),
+            );
+        }
+    }
     d.shutdown().await.ok();
     let mut state = Value::Null;
     for _ in 0..4 {
@@ -2333,7 +2436,7 @@ async fn consultant(ledger: &mut Ledger) {
 /// Structural refusals are bounded: after two, the worker's report is accepted as it
 /// is and marked REPORT_STRUCTURE_INCOMPLETE for the reviewer and the coordinator.
 async fn structure_bound(ledger: &mut Ledger) {
-    let role = "worker-backend-dev@structure";
+    let role = "worker-general@structure";
     let p = Project::new("structure");
     let h = p.host().await;
     let task = "structure";
@@ -2345,7 +2448,7 @@ async fn structure_bound(ledger: &mut Ledger) {
         )
         .await
         .unwrap();
-    let plan = json!({"tasks":[{"id":"work","role":"backend-dev","objective":objective_for("work"),"dependencies":[],
+    let plan = json!({"tasks":[{"id":"work","role":"general","objective":objective_for("work"),"dependencies":[],
         "scope":scope_for("work"),"model":"auto"}],"verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]});
     if !coordinator_plan(ledger, &p, &h, &o, task, plan, "plan-structure").await {
         close(h).await;
@@ -2416,7 +2519,7 @@ async fn structure_bound(ledger: &mut Ledger) {
             && third["report_structure"]["status"] == "REPORT_STRUCTURE_INCOMPLETE"
             && third["report_structure"]["missing"]
                 == json!([
-                    "## Changes",
+                    "## Evidence and work",
                     "## Verification",
                     "## Risks and remaining work"
                 ]),

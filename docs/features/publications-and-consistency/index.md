@@ -3,11 +3,14 @@
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
-There is one project-local `.cortex/cortex.sqlite3` metadata index. Published
-Markdown bodies live alongside it under `.cortex/`. Each task has one real
+Each logical project has one SQLite metadata index per channel. Published
+Markdown bodies live alongside it in the [private home store](../../project/storage.md#where-the-database-lives-and-how-it-moves). Each task has one real
 `pipeline.md`, newest edition first, with older editions below. The runtime alone
-publishes pipeline editions. Worker reports are immutable independent Markdown
+publishes generated pipeline editions, binding the durable file installation to
+its SQLite edition and receipt. Worker reports are immutable independent Markdown
 files, selected using bounded catalogue and content cursors.
+
+Runtime-generated pipeline editions install directly under the publication lock, without first saving and rereading a draft. The filesystem journal binds staged bytes and the previous edition to the SQLite edition and delivery receipt. Recovery checks the exact journal and committed row before preserving a publication or restoring its previous edition. A successful commit can leave cleanup of private scratch files for a later reconciliation. Matching delivery retries reuse the receipt. Worker reports still use the immutable report publication path. See [runtime pipeline publication](../../../crates/cortex-core/src/store/documents.rs) and [journal recovery](../../../crates/cortex-core/src/store/publication.rs).
 
 Workers submit a result with its report as one required top-level plain string,
 never an object. Inline: `result_submit.report` carries the complete Markdown

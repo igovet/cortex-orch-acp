@@ -39,6 +39,36 @@ impl CoreError {
             "project_storage_mismatch" => {
                 "This database belongs to a different project path. Open the project at its original path with its matching store; do not overwrite either store."
             }
+            "store_root_mismatch" => {
+                "This project is bound to a different Cortex storage root. Use the original channel and state directory to reopen it."
+            }
+            "project_store_anchor_missing" => {
+                "This project is missing its storage anchor. Reopen it in writable mode to restore the anchor for the original project, or seek recovery help."
+            }
+            "store_root_unsuitable" => {
+                "Cortex project history needs a private store on a persistent local filesystem. Check the channel's state directory."
+            }
+            "store_relocation_conflict" => {
+                "Cortex found conflicting copies during store relocation. Keep both copies and retry a writable open to reconcile them."
+            }
+            "store_return_pending" => {
+                "An offline return to the project was interrupted. Keep both copies and repeat the same confirmed project-store command."
+            }
+            "store_return_conflict" => {
+                "Cortex could not verify the identity of the database or files being returned to the project. Keep all copies for recovery."
+            }
+            "store_relocation_no_space" => {
+                "Cortex found too little free space to relocate this project store. Free space on the state filesystem and retry."
+            }
+            "store_relocation_pending_publication" => {
+                "A publication needs reconciliation before Cortex can move this project store. Reopen the original project store and resolve the pending publication first."
+            }
+            "store_relocation_linked_workspace" => {
+                "Cortex found a Git workspace inside the original history directory. Keep the original store and resolve the workspace before moving the history."
+            }
+            "relocated_store_restore_unsupported" => {
+                "This format backup cannot replace a relocated project store. Keep the backup and both storage locations for recovery."
+            }
             "busy" => {
                 "The project store is busy. Wait for the other Cortex operation to finish, then try again. Close other Cortex sessions for this project if the store stays busy."
             }

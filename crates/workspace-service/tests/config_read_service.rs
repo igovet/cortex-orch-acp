@@ -143,7 +143,10 @@ impl Fixture {
                 .unwrap(),
         );
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !self.socket().exists() {
+            // bind publishes the pathname before the service sets its private mode.
+            let socket = self.socket();
+            while !fs::symlink_metadata(&socket).is_ok_and(|m| m.permissions().mode() & 0o077 == 0)
+            {
                 assert!(
                     self.child.as_mut().unwrap().try_wait().unwrap().is_none(),
                     "service exited"
@@ -241,6 +244,7 @@ async fn full_socket_reply_matches_the_frozen_oracle_and_delivers_diagnostics() 
     for case in corpus["cases"].as_array().unwrap() {
         let mut f = Fixture::new();
         f.prepare(case);
+        f.write(&f.workspace().join("machine.json"), br#"{"name":"Local"}"#, 0o600);
         f.start().await;
         let before = snapshot(&f.config());
         let home = snapshot(&f.root.join("home"));
@@ -288,6 +292,7 @@ async fn full_socket_reply_matches_the_frozen_oracle_and_delivers_diagnostics() 
         want["config"]["setup"]["opencode"]["status"] = json!("discovery_unavailable");
         want["diagnostics"] = json!(expected_diagnostics);
         // Nothing in these fixtures is launchable, so no background model fetch is started or reported.
+        want["machineName"] = json!("Local");
         want["catalogueRefresh"] = json!({"running":false,"failed":[]});
         assert_eq!(raw, json!({"ok":true,"result":want}), "{}", case["name"]);
         assert_eq!(before, snapshot(&f.config()));
@@ -302,6 +307,7 @@ async fn first_run_and_malformed_storage_never_create_settings_or_fallback() {
     assert!(!f.config().join("cortex").exists());
     let empty = f.read(json!({})).await;
     assert_eq!(empty["ok"], true, "{empty}");
+    assert_eq!(empty["result"]["machineName"], "This machine");
     assert_eq!(empty["result"]["connections"], json!([]));
     assert_eq!(empty["result"]["tokens"]["connections"], "absent");
     assert!(!f.config().join("cortex").exists());

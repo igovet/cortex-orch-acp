@@ -331,11 +331,18 @@ CREATE TABLE IF NOT EXISTS runtime_events (
  created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS runtime_events_task ON runtime_events(task_id,id);
+CREATE INDEX IF NOT EXISTS runtime_events_completed_timing ON runtime_events(type,id) WHERE type='WORKER_COMPLETED';
+CREATE INDEX IF NOT EXISTS runtime_events_delivery_attempt_timing ON runtime_events(type,task_id,json_extract(payload_json,'$.attempt'),id)
+ WHERE type='NATIVE_ATTEMPT_DELIVERY';
 CREATE INDEX IF NOT EXISTS runtime_events_type ON runtime_events(type,task_id,id);
 -- Tool-call lookups (worker history, task facts) name one reference per task; without these
 -- they parse every TOOL_COMPLETED / TOOL_AUTHORIZED / COMMAND_* payload of the task.
 CREATE INDEX IF NOT EXISTS runtime_events_by_tool_call_ref ON runtime_events(task_id, json_extract(payload_json,'$.tool_call_ref'), type, id);
 CREATE INDEX IF NOT EXISTS runtime_events_finished_ref ON runtime_events(task_id, json_extract(payload_json,'$.receipt.tool_call_ref'), id) WHERE type='NATIVE_COMMAND_FINISHED';
+CREATE INDEX IF NOT EXISTS runtime_events_settled_channel_time ON runtime_events(task_id, json_extract(payload_json,'$.channel_id'), created_at) WHERE type='NATIVE_TURN_SETTLED';
+-- Reservation reconstruction uses exact assignment references in these two event types.
+CREATE INDEX IF NOT EXISTS runtime_events_worker_released_assignment ON runtime_events(type, task_id, json_extract(payload_json,'$.assignment_ref')) WHERE type='WORKER_RELEASED';
+CREATE INDEX IF NOT EXISTS runtime_events_access_granted_assignment ON runtime_events(task_id, json_extract(payload_json,'$.assignment_ref')) WHERE type='ACCESS_GRANTED';
 CREATE TABLE IF NOT EXISTS runtime_requests (
  task_id TEXT NOT NULL, request_key TEXT NOT NULL, actor TEXT NOT NULL,
  operation TEXT NOT NULL, digest TEXT NOT NULL, result_json TEXT NOT NULL,
@@ -765,3 +772,19 @@ CREATE TABLE IF NOT EXISTS workspace_outbox (
  recorded_at TEXT NOT NULL, payload_digest TEXT NOT NULL,
  PRIMARY KEY(project_id,sequence)
 );
+
+CREATE TABLE IF NOT EXISTS fact_memory (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+ task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ report_id TEXT NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+ revision INTEGER NOT NULL,
+ assignment_ref TEXT NOT NULL,
+ attempt_ref TEXT NOT NULL,
+ path TEXT NOT NULL,
+ sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+ observation TEXT NOT NULL CHECK(observation IN ('read','write')),
+ failure TEXT CHECK(failure IN ('missing_access','owner_decision','other_role_work','tool_unavailable','check_failed','check_failure_unverified')),
+ failed_check TEXT CHECK(json_type(failed_check)='object'),
+ UNIQUE(task_id, assignment_ref, path, observation)
+);
+CREATE INDEX IF NOT EXISTS fact_memory_path ON fact_memory(path, sequence DESC);

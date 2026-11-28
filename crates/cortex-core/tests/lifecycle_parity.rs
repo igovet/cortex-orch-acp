@@ -30,6 +30,39 @@ fn state(s: &Store) -> String {
     })
     .unwrap()
 }
+
+#[test]
+fn deep_plan_risk_does_not_request_a_consultant() {
+    let project = Project::new();
+    let store = project.open();
+    for (task, count, complexity, scope) in [
+        ("sensitive", 1, "normal", "src/storage/migration.rs"),
+        ("high", 1, "high", "src/button.rs"),
+        ("large", 6, "normal", "src/button.rs"),
+    ] {
+        let nodes: Vec<_> = (0..count).map(|i| json!({
+            "id":format!("work{i}"),"role":"backend-dev","objective":"Proceed",
+            "complexity":complexity,"dependencies":[],"scope":[scope]
+        })).collect();
+        let plan = support::with_goal(&json!({"tasks":nodes,"verification":[["cargo","test"]]}));
+        TaskMachine::new(&store).create(task, "Update project", "owner").unwrap();
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?", [task])?;
+            plan::accept_routed_tx(db, task, "coordinator", "plan", &plan, &json!([]))?;
+            let event: Value = serde_json::from_str(&db.query_row(
+                "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='PLAN_ACCEPTED'",
+                [task], |r| r.get::<_, String>(0),
+            )?)?;
+            assert_eq!(event["strategy"]["mode"], "deep");
+            assert!(event["strategy"]["consultation"].is_null());
+            let nodes = event["plan"]["tasks"].as_array().unwrap();
+            assert_eq!(nodes.len(), count);
+            assert!(nodes.iter().all(|node| node["id"] != "_consultation"));
+            Ok(())
+        }).unwrap();
+    }
+}
+
 fn setup() -> (Project, Store, OwnerEpoch) {
     setup_with_baseline(&evidence('a'))
 }
@@ -64,6 +97,77 @@ fn publish(db: &Transaction<'_>, a: &str, report: &str) -> CoreResult<()> {
     db.execute("INSERT INTO task_events(task_id,event_type,assignment_ref,dedup_key,payload_json,origin,created_at)
         VALUES ('t','worker_result',?,?,?,'runtime','now')",(a,format!("result:{a}"),json!({"report_ref":report}).to_string()))?;
     Ok(())
+}
+
+#[test]
+fn completed_consultation_report_survives_a_plan_without_consultation() {
+    use cortex_core::store::documents::{Publication, Publisher};
+
+    let project = Project::new();
+    let store = project.open();
+    TaskMachine::new(&store).create("t", "goal", "owner").unwrap();
+    let plan = support::with_goal(&json!({
+        "tasks":[{"id":"work","role":"backend-dev","objective":"Update the file",
+            "dependencies":[],"scope":["src"]}],"verification":[["cargo","test"]]
+    }));
+    let proposal = json!({"question":"Which approach should we choose?",
+        "reason":"The project records do not distinguish the two approaches"});
+    let baseline = evidence('a');
+    store.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
+        propose_replan_tx(db, "t", "coordinator", "first", "escalation_request", &proposal)?;
+        settle_recovery_tx(db, "t", TaskState::Planning)?;
+        plan::accept_tx(db, "t", "coordinator", "first-plan", &plan)?;
+        execution_baseline_tx(db, "t", &baseline)?;
+        bind(db, "_consultation", "advice", "advice-attempt", "advice-channel")?;
+        Ok(())
+    }).unwrap();
+
+    let publisher = Publisher::new(&store);
+    let draft = publisher.create_draft("t", "advice-channel", "general", "advice-draft").unwrap();
+    publisher.write_draft("t", "advice-channel", &draft.draft_id,
+        &format!("Cortex draft ID: `{}`\n\nIndependent advice", draft.draft_id)).unwrap();
+    let report = publisher.publish("t", "advice-channel", &draft.draft_id, "advice-report",
+        Publication { title:"Advice",summary:"Use the second approach",author:"worker",
+            source_revision:0,artifacts:json!([]) }).unwrap();
+    let mut observed = baseline;
+    observed.artifacts.insert(report.report_id.clone(), report.sha256.clone());
+    store.write(|db| {
+        // This is the assignment publication marker retained by the result gateway.
+        db.execute("INSERT INTO task_events(task_id,event_type,assignment_ref,dedup_key,payload_json,origin,created_at)
+            VALUES ('t','worker_result','advice','advice-publication',?,'runtime','now')",
+            [json!({"report_ref":report.report_id}).to_string()])?;
+        record_result_tx(db, "t", "advice", &json!({"report_ref":report.report_id,"summary":"Advice","checks":[]}), &observed)?;
+        propose_replan_tx(db, "t", "coordinator", "ordinary", "replan_request", &json!({"reason":"Use the advice"}))?;
+        settle_recovery_tx(db, "t", TaskState::Planning)?;
+        plan::accept_tx(db, "t", "coordinator", "second-plan", &plan)?;
+        Ok(())
+    }).unwrap();
+
+    store.read(|db| {
+        let snapshot = cortex_core::recovery_context::snapshot(db, "t")?;
+        let extra = cortex_core::assignment_brief::extras(db, "t", "work", "worker-backend-dev", "execution", "en")?;
+        for value in [snapshot, extra] {
+            assert_eq!(value["previous_consultation"]["report_id"], report.report_id);
+            assert_eq!(value["previous_consultation"]["sha256"], report.sha256);
+            assert_eq!(value["previous_consultation"]["plan_revision"], 1);
+        }
+        Ok(())
+    }).unwrap();
+
+    let new_basis = json!({"question":proposal["question"],"reason":proposal["reason"],
+        "report_ids":[report.report_id]});
+    store.write(|db| {
+        propose_replan_tx(db, "t", "coordinator", "new", "escalation_request", &new_basis)?;
+        settle_recovery_tx(db, "t", TaskState::Planning)?;
+        plan::accept_tx(db, "t", "coordinator", "third-plan", &plan)?;
+        let raw:String = db.query_row("SELECT payload_json FROM runtime_events WHERE task_id='t'
+            AND type='CONSULTATION_REQUIRED' ORDER BY id DESC LIMIT 1", [], |row| row.get(0))?;
+        let packet: Value = serde_json::from_str(&raw)?;
+        assert_eq!(packet["dependency_reports"][0]["report_id"], report.report_id);
+        assert_eq!(packet["dependency_reports"][0]["sha256"], report.sha256);
+        Ok(())
+    }).unwrap();
 }
 fn finish_execution(s: &Store, e: &mut EvidenceSnapshot) {
     e.artifacts.insert("r".into(), "f".repeat(64));
@@ -603,7 +707,7 @@ fn replans_and_coordinator_returns_are_durable_and_user_bounded() {
         })
         .unwrap();
     }
-    // No replan limit: the fourth replan changes approach to a senior consultation.
+    // Ordinary replan requests remain replan requests across revisions.
     assert_eq!(
         s.write(|db| propose_replan_tx(
             db,
@@ -614,7 +718,7 @@ fn replans_and_coordinator_returns_are_durable_and_user_bounded() {
             &json!({})
         ))
         .unwrap()["decision"],
-        "senior_consultation"
+        "replan"
     );
 }
 // Mirrors tests/test_runtime_task_machine.py::test_plan_atomic_and_idempotent,\n// additionally exercising stale task owner fencing through the writer executor.
@@ -1253,113 +1357,57 @@ fn metadata_only_or_incomplete_observations_refuse_the_waiver() {
         assert_eq!(state(&s), "REVIEWING", "{metadata_only}/{incomplete}");
     }
 }
-/// Owner store 2026-11-21: cross-cutting documentation findings on a QA node were
-/// routed to QA and the coordinator had to replan them. A fix now goes to the
-/// specialist for the files its findings name: documentation to the technical
-/// writer, anything else to the node's own writing role.
+// Fix specialization is based on the affected files and retained author.
 #[test]
-fn a_review_fix_goes_to_the_specialist_for_the_files_its_findings_name() {
-    for (findings, role) in [
-        (
-            json!([{"node":"n","cross_cutting":true,"files":["SECURITY.md","docs/a.md"],"fix":"Match the gh text to the code"}]),
-            "worker-technical-writer",
-        ),
-        (
-            json!([{"node":"n","cross_cutting":true,"files":["SECURITY.md","src/lib.rs"],"fix":"Fix both"}]),
-            "NODE",
-        ),
-        (
-            json!([{"node":"n","cross_cutting":true,"files":["crates/x/tests/flow.rs","ui/a.test.tsx"],"fix":"Fix the tests"}]),
-            "worker-qa-engineer",
-        ),
+fn new_review_fixes_use_general_with_domain_competencies() {
+    for (original, finding, expected) in [
+        ("worker-qa-engineer",
+            json!({"files":["SECURITY.md","docs/a.md"],"fix":"Update docs"}),
+            json!(["documentation"])),
+        ("worker-qa-engineer",
+            json!({"files":["crates/a/src/lib.rs"],"fix":"Fix code"}),
+            json!(["backend"])),
+        ("worker-qa-engineer",
+            json!({"files":["packages/ui/src/view.tsx","crates/a/src/lib.rs"],"fix":"Fix both"}),
+            json!(["backend","frontend"])),
+        ("worker-data-engineer",
+            json!({"files":["crates/a/tests/flow.rs","ui/a.test.tsx"],"fix":"Repair tests"}),
+            json!(["testing"])),
+        ("worker-data-engineer",
+            json!({"files":["src/data.rs"],"fix":"Repair conversion","role":"devops-engineer"}),
+            json!(["data"])),
+        ("worker-qa-engineer",
+            json!({"files":["scripts/build.sh"],"fix":"Fix the build script","role":"general"}),
+            json!(["operations"])),
+        ("worker-general",
+            json!({"files":["packages/ui/src/view.tsx"],"fix":"Fix product UI"}),
+            json!(["frontend"])),
     ] {
         let (_p, s, _) = setup();
         let mut e = evidence('b');
         finish_execution(&s, &mut e);
-        let (own, fixed) = s
-            .write(|db| {
-                add_review_tx(db, "t", &e)?;
-                db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE node_id='_review_1'",
-                    [json!({"verdict":"REQUEST_CHANGES","summary":"s","report_ref":"review","findings":findings}).to_string()])?;
-                cortex_core::lifecycle::review::advance_tx(db, "t")?;
-                let own: String = db.query_row("SELECT role FROM runtime_nodes WHERE node_id='n'", [], |r| r.get(0))?;
-                let fixed: String = db.query_row("SELECT role FROM runtime_nodes WHERE node_id='_fix_1_n'", [], |r| r.get(0))?;
-                Ok((own, fixed))
-            })
-            .unwrap();
-        assert_eq!(fixed, if role == "NODE" { own.as_str() } else { role });
-    }
-}
-
-/// Product code a review names on a testing or writing node goes to a developer
-/// chosen by the files, never back to QA or the technical writer.
-#[test]
-fn code_findings_on_a_qa_node_go_to_a_developer_for_the_files() {
-    for (files, role) in [
-        (json!(["crates/a/src/lib.rs"]), "worker-backend-dev"),
-        (
-            json!(["packages/ui/src/view.tsx", "packages/ui/src/view.css"]),
-            "worker-frontend-dev",
-        ),
-        (
-            json!(["packages/ui/src/view.tsx", "crates/a/src/lib.rs"]),
-            "worker-fullstack-dev",
-        ),
-        (json!(["scripts/build.sh"]), "worker-devops-engineer"),
-        (json!(["crates/a/tests/flow.rs"]), "worker-qa-engineer"),
-    ] {
-        let (_p, s, _) = setup();
-        let mut e = evidence('b');
-        finish_execution(&s, &mut e);
-        let fixed = s
-            .write(|db| {
-                db.execute("UPDATE runtime_nodes SET role='worker-qa-engineer' WHERE node_id='n'", [])?;
-                add_review_tx(db, "t", &e)?;
-                db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE node_id='_review_1'",
-                    [json!({"verdict":"REQUEST_CHANGES","summary":"s","report_ref":"review","findings":[
-                        {"node":"n","cross_cutting":true,"files":files,"fix":"Fix it"}]}).to_string()])?;
-                cortex_core::lifecycle::review::advance_tx(db, "t")?;
-                Ok(db.query_row("SELECT role FROM runtime_nodes WHERE node_id='_fix_1_n'", [], |r| r.get::<_, String>(0))?)
-            })
-            .unwrap();
-        assert_eq!(fixed, role, "{files}");
-    }
-}
-
-/// The reviewer can name the writing specialist for a fix (any domain, for
-/// example a render pipeline); the runtime keeps it only when every finding of
-/// the fix agrees and the role writes, and otherwise chooses from the files.
-#[test]
-fn a_fix_goes_to_the_writing_specialist_its_findings_propose() {
-    for (findings, role) in [
-        (
-            json!([{"node":"n","cross_cutting":true,"files":["render/scene.json"],"fix":"Re-render the intro","role":"general"}]),
-            "worker-general",
-        ),
-        (
-            json!([{"node":"n","cross_cutting":true,"files":["src/lib.rs"],"fix":"A","role":"devops-engineer"},
-                   {"node":"n","cross_cutting":true,"files":["src/lib.rs"],"fix":"B","role":"frontend-dev"}]),
-            "worker-backend-dev",
-        ),
-        (
-            json!([{"node":"n","cross_cutting":true,"files":["docs/a.md"],"fix":"A","role":"security-auditor"}]),
-            "worker-technical-writer",
-        ),
-    ] {
-        let (_p, s, _) = setup();
-        let mut e = evidence('b');
-        finish_execution(&s, &mut e);
-        let fixed = s
-            .write(|db| {
-                db.execute("UPDATE runtime_nodes SET role='worker-qa-engineer' WHERE node_id='n'", [])?;
-                add_review_tx(db, "t", &e)?;
-                db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE node_id='_review_1'",
-                    [json!({"verdict":"REQUEST_CHANGES","summary":"s","report_ref":"review","findings":findings}).to_string()])?;
-                cortex_core::lifecycle::review::advance_tx(db, "t")?;
-                Ok(db.query_row("SELECT role FROM runtime_nodes WHERE node_id='_fix_1_n'", [], |r| r.get::<_, String>(0))?)
-            })
-            .unwrap();
-        assert_eq!(fixed, role, "{findings}");
+        s.write(|db| {
+            db.execute("UPDATE runtime_nodes SET role=? WHERE node_id='n'", [original])?;
+            if original == "worker-general" {
+                cortex_core::lifecycle::plan::record_node_routing_tx(db, "t", "n",
+                    &json!({"competencies":["testing"],"work_kind":"testing"}))?;
+            }
+            add_review_tx(db, "t", &e)?;
+            let mut finding = finding.clone();
+            finding["node"] = json!("n");
+            finding["cross_cutting"] = json!(true);
+            db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE node_id='_review_1'",
+                [json!({"verdict":"REQUEST_CHANGES","summary":"s","report_ref":"review","findings":[finding]}).to_string()])?;
+            cortex_core::lifecycle::review::advance_tx(db, "t")?;
+            let own: String = db.query_row("SELECT role FROM runtime_nodes WHERE node_id='n'", [], |r| r.get(0))?;
+            let fixed: String = db.query_row("SELECT role FROM runtime_nodes WHERE node_id='_fix_1_n'", [], |r| r.get(0))?;
+            let plan: String = db.query_row("SELECT plan_json FROM runtime_tasks WHERE task_id='t'", [], |r| r.get(0))?;
+            assert_eq!(own, original, "retained author identity");
+            assert_eq!(fixed, "worker-general", "{finding}");
+            let routing = cortex_core::lifecycle::plan::node_routing(&serde_json::from_str(&plan)?, "_fix_1_n");
+            assert_eq!(routing["competencies"], expected, "{finding}");
+            Ok(())
+        }).unwrap();
     }
 }
 
@@ -1493,7 +1541,7 @@ fn an_approved_stage_that_misses_the_goal_is_never_verified() {
                 db.execute("UPDATE capacity_reservations SET state='released'", [])?;
                 let delivered_now = json!([{"id":"prepare","statement":"The changes are prepared"},{"id":"push","statement":"The changes are pushed to GitHub"}]);
                 let next = json!({"verification":[["cargo","test"]],"outcomes":delivered_now,
-                    "tasks":[{"id":"push","role":"devops-engineer","objective":"Push","dependencies":[],"scope":["."],"delivers":["prepare","push"]}]});
+                    "tasks":[{"id":"push","role":"devops-engineer","objective":"Push","dependencies":[],"scope":["."],"delivers":["prepare","push"],"competencies":["operations"]}]});
                 // A plan that leaves the owed command out is accepted: the runtime appends it.
                 let accepted = plan::accept_tx(db, "t", "c", "next", &next)?;
                 assert_eq!(accepted["verification_kept_by_runtime"], json!([{"argv":["cargo","test","-p","x"],"reason":"goal_not_met"}]));
@@ -1518,6 +1566,12 @@ fn an_approved_stage_that_misses_the_goal_is_never_verified() {
         assert_eq!(verifications(&s), 1);
         e.workers.insert("xa".into(), ProcessObservation::ConfirmedExited);
         e.workers.insert("xr".into(), ProcessObservation::ConfirmedExited);
+        s.write(|db| {
+            db.execute("UPDATE runtime_tasks SET synthesis='Unbound text' WHERE task_id='t'", [])?;
+            assert_eq!(complete_tx(db, "t", &e).unwrap_err().code(), "completion_goal_not_met");
+            db.execute("UPDATE runtime_tasks SET synthesis='Done' WHERE task_id='t'", [])?;
+            Ok(())
+        }).unwrap();
         s.write(|db| complete_tx(db, "t", &e)).unwrap();
         assert_eq!(state(&s), "COMPLETED");
     }

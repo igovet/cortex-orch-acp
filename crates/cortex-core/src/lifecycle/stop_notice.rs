@@ -5,7 +5,7 @@
 //! blocking task, a review report, a denied path) the desktop can open. Nothing
 //! here changes state; enforcement and answers are unchanged: the two answers stay
 //! `domain::STOP_OPTIONS_*` (continue with the coordinator, or close as is).
-use super::{domain, MAX_REVIEW_CYCLES, MAX_VERIFICATION_REPAIRS};
+use super::{domain, MAX_VERIFICATION_REPAIRS};
 use crate::{scheduler, CoreResult};
 use rusqlite::{OptionalExtension, Transaction};
 use serde_json::{json, Value};
@@ -28,6 +28,7 @@ pub const KINDS: &[&str] = &[
     "worker_stopped_by_owner",
     "no_runnable_nodes",
     "native_continuation_unavailable",
+    "assignment_worktree_",
     "scheduler_capacity_timeout",
     "lost_worker_action_outcome_unknown",
     "lost_worker_",
@@ -343,14 +344,15 @@ pub fn explain_tx(db: &Transaction<'_>, task: &str, blocker: &str, ru: bool) -> 
                 )
             } else {
                 let cycles: i64 = db.query_row("SELECT review_cycle FROM runtime_tasks WHERE task_id=?", [task], |r| r.get(0))?;
+                let limit = crate::strategy::review_policy(db, task)?.cycles;
                 recommended = None;
                 l(
                     &format!(
-                        "The independent review asked for changes {}; that is the limit of {MAX_REVIEW_CYCLES} review cycles for one plan.",
+                        "The independent review asked for changes {}; that is the limit of {limit} review cycles for one plan.",
                         times(cycles.max(1), false)
                     ),
                     &format!(
-                        "Независимое ревью требовало исправлений {}; это предел в {MAX_REVIEW_CYCLES} цикла ревью для одного плана.",
+                        "Независимое ревью требовало исправлений {}; это предел в {limit} цикла ревью для одного плана.",
                         times(cycles.max(1), true)
                     ),
                 )
@@ -498,6 +500,20 @@ pub fn explain_tx(db: &Transaction<'_>, task: &str, blocker: &str, ru: bool) -> 
                     }
                     out
                 }
+            }
+        }
+        b if b.starts_with("assignment_worktree_") => {
+            recommended = None;
+            if b == "assignment_worktree_conflict" {
+                l(
+                    "The project checkout no longer matches the isolated step's starting state. The integration stopped and the isolated changes are retained.",
+                    "Состояние папки проекта больше не совпадает с исходным состоянием изолированного шага. Объединение остановлено, изолированные изменения сохранены.",
+                )
+            } else {
+                l(
+                    "The runtime could not confirm the operation in the separate worktree. Review and verification need the integrated project files.",
+                    "Не удалось подтвердить операцию в отдельном рабочем дереве Git. Проверка сможет продолжиться после переноса изменений в папку проекта.",
+                )
             }
         }
         "no_runnable_nodes" | "native_continuation_unavailable" => {
@@ -745,6 +761,7 @@ mod tests {
                 }
             })
             .collect();
+        kinds.push("assignment_worktree_conflict".into());
         kinds.push("something_unexpected".into());
         store
             .write(|db| {

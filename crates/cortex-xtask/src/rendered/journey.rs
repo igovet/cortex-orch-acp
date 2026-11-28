@@ -661,6 +661,10 @@ impl J {
             && dev.join("owner.json").is_file()
             && !dev.join("owner.json").is_symlink()
             && !project.join(".cortex-dev-owner.json").exists()
+            && matches!(
+                self.channel.store_destination(&self.home, project).symlink_metadata(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
     }
 
     /// Paseo's flow: a way in, then a field that searches the machine. Enter adds the first row, the typed path.
@@ -736,11 +740,11 @@ impl J {
 
     /// The most recent runtime task's state in the project's own store.
     pub fn task_state(&self, project: &Path) -> Res<Option<String>> {
-        native::state(project, &self.channel)
+        native::state(&self.home, project, &self.channel)
     }
 
     pub fn store_count(&self, project: &Path, sql: &str) -> Res<i64> {
-        native::count(&self.channel.store_db(project), sql)
+        native::count(&self.channel.store_db(&self.home, project)?, sql)
     }
 }
 

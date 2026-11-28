@@ -124,6 +124,8 @@ fn field(code: &str) -> Option<&'static str> {
 /// A short correction for the codes a model can act on.
 fn hint(code: &str) -> &'static str {
     match code {
+        "required_report_direct_read" => "Read required material through a direct read_report call so this attempt receives the whole page.",
+        "required_report_page_too_large" => "Retry read_report with a smaller limit to receive the required page inline.",
         "owner_file_lease_held" => "The owner is editing this file in Code. Leave it unchanged and report the conflict. Read it again after the lease is released before making a new request.",
         "worktree_command_cwd_refused" => "Omit cwd to use the task checkout, or choose an existing directory inside that checkout. Main and sibling checkouts are not command working directories for this task.",
         "worktree_host_effect_unavailable" => "Privilege escalation and outside_write are unavailable for this checkout; writes stay in the task checkout. Read host paths with outside_command or read the main checkout from command_run.",
@@ -201,7 +203,7 @@ fn hint(code: &str) -> &'static str {
         "native_command_sandbox_unavailable" => "The command did not start: its supervisor could not prepare or confirm the sandbox before release. Nothing ran. This refusal does not authorize running on the host. Report the preparation blocker; a fresh contained attempt is appropriate only if the problem has cleared and the original receipt confirms it never launched.",
         "project_mount_alias_refused" => "Use a path directly in the bound checkout; this path crosses a mount boundary.",
         "write_outside_assignment_scope" => "Use a target inside the current assignment scope or request access to an additional project path before retrying. Outside paths cannot be added to the assignment.",
-        "cortex_live_store" => "This is a live file of the Cortex store (its database, WAL, SHM or lock files); no tool writes it outside Auto, because a write from outside the runtime can corrupt the running store. Leave it unchanged and report what you needed.",
+        "cortex_live_store" => "Cortex refused access to a protected store file. Changes outside the runtime can corrupt the database or its sidecars. Leave the file unchanged.",
         "protected_path_not_confirmed" => "This path is Cortex private state, a Git control file or a credential file: the owner did not allow this access, or no one could answer the card. Nothing changed. Do not repeat it; report it as not done with this blocker.",
         "rule_file_protected" => "The owner denied writes to this path (`deny-write:`). Leave it unchanged; the owner lifts the denial with `allow-write: <path>`.",
         "outside_action_not_confirmed" => "The user did not allow this to run outside the sandbox, or no one could answer the permission card. Nothing ran. Do not repeat it; report the check as not run with this blocker.",

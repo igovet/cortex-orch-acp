@@ -622,6 +622,73 @@ fn key(request: &Value) -> CoreResult<&str> {
         .map_err(|_| CoreError::Refused("invalid_request"))?;
     Ok(key)
 }
+
+pub(crate) fn external_close_blocker(
+    db: &Connection,
+    task: &str,
+) -> CoreResult<Option<(String, Option<String>)>> {
+    Ok(db
+        .query_row(
+            "SELECT role, reference FROM (
+           SELECT role_id AS role, coalesce(assignment_id, attempt_id) AS reference, 0 AS priority
+           FROM delegation_provisioning WHERE task_id=?1 AND status!='terminated'
+           UNION ALL
+           SELECT kind, coalesce(assignment_ref, attempt_id), 1
+           FROM capacity_reservations WHERE task_id=?1 AND state!='released'
+         ) ORDER BY priority, role, reference LIMIT 1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// End the exact paused native execution after the host has confirmed process
+/// exit. The service persists its queue fence before this transaction commits.
+pub fn close_paused_external(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    draft: &str,
+    request: &Value,
+    fence_queue: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<Value> {
+    let root = store.key().root().to_string_lossy();
+    let execution = request["executionId"]
+        .as_str()
+        .ok_or(CoreError::Refused("invalid_execution"))?;
+    let expected: workspace_protocol::core::Version =
+        serde_json::from_value(request["expectedVersion"].clone())
+            .map_err(|_| CoreError::Refused("stale_version"))?;
+    let request_id = key(request)?;
+    store.write(|db| {
+        let b = binding(db, &root, project, actor, execution)?;
+        let current: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_tasks WHERE project_id=? AND task_id=? AND execution_id=?)",
+            (project, draft, execution), |row| row.get(0),
+        )?;
+        if b.draft != draft || !current {
+            return refuse("native_execution_binding_invalid");
+        }
+        lifecycle::request_tx(db, &b.task, actor, request_id, "owner_close_external", request, || {
+            if b.version != expected.get() {
+                return refuse("stale_version");
+            }
+            if domain::task_tx(db, &b.task)?.0 != TaskState::Paused {
+                return refuse("task_not_paused");
+            }
+            if let Some((role, reference)) = external_close_blocker(db, &b.task)? {
+                return Err(CoreError::ExternalStopPending { role, reference });
+            }
+            lifecycle::automatic::require_settled_execution(db, &b.task)?;
+            fence_queue()?;
+            domain::cancel_task_tx(db, &b.task, "owner_resolved_without_certification")?;
+            lifecycle::event_tx(db, &b.task, "OWNER_TASK_RESOLVED",
+                json!({"certified":false,"disposition":"external"}))?;
+            Ok(json!({"done":true}))
+        })
+    })
+}
+
 fn prior(db: &Connection, b: &Binding, request: &Value) -> CoreResult<Option<Value>> {
     let row: Option<(String,String)> = db.query_row(
         "SELECT digest,result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=? AND operation='native_desktop_control'",
@@ -1026,6 +1093,7 @@ pub fn admit_input(
                     // Refuse before any commit while an owned process is unconfirmed, so a
                     // refusal never leaves a resumed task without a driver.
                     if unsettled_tx(db,&b.task)? {return refuse("native_shutdown_unconfirmed");}
+                    crate::deliverables::continue_tx(store, db, &b.task)?;
                     let version = request["expectedVersion"].as_str().and_then(|s| s.parse().ok()).ok_or(CoreError::Refused("stale_version"))?;
                     domain::owner_pause_tx(db,&b.task,&b.owner,&format!("desktop:{}",key(request)?),true,version)?;
                 },
@@ -1033,6 +1101,7 @@ pub fn admit_input(
                     // A node waiting out an infrastructure retry delay retries at once on
                     // the owner's Retry: the delay only spares model calls, never the owner.
                     if state==TaskState::Executing {
+                        crate::deliverables::continue_tx(store, db, &b.task)?;
                         let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64());
                         let waiting:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN runtime_tasks t USING(task_id)
                             WHERE e.task_id=?1 AND e.type='ASSIGNMENT_RETRIED' AND json_extract(e.payload_json,'$.revision')=t.revision
@@ -1043,6 +1112,7 @@ pub fn admit_input(
                         lifecycle::event_tx(db,&b.task,"OWNER_RETRY_REQUESTED",json!({"request":key(request)?}))?;
                     } else {
                     if !matches!(state,TaskState::Recovering|TaskState::WaitingUser|TaskState::Blocked) { return refuse("retry_not_expected"); }
+                    crate::deliverables::require_available(store, db, &b.task)?;
                     // Retry is the owner's explicit acknowledgement of effects whose outcome
                     // stayed unknown (e.g. a command interrupted by a restart). Record them as
                     // settled-unknown, never as success, so recovery stops re-raising them on
@@ -1532,6 +1602,44 @@ fn decision_revision(
     Ok(crate::digest(&serde_json::to_vec(&(
         project, execution, session, display,
     ))?))
+}
+
+pub(crate) fn history_follow_decisions(
+    db: &Transaction<'_>,
+    root: &str,
+    project: &str,
+    actor: &str,
+    draft: &str,
+    execution: &str,
+    high: workspace_protocol::core::Version,
+    previous: Option<&str>,
+) -> CoreResult<(String, Option<Value>)> {
+    let binding = read_binding(db, root, project, actor, execution)?;
+    if binding.draft != draft {
+        return refuse("native_execution_binding_invalid");
+    }
+    let has_questions: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pending_questions WHERE task_id=?)",
+        [&binding.task],
+        |row| row.get(0),
+    )?;
+    let (items, revision) = if has_questions {
+        conversation_decisions(db, root, project, actor, execution, &binding)?
+    } else {
+        (Vec::new(), decision_revision(project, execution, &binding.session, &[])?)
+    };
+    if previous == Some(revision.as_str()) || items.len() > 64 {
+        return Ok((revision, None));
+    }
+    let page = json!({
+        "items":items,"nextCursor":null,"highWatermark":high,"decisionRevision":revision,
+    });
+    if serde_json::to_vec(&page)?.len() > 24 * 1024 {
+        return Ok((revision, None));
+    }
+    workspace_protocol::validate("DecisionPage", &page)
+        .map_err(|_| CoreError::Refused("native_decision_page_unavailable"))?;
+    Ok((revision, Some(page)))
 }
 
 /// Read the same decision projection as the paged endpoint, in the history transaction.

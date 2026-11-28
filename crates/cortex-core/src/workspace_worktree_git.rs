@@ -15,6 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "workspace_worktree_git/integration.rs"]
+pub(super) mod integration;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Worktree {
     pub id: String,

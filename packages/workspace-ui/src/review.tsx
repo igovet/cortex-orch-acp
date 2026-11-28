@@ -209,7 +209,7 @@ export function ReviewBar(props: { m: SessionModel }) {
 export function AcceptButton(props: { m: SessionModel; small?: boolean; line?: boolean; describedBy?: string }) {
   const ws = useWs();
   const t = () => props.m.view.task;
-  const blocked = () => acceptBlocked(t());
+  const blocked = () => ws.store.pendingTask("accept_result", t().id) ? REQUESTING.accept_result : acceptBlocked(t());
   return <button class={`btn ${props.line ? "btn-line" : "btn-primary"}${props.small ? " btn-sm" : ""}`} aria-describedby={blocked() ? props.describedBy : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("accept_result")} onClick={() => { if (!blocked()) ws.accept(t().id); }}><RequestLabel pending={ws.store.pendingTask("accept_result", t().id)} text={REQUESTING.accept_result}>Accept v{t().result?.version ?? ""}</RequestLabel></button>;
 }
 
@@ -236,6 +236,15 @@ export function ResultCard(props: { m: SessionModel }) {
   const changes = (): Route => ({ name: "task", machine: props.m.view.machine.id, task: t().id, tab: "changes", sub: "diff" });
   const ready = (): Route => ({ name: "task", machine: props.m.view.machine.id, task: t().id, tab: "changes" });
   const describedBy = () => acceptStripShown(props.m) ? why : undefined;
+  // Cleanup removes the source of the live digest. The recorded merge still identifies its accepted result.
+  const mergedAndRemoved = () => {
+    const task = t(), result = r();
+    return task.status === "done" && task.work === "merged" && task.checkout.kind === "worktree"
+      && task.workspaceDigest === null && !result.warnings?.includes("workspace_drift")
+      && task.integration?.method === "squash" && task.integration.worktreeCleanup === "removed"
+      && task.integration.digest === result.digest && task.acceptance?.digest === result.digest
+      && task.acceptance.version === result.version;
+  };
   const noteStart = () => t().acceptance?.automatic ? (r().warnings ?? []).findIndex(w => w.startsWith("The runtime's own verification of this version passed.") && w.includes("shown for information")) : -1;
   return <div class="rcard">
     <div class="rcard-h"><I n={t().status === "done" ? "check-circle" : "eye"} s={14} class="faint" />Result v{r().version}<span class="r">{r().at != null ? `${clock(r().at!)}, ` : ""}{t().acceptance ? `accepted ${t().acceptance!.automatic ? "automatically" : "by you"}${t().acceptance!.at != null ? ` ${clock(t().acceptance!.at!)}` : ""}` : ws.store.mode === "real" ? "Runtime result" : "reviewed and checked"}</span><Show when={r().summary}><CopySource text={r().summary} label="Copy the result as Markdown" /></Show></div>
@@ -244,7 +253,7 @@ export function ResultCard(props: { m: SessionModel }) {
     <For each={noteStart() < 0 ? r().warnings : r().warnings?.slice(0, noteStart())}>{warning => <div class="rcard-note cap st-warn">{humanStatus(warning)}</div>}</For>
     <Show when={noteStart() >= 0}><details class="rcard-note cap"><summary>Verification notes</summary><For each={r().warnings?.slice(noteStart())}>{warning => <p>{humanStatus(warning)}</p>}</For></details></Show>
     <OpenChecks checks={r().checks} taskId={t().id} />
-    <Show when={stale(t())}><Row class="rv-stale" lead={<I n="alert" s={14} class="st-warn" />} title="Stale result" detail="The worktree has changed since this result was checked." end={<span>Recorded by runtime</span>} /></Show>
+    <Show when={stale(t()) && !mergedAndRemoved()}><Row class="rv-stale" lead={<I n="alert" s={14} class="st-warn" />} title="Stale result" detail="The worktree has changed since this result was checked." end={<span>Recorded by runtime</span>} /></Show>
     <Show when={props.m.view.project.hasGit === false}><div class="rcard-note cap muted">{ws.t("changesWithoutGit")}</div></Show>
     <Show when={!automaticAcceptanceHold(props.m.view)}><AcceptBlocker m={props.m} id={why} /></Show>
     <ActionBar place="card" class="rv-card-f" label="Result actions" start={<><A class="lnk" to={changes()}>Review changes</A><Show when={c()}>{x => <span class="cap muted tnum">{x().files} files, <Counts add={x().add} del={x().del} /></span>}</Show></>}>

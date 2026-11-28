@@ -90,6 +90,8 @@ async fn run() -> std::io::Result<()> {
         let environment =
             workspace_service::native_routes::RouteEnvironment::for_workspace(&config)
                 .map_err(|e| std::io::Error::other(e.code()))?;
+        workspace_service::store_locations::configure(&environment.state)
+            .map_err(|e| std::io::Error::other(e.code()))?;
         Service::bind_native(
             config,
             std::sync::Arc::new(workspace_service::native_routes::ConfiguredRoutes {

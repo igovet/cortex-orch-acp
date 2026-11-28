@@ -16,6 +16,7 @@ export const SEEN_DROPPED_LIMIT = 10000;
 const FORMAT = 3;
 /** A row that asks nothing of the owner. */
 const QUIET = "";
+const COMPLETE = stateCode(["complete"]);
 /** Finished columns: a row there is listed only while its finish is new to the owner, or open. */
 const FINISHED = new Set(["done", "closed_unverified"]);
 /** A run's end, however it came: by itself, by the agent, in another window or client, or by the owner's hand. */
@@ -70,12 +71,12 @@ export function sprintChange(state: Pick<WorkspaceState, "tasks" | "sessions">, 
     return stateCode(["asks", sprint.planning, asked, planningWaits(state, sprint).map(d => d.id).sort().join(",")]);
   }
   if (sprint.planning === "ready") return stateCode(["plan", sprint.plan?.version]);
-  if (sprint.planning === "created" && sprint.queueState === "complete") return stateCode(["complete"]);
+  if (sprint.planning === "created" && sprint.queueState === "complete") return COMPLETE;
   return null;
 }
 
 /** What the owner has seen of one row: the state identity, or `QUIET` when the row asked nothing then. */
-type Mark = { key: string; project: string };
+type Mark = { key: string; project: string; summary?: string };
 /**
  * A project this app has taken in: every row it held then has a mark, or, when the row bound dropped its mark, a short code in
  * `dropped`. So a row of it with neither is one that came after, while the app was closed too. `lossy`: the codes did not fit, so
@@ -96,6 +97,12 @@ function readSaved(): { seen: Map<string, Mark>; projects: Map<string, Taken> } 
     if (Array.isArray(marks)) for (const mark of marks.slice(-SEEN_CHANGES_LIMIT))
       if (Array.isArray(mark) && mark.length === 3 && mark.every(x => typeof x === "string") && /^[ts]:./.test(mark[0]) && (mark[1] === QUIET || CODE.test(mark[1])))
         seen.set(mark[0], { key: mark[1], project: mark[2] });
+    const summaries = (raw as { summaries?: unknown }).summaries;
+    if (Array.isArray(summaries)) for (const pair of summaries.slice(-SEEN_CHANGES_LIMIT)) {
+      if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string" || !pair[0].startsWith("t:") || typeof pair[1] !== "string" || !CODE.test(pair[1])) continue;
+      const mark = seen.get(pair[0]);
+      if (mark) mark.summary = pair[1];
+    }
     const taken = v === FORMAT ? (raw as { projects?: unknown }).projects : undefined;
     if (Array.isArray(taken)) for (const entry of taken.slice(-SEEN_PROJECTS_LIMIT))
       if (Array.isArray(entry) && entry.length === 3 && typeof entry[0] === "string" && entry[0] && typeof entry[1] === "string" && ROWS.test(entry[1]) && (entry[2] === 0 || entry[2] === 1))
@@ -123,6 +130,7 @@ function writeSaved(seen: Map<string, Mark>, pending: ReadonlySet<string>, proje
   try {
     storage()?.setItem(SEEN_CHANGES_KEY, JSON.stringify({
       v: FORMAT, seen: ordered.map(([id, m]) => [id, m.key, m.project]),
+      summaries: ordered.flatMap(([id, mark]) => mark.summary ? [[id, mark.summary]] : []),
       projects: [...out].map(([id, p]) => [id, [...p.dropped].join(""), p.lossy ? 1 : 0]),
     }));
   } catch { /* this run still remembers */ }
@@ -131,6 +139,7 @@ function writeSaved(seen: Map<string, Mark>, pending: ReadonlySet<string>, proje
 export type Unseen = {
   /** The task row has a change the owner has not opened yet. */
   task: (view: TaskView) => boolean;
+  member: (view: TaskView, sprint: Sprint) => boolean;
   /** The sprint row has a change the owner has not opened yet. */
   sprint: (sprint: Sprint) => boolean;
   /** Finished tasks and sprints that stay in the sidebar until opened, and while open. */
@@ -138,7 +147,7 @@ export type Unseen = {
 };
 
 const taskOpen = (route: Route, id: string) => route.name === "task" && route.task === id;
-const sprintOpen = (route: Route, sprint: Sprint) => (route.name === "sprint" && route.sprint === sprint.id)
+const sprintOpen = (route: Route, sprint: Sprint) => (route.name === "sprint" && route.project === sprint.projectId && route.sprint === sprint.id)
   || (route.name === "project" && route.project === sprint.projectId && route.scope.kind === "sprint" && route.scope.id === sprint.id);
 /** A project whose present tasks and sprints are known: a confirmed read delivered them, and it is readable and activated now. */
 const known = (project: Project, read: ReadonlySet<string>) => read.has(project.id) && !project.issue && project.activated !== false;
@@ -197,9 +206,28 @@ export function createUnseen(opts: { index: Accessor<WorkspaceIndex>; ready: Acc
       // Re-inserted, so the rows changed most recently are the ones the bound keeps.
       seen.delete(id); seen.set(id, { key: now, project }); stored = true;
     };
-    for (const v of index.views) if (!v.unknown) note(`t:${v.id}`, taskChange(v, index.state), v.project.id, taskOpen(route, v.id));
+    for (const v of index.views) {
+      if (v.unknown || !live.has(v.project.id)) continue;
+      const id = `t:${v.id}`, key = taskChange(v, index.state);
+      note(id, key, v.project.id, taskOpen(route, v.id));
+      const mark = seen.get(id)!;
+      if (!v.sprint) continue;
+      const summary = key && mark.key !== key ? stateCode([v.sprint.id, key]) : undefined;
+      const viewed = onScreen && route.name === "project" && route.view === "board" && sprintOpen(route, v.sprint);
+      if (mark.summary !== summary && (viewed || mark.summary !== undefined)) {
+        mark.summary = viewed ? summary : undefined;
+        stored = true;
+      }
+    }
     const sprints = index.state.sprints.filter(onView);
-    for (const s of sprints) note(`s:${s.id}`, sprintChange(index.state, s), s.projectId, sprintOpen(route, s));
+    for (const s of sprints) {
+      const key = sprintChange(index.state, s);
+      const membersRead = key === COMPLETE && s.taskIds.length > 0 && s.taskIds.every(id => {
+        const v = index.byId.get(id);
+        return v && !v.unknown && v.project.id === s.projectId && seen.get(`t:${id}`)?.key === (taskChange(v, index.state) ?? QUIET);
+      });
+      note(`s:${s.id}`, key, s.projectId, sprintOpen(route, s) || membersRead);
+    }
     // Every row of a project taken in now has its mark, so its dropped codes are spent; it moves last, to be kept longest.
     for (const id of live) if (!taken.has(id)) { taken.add(id); projects.delete(id); projects.set(id, { dropped: new Set(), lossy: false }); moved = stored = true; }
     for (const id of opened) {
@@ -231,6 +259,7 @@ export function createUnseen(opts: { index: Accessor<WorkspaceIndex>; ready: Acc
   const sprintChanged = (sprint: Sprint) => changed(`s:${sprint.id}`, sprintChange(opts.index().state, sprint), sprint.projectId);
   return {
     task: view => taskChanged(view) && !(shown() && taskOpen(opts.route(), view.id)),
+    member: (view, sprint) => taskChanged(view) && seen.get(`t:${view.id}`)?.summary !== stateCode([sprint.id, taskChange(view, opts.index().state)]),
     sprint: sprint => sprintChanged(sprint) && !(shown() && sprintOpen(opts.route(), sprint)),
     keep: {
       task: view => FINISHED.has(view.column) && (taskChanged(view) || (version(), opened.has(`t:${view.id}`))),

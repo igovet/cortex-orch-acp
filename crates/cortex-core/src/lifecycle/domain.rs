@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-pub fn task_tx(db: &Transaction<'_>, task: &str) -> CoreResult<(TaskState, i64)> {
+pub fn task_tx(db: &Connection, task: &str) -> CoreResult<(TaskState, i64)> {
     let row: Option<(String, i64)> = db
         .query_row(
             "SELECT state,revision FROM runtime_tasks WHERE task_id=?",
@@ -274,6 +274,10 @@ pub(crate) fn owner_readable_blocker(blocker: &str, ru: bool) -> String {
             "the model produced unusable output twice in a row",
             "модель дважды подряд выдала непригодный ответ",
         ),
+        "sprint_output_required" => (
+            "the current revision lacks a confirmed required sprint output",
+            "в текущей ревизии не подтверждён обязательный артефакт спринта",
+        ),
         "no_runnable_nodes" => ("no planned step can run", "ни один запланированный шаг не может выполниться"),
         "scheduler_capacity_timeout" => ("no capacity became free for the next step in time", "для следующего шага вовремя не освободилась мощность"),
         // What held the step is stated from recorded facts by `stop_notice`, never guessed here.
@@ -281,6 +285,14 @@ pub(crate) fn owner_readable_blocker(blocker: &str, ru: bool) -> String {
         "native_turn_outcome_unknown" => (
             "the coordinator's turn was interrupted and whether some of its actions finished is unknown",
             "ход координатора был прерван, и неизвестно, завершились ли некоторые его действия",
+        ),
+        "assignment_worktree_conflict" => (
+            "the separate worktree changes could not be integrated",
+            "не удалось перенести изменения из отдельного рабочего дерева Git",
+        ),
+        b if b.starts_with("assignment_worktree_") => (
+            "an operation in the separate worktree could not be confirmed",
+            "не удалось подтвердить операцию в отдельном рабочем дереве Git",
         ),
         "lost_worker_action_outcome_unknown" => (
             "a worker's turn ended without an accepted result, and whether some of its actions finished is not known",
@@ -910,23 +922,14 @@ pub fn propose_replan_tx(
         if state.terminal() || state == TaskState::Paused {
             return refuse("task_not_resumable");
         }
+        let consultation_identity = if operation == "escalation_request" {
+            Some(super::plan::validate_consultation_request(db, task, revision, proposal)?)
+        } else {
+            None
+        };
         if super::automatic::held(db, task)? {
             return refuse("automatic_continuation_pending");
         }
-        // Counted since the owner's last input or reopening only: a resumed
-        // continuation does not reset it (every plan-then-fail cycle passes through
-        // one, and the count would never reach the consultation).
-        let count: i64 = db.query_row(
-            "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED'
-            AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=? AND type IN
-                ('USER_STEERING','USER_ANSWER_RECEIVED','WORKER_USER_ANSWER_RECEIVED','TASK_REOPENED')),0)",
-            (task, task),
-            |r| r.get(0),
-        )?;
-        // No replan limit: from the fourth replan since the owner's last input the
-        // runtime changes approach itself. The replan is accepted as a senior
-        // consultation, whose advice joins the next plan (never an owner question).
-        let consult = count >= 3 && operation != "escalation_request";
         if operation == "scope_request" {
             let paths = proposal["scope"]
                 .as_array()
@@ -960,26 +963,12 @@ pub fn propose_replan_tx(
         cancel_nodes_tx(db, task, "replanning")?;
         revoke_tx(db, task, None)?;
         state_tx(db, task, TaskState::Recovering, None)?;
-        let consulted = operation == "escalation_request" || consult;
-        let mut receipt = json!({"accepted":true,"state":"RECOVERING","decision":if consulted{"senior_consultation"}else{"replan"},"scope_granted":false});
-        let mut recorded = json!({"operation":operation,"proposal":proposal,"revision":revision});
-        if consult {
-            receipt["strategy"] = json!("consult");
-            receipt["instruction"] = json!(super::automatic::strategy_instruction("consult"));
-            let reason = proposal["reason"]
-                .as_str()
-                .or_else(|| proposal["objective"].as_str())
-                .unwrap_or("");
-            recorded["operation"] = json!("escalation_request");
-            recorded["requested_operation"] = json!(operation);
-            recorded["proposal"] = json!({
-                "question":"The coordinator replanned repeatedly without finishing the task. What approach should the next plan take instead?",
-                "reason":format!("Replan {} since the owner's last input. {reason}", count + 1),
-                "report_ids":proposal["report_ids"].clone(),
-                "requested":proposal,
-            });
+        let consulted = consultation_identity.is_some();
+        let receipt = json!({"accepted":true,"state":"RECOVERING","decision":if consulted{"senior_consultation"}else{"replan"},"scope_granted":false});
+        let mut recorded = json!({"operation":operation,"proposal":proposal,"revision":revision,"decision":receipt});
+        if let Some(identity) = consultation_identity {
+            recorded["consultation_identity"] = identity;
         }
-        recorded["decision"] = receipt.clone();
         event_tx(db, task, "REPLAN_REQUEST_ACCEPTED", recorded)?;
         Ok(receipt)
     })

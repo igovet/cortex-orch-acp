@@ -15,6 +15,7 @@ pub const MAX_CHARACTERS: usize = 120_000;
 /// sentinel: the sentinel proves older rows exist and the total is then a lower bound
 /// (`total_is_lower_bound`) instead of an exact `count(*)` over the whole history.
 const MIN_ROW_CHARS: usize = 24;
+const COMMAND_EVENT_COUNT_LIMIT: i64 = 1_024;
 const fn rows_for(budget: usize) -> usize {
     budget / MIN_ROW_CHARS + 1
 }
@@ -52,6 +53,14 @@ const NOISE: &str = "('NATIVE_TURN_SETTLED','NATIVE_CONTEXT_DELIVERY','NATIVE_CO
     'OWNER_DECISION_INLINE_ANSWER','OWNER_DECISION_SOURCE_PAGE','REPORT_PAGE_READ','EXTERNAL_TOOL_AUTHORIZED','EXTERNAL_TOOL_RESULT','NATIVE_ACCESS_MODE_CONFIRMED',
     'NATIVE_SESSION_CONFIGURED','NATIVE_ROUTE_SELECTED','NATIVE_TURN_DEGENERATE','ENVIRONMENT_PREFLIGHT',
     'TASK_PROGRESS','FAILURE_CLASSIFIED','EXTERNAL_WAIT_RECHECKED')";
+// SQLite can seek to the next distinct type using runtime_events_type. Include
+// event types from older runtimes without scanning every event of the task.
+const EVENT_TYPES_SQL: &str = "WITH RECURSIVE event_types(type) AS (
+    SELECT min(type) FROM runtime_events
+    UNION ALL
+    SELECT (SELECT min(e.type) FROM runtime_events e WHERE e.type > event_types.type)
+    FROM event_types WHERE type IS NOT NULL
+)";
 const REPORT_TOOLS: &str =
     "published reports: list_reports/read_report; captured sources: read_source";
 
@@ -76,6 +85,21 @@ fn fetch(db: &Connection, sql: &str, task: &str, limit: usize) -> CoreResult<Fet
         total,
         truncated,
     })
+}
+fn fetch_decisions(db: &Connection, task: &str, limit: usize) -> CoreResult<Fetched> {
+    // No type can contribute more than the final limit (including the sentinel).
+    // Merge only those candidate ids before reading the selected payloads.
+    fetch(db,
+        &format!("{EVENT_TYPES_SQL}
+            SELECT json_object('id',id,'type',type,'payload',json(payload_json))
+            FROM runtime_events WHERE id IN (
+                SELECT candidate.value FROM event_types t
+                CROSS JOIN json_each((SELECT json_group_array(id) FROM (
+                    SELECT id FROM runtime_events WHERE type=t.type AND task_id=?1
+                    ORDER BY id DESC LIMIT {candidate_limit}
+                ))) candidate WHERE t.type NOT IN {NOISE}
+                ORDER BY candidate.value DESC LIMIT {candidate_limit}
+            ) ORDER BY id DESC", candidate_limit = limit + 1), task, limit)
 }
 fn size(v: &Value) -> usize {
     v.to_string().chars().count() + 1
@@ -492,9 +516,7 @@ pub fn snapshot_for(
     }
     let mut messages = clip("retained_user_messages", messages_f, MESSAGE_BUDGET,
         "owner steering is also retained in constraints; the original goal is exact; a clipped text has size_chars and sha256", n);
-    let decision_where = format!("FROM runtime_events WHERE task_id=? AND type NOT IN {NOISE}");
-    let mut decisions_f = fetch(db,
-        &format!("SELECT json_object('id',id,'type',type,'payload',json(payload_json)) {decision_where} ORDER BY id DESC"), task, rows_for(DECISION_BUDGET))?;
+    let mut decisions_f = fetch_decisions(db, task, rows_for(DECISION_BUDGET))?;
     decisions_f.newest_first = decisions_f.newest_first.into_iter().map(decision).collect();
     let decisions = clip("retained_decisions", decisions_f, DECISION_BUDGET,
         "state, plan, nodes, questions and constraints in this capsule are current; older event rows are not restated", n);
@@ -578,13 +600,29 @@ pub fn snapshot_for(
     } else {
         None
     };
-    // Command chatter is not restated; commands that started but have no recorded outcome stay visible.
+    // Match modern and legacy finished events separately so the receipt
+    // expression index can find the outcome and the legacy NULL-receipt rows.
     let uf = "FROM runtime_events s WHERE s.task_id=? AND s.type='NATIVE_COMMAND_STARTED'
-        AND NOT EXISTS(SELECT 1 FROM runtime_events f WHERE f.task_id=s.task_id AND f.type IN ('NATIVE_COMMAND_FINISHED','NATIVE_COMMAND_RECOVERED')
-        AND f.id>s.id AND coalesce(json_extract(f.payload_json,'$.receipt.tool_call_ref'),json_extract(f.payload_json,'$.ref'))=json_extract(s.payload_json,'$.ref'))";
+        AND NOT EXISTS(SELECT 1 FROM runtime_events f WHERE f.task_id=s.task_id AND f.type='NATIVE_COMMAND_FINISHED'
+            AND f.id>s.id AND json_extract(f.payload_json,'$.receipt.tool_call_ref')=json_extract(s.payload_json,'$.ref'))
+        AND NOT EXISTS(SELECT 1 FROM runtime_events f WHERE f.task_id=s.task_id AND f.type='NATIVE_COMMAND_FINISHED'
+            AND f.id>s.id AND json_extract(f.payload_json,'$.receipt.tool_call_ref') IS NULL
+            AND json_extract(f.payload_json,'$.ref')=json_extract(s.payload_json,'$.ref'))
+        AND NOT EXISTS(SELECT 1 FROM runtime_events f WHERE f.task_id=s.task_id AND f.type='NATIVE_COMMAND_RECOVERED'
+            AND f.id>s.id AND coalesce(json_extract(f.payload_json,'$.receipt.tool_call_ref'),json_extract(f.payload_json,'$.ref'))=json_extract(s.payload_json,'$.ref'))";
+    // Store reads and prompt delivery hold one snapshot across this selection and the query.
+    let (unresolved_from, order_by) = if crate::store::open_commands::available(db, task)? {
+        (
+            "FROM runtime_open_commands c CROSS JOIN runtime_events s
+             WHERE c.task_id=? AND s.id=c.start_id",
+            "c.start_id",
+        )
+    } else {
+        (uf, "s.id")
+    };
     let mut unresolved = fetch(db,
-        &format!("SELECT json_object('id',s.id,'ref',json_extract(s.payload_json,'$.ref'),'argv',json(json_extract(s.payload_json,'$.argv'))) {uf}
-        ORDER BY s.id DESC"), task, rows_for(COMMAND_BUDGET))?;
+        &format!("SELECT json_object('id',s.id,'ref',json_extract(s.payload_json,'$.ref'),'argv',json(json_extract(s.payload_json,'$.argv'))) {unresolved_from}
+        ORDER BY {order_by} DESC"), task, rows_for(COMMAND_BUDGET))?;
     for row in &mut unresolved.newest_first {
         row["argv"] = clipped_value(&row["argv"].clone(), 300);
         row["outcome"] = json!("unresolved; do not replay");
@@ -597,8 +635,12 @@ pub fn snapshot_for(
         n,
     );
     let command_events: i64 = db.query_row(
-        "SELECT count(*) FROM runtime_events WHERE task_id=? AND type LIKE 'NATIVE_COMMAND_%'",
-        [task],
+        &format!("{EVENT_TYPES_SQL}
+            SELECT count(*) FROM (
+                SELECT 1 FROM event_types t CROSS JOIN runtime_events e
+                WHERE t.type LIKE 'NATIVE_COMMAND_%' AND e.type=t.type AND e.task_id=? LIMIT ?
+            )"),
+        (task, COMMAND_EVENT_COUNT_LIMIT + 1),
         |r| r.get(0),
     )?;
     let owner: Option<i64> = db
@@ -630,8 +672,14 @@ pub fn snapshot_for(
         "retained_user_messages":messages,"retained_decisions":decisions,"constraints":constraints,"questions":questions,
         "owner_write_denials":denials,"rule_file_protection":rule_files,"environment":environment(db, task)?,"verification_failure":verification_failure(db, task)?,"investigation_only":investigation_only_note(db, task)?,"obstacles":crate::lifecycle::obstacles::capsule(db, task)?,
         "plan_summary":plan_summary(db, task, plan.as_deref())?,"current_nodes":nodes,"sources":sources,"attempts":attempts,
-        "unresolved_commands":unresolved,"command_events_not_restated":command_events,
+        "unresolved_commands":unresolved,"command_events_not_restated":command_events.min(COMMAND_EVENT_COUNT_LIMIT),
         "access_mode":crate::access::current(db,task)?,"clipping":notices});
+    if let Some(advice) = crate::lifecycle::plan::previous_consultation(db, task, revision)? {
+        context["previous_consultation"] = advice;
+    }
+    if command_events > COMMAND_EVENT_COUNT_LIMIT {
+        context["command_events_not_restated_is_lower_bound"] = json!(true);
+    }
     if let Some(reservations) = reservations {
         context["capacity"] = json!(reservations);
     }
@@ -745,6 +793,11 @@ pub fn delivery_tx(db: &Transaction<'_>, c: &Credential) -> CoreResult<(String, 
         // The coordinator never depends on a large read to replan: the goal outcomes
         // of the plan in force travel with every prompt, verbatim and compact.
         if i.role == "coordinator" {
+            if let Some(advice) = context.get("previous_consultation") {
+                reference.push_str(&format!(
+                    "\nprevious_consultation (read the report by its exact ID and reuse applicable advice): {advice}"
+                ));
+            }
             if let Some(outcomes) = context["plan_summary"]["outcomes"].as_array() {
                 reference.push_str(&format!(
                     "\nplan_summary.outcomes ({OUTCOMES_NOTE}): {}",
@@ -795,6 +848,7 @@ pub fn record_delivery_tx(
     capsule: &str,
     brief: &str,
     catalogue_sha256: &str,
+    competency_modules: &[Value],
 ) -> CoreResult<()> {
     let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
     let part = |t: &str| json!({"sha256":crate::digest(t.as_bytes()),"bytes":t.len()});
@@ -827,7 +881,8 @@ pub fn record_delivery_tx(
         "NATIVE_ATTEMPT_DELIVERY",
         json!({"attempt":i.attempt,"assignment_ref":i.assignment,"role":i.role,"profile":i.profile,"stage":i.stage,
             "capsule_delivery":capsule_delivery,"instructions":part(instructions),"capsule":part(capsule),"brief":part(brief),
-            "tool_catalogue_sha256":catalogue_sha256,"route_event":route.as_ref().map(|r| r.0),"first":first,"delivered_at":at}),
+            "tool_catalogue_sha256":catalogue_sha256,"route_event":route.as_ref().map(|r| r.0),"first":first,
+            "competency_modules":competency_modules,"delivered_at":at}),
     )?;
     if !first {
         return Ok(());
@@ -835,7 +890,8 @@ pub fn record_delivery_tx(
     db.execute(
         "UPDATE delegation_provisioning SET instruction_delivery=? WHERE task_id=? AND attempt_id=? AND instruction_delivery IS NULL",
         (
-            json!({"instructions":part(instructions),"tool_catalogue_sha256":catalogue_sha256,"delivered_at":at}).to_string(),
+            json!({"instructions":part(instructions),"tool_catalogue_sha256":catalogue_sha256,
+                "competency_modules":competency_modules,"delivered_at":at}).to_string(),
             &i.task,
             &i.attempt,
         ),
@@ -1008,4 +1064,44 @@ fn owner_answers_so_far(db: &Connection, task: &str) -> CoreResult<Value> {
     Ok(json!({
         "note":"The owner already decided these (newest first). Proceed from them; never ask the same or a near-identical question again. An entry with complete:false is a clipped preview: do not act on a condition it may omit; find older or longer answers with list_sources and page both texts in full with read_source before citing them.",
         "answers":answers}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decisions_by_event_type_match_the_old_scan() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(crate::store::schema::SQL).unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             WITH RECURSIVE sample(n, seed) AS (
+                VALUES (1, 71) UNION ALL
+                SELECT n+1, (seed*48271)%2147483647 FROM sample WHERE n<5000
+             )
+             INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+             SELECT 't'||(seed%11),
+                CASE seed%17 WHEN 0 THEN 'LEGACY_DECISION'
+                     WHEN 1 THEN 'USER_STEERING' WHEN 2 THEN 'PLAN_ACCEPTED'
+                     ELSE 'NATIVE_GUIDANCE_SETTLED' END,
+                'runtime',json_object('n',n),n
+             FROM sample;
+             ANALYZE;",
+        ).unwrap();
+        let original = format!(
+            "SELECT json_object('id',id,'type',type,'payload',json(payload_json))
+             FROM runtime_events WHERE task_id=? AND type NOT IN {NOISE} ORDER BY id DESC"
+        );
+        for n in 0..12 {
+            let task = format!("t{n}");
+            for limit in [0, 1, 5, 32, 250] {
+                let scan = fetch(&db, &original, &task, limit).unwrap();
+                let indexed = fetch_decisions(&db, &task, limit).unwrap();
+                assert_eq!(indexed.newest_first, scan.newest_first);
+                assert_eq!(indexed.total, scan.total);
+                assert_eq!(indexed.truncated, scan.truncated);
+            }
+        }
+    }
 }

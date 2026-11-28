@@ -154,7 +154,8 @@ it("says why the runtime refused a change, in words, on the failed row", async (
   await openFold();
   const plan = stepRow("Edit");
   expect(plan.tagName).toBe("BUTTON");
-  expect(plan.querySelector(".i")?.getAttribute("class")).toContain("st-bad");
+  expect(plan.querySelector(".i.st-bad")).not.toBeNull();
+  expect(plan.querySelector(".i-chevron-right")).not.toBeNull();
   plan.click(); await settle();
   const note = document.querySelector(".timeline .ws-step-failure")!;
   expect(note.textContent).toBe(reason);

@@ -5,7 +5,7 @@ import { archiveBlocked, archiveLabel, gitItems } from "./git-actions-model";
 import { revealCard, revealKey } from "./reveal-intent";
 import { repoOf, taskCheckout } from "./review-model";
 import type { Route } from "./router";
-import { closeBlocked, EXTERNAL_DONE_LABEL, externalDoneBlocked, offersExternalDone, REWORK_LABEL, resumeState, reworkBinding, sessionModel, unconfirmedState } from "./session-model";
+import { closeBlocked, EXTERNAL_DONE_LABEL, externalDoneBlocked, offersExternalDone, pausedExternalClose, pausedExternalCloseBlocked, REWORK_LABEL, resumeState, reworkBinding, sessionModel, unconfirmedState } from "./session-model";
 import { automaticAcceptanceHold, decisionRoute, ownerHold, REVISION_WAIT, reviewDeadEnd, type TaskView } from "./selectors";
 
 export type TaskAction = {
@@ -44,17 +44,17 @@ export function taskActionsFor(v: TaskView, ws: ActionScope): TaskAction[] {
     result.push({ id, label, icon, enabled: !why, why, group: "task", ...extra, run: () => { if (!why) return run(); } });
   };
   const send = (type: "start_task" | "continue_task" | "retry_task" | "confirm_stop") => ws.run({ type, taskId: id, now: ws.store.clock() });
-  const reveal = (selectors: string[]) => {
+  const reveal = (selectors: string[], focus = false) => {
     const route = ws.router.route();
     if (route.name !== "task" || route.task !== id || route.machine !== machine.id || route.tab || route.live)
       ws.go({ name: "task", machine: machine.id, task: id });
     const key = revealKey(machine.id, id, task.executionId);
-    queueMicrotask(() => revealCard(key, onScreen(), selectors));
+    queueMicrotask(() => revealCard(key, onScreen(), selectors, focus));
   };
   add("open", "Open task", "arrow-right", () => ws.go(taskRoute(v)));
   add("preview", "Preview in Inspector", "eye", () => ws.select(id), ws.inspectable() ? undefined : "This screen has no inspector", { keys: "Space" });
   const answering = model?.mode === "live" && task.conflict === "none" && (model.open.length > 0 || (v.column === "needs" && task.observedPhase !== "recovery"));
-  if (answering) add("answer", "Answer", "message", () => reveal([".dc"]));
+  if (answering) add("answer", "Answer", "message", () => reveal([".conversation-actions .dc:not(.dc-done)"], true));
   if (model?.mode === "review" && task.status === "review")
     add("review", "Review changes", "check", () => ws.go({ name: "task", machine: machine.id, task: id, tab: "changes", sub: "diff" }));
   if (automaticAcceptanceHold(v))
@@ -81,7 +81,7 @@ export function taskActionsFor(v: TaskView, ws: ActionScope): TaskAction[] {
   const closeWhy = gate("close_task", model ? closeBlocked(model) ?? undefined : unknown);
   add("close", "Close task…", "x", () => ws.closeTask(id, task.integrationFacts?.alreadyInTarget && model?.mode === "review" && task.status === "ready_to_merge" ? "already_in_target" : undefined), closeWhy);
   if (offersExternalDone(v)) add("external-done", EXTERNAL_DONE_LABEL, "check", () => ws.closeTask(id, "external"),
-    gate("close_task", model ? externalDoneBlocked(model) ?? undefined : unknown));
+    gate("close_task", model ? (pausedExternalClose(v) ? pausedExternalCloseBlocked(model) : externalDoneBlocked(model)) ?? undefined : unknown));
   if (task.checkout.kind === "worktree" && task.checkout.id && !task.archive) {
     const cleanup = task.checkout.cleanupRetryReady === true ? undefined : task.checkout.cleanupRetryReady === false
       ? "Worktree cleanup is unavailable." : !checkout ? ws.t("worktreeUnavailable")

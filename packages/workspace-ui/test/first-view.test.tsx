@@ -2,7 +2,7 @@ import { render } from "solid-js/web";
 import { createRoot, createSignal } from "solid-js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Decision as WireDecision } from "@cortex/workspace-contract";
-import { emptyConfig, emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type ProjectFacts, type Worker, type WorkspacePort } from "@cortex/workspace-domain";
+import { emptyConfig, emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type PortUpdate, type ProjectFacts, type Worker, type WorkspacePort } from "@cortex/workspace-domain";
 import { mountPhone, Workspace, type PhoneShell } from "../src";
 import { createRealPort } from "../src/port/real";
 import { readBoards, writeBoards } from "../src/port/board-cache";
@@ -58,7 +58,7 @@ function machine(count = 1, options: { open?: boolean } = {}) {
       const op = (raw as { op: string }).op;
       if (op === "overview") return { ok: true, result: { name: "This machine" } };
       if (op === "project.config.read") return { ok: true, result: { value: {}, tokens: {} } };
-      if (op === "config.read") return { ok: true, result: { config: emptyConfig(), connections: [], tokens: {} } };
+      if (op === "config.read") return { ok: true, result: { machineName: "Local", config: emptyConfig(), connections: [], tokens: {} } };
       if (op === "workers") { await holds.facts; return { ok: true, result: [] }; }
       return { ok: true, result: op === "repo.snapshot" ? null : { tasks: {}, sprints: [] } };
     },
@@ -73,15 +73,30 @@ const settle = async (n = 12) => { for (let i = 0; i < n; i++) await flush(); };
 const feed = () => document.querySelector<HTMLElement>(".task-panel .timeline");
 
 /** Opens a task's conversation and records every state of the feed it ever showed. */
-function open(svc: ReturnType<typeof machine>, task = "task-1", boardStorage?: Storage) {
+function open(svc: ReturnType<typeof machine>, task = "task-1", boardStorage?: Storage, updates?: PortUpdate[]) {
   history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/t/${task}`);
   const root = document.createElement("div"); document.body.append(root);
   const seen: string[] = [];
   const watch = new MutationObserver(() => { const f = feed(); if (f && !f.querySelector(".ws-skel")) seen.push(f.textContent ?? ""); });
   watch.observe(root, { childList: true, subtree: true, characterData: true });
-  dispose = render(() => <Workspace port={createRealPort({ transport: svc.s.transport, actorId: "owner", registry: true, boardStorage })} />, root);
+  const port = createRealPort({ transport: svc.s.transport, actorId: "owner", registry: true, boardStorage });
+  if (updates) {
+    const subscribe = port.subscribe;
+    port.subscribe = notify => subscribe(update => { updates.push(update); notify(update); });
+  }
+  dispose = render(() => <Workspace port={port} />, root);
   return { root, seen, stop: () => watch.disconnect() };
 }
+
+it("shows the saved machine name on the task screen before the board finishes and without opening Settings", async () => {
+  const svc = machine();
+  const wait = hold();
+  svc.holds.facts = wait.done;
+  const { root, stop } = open(svc);
+  try {
+    await vi.waitFor(() => expect(root.querySelector(".titlebar .machine .trunc")?.textContent).toBe("Local"));
+  } finally { wait.release(); stop(); }
+});
 
 it.each(["history", "decisions", "facts"] as const)("shows the conversation skeleton until its %s read is in, then the whole conversation at once", async late => {
   const svc = machine();
@@ -145,8 +160,64 @@ it("does not reveal a cached-board conversation or combine mismatched native rev
   stop();
   expect(seen.length).toBeGreaterThan(0);
   for (const text of seen) {
-    expect(text).toMatch(/Before the question for task-1\.[\s\S]*Which branch for exec-1\?[\s\S]*Coordinator reply for task-1\./);
+    // A pending question stays actionable below the transcript, including its latest reply.
+    expect(text).toMatch(/Before the question for task-1\.[\s\S]*Coordinator reply for task-1\.[\s\S]*Which branch for exec-1\?/);
   }
+});
+
+it("uses a running conversation's confirmed revision before asking for its board decisions again", async () => {
+  const options = { open: false };
+  const svc = machine(1, options);
+  const initialHistory = svc.s.answers["native.query"]!;
+  let version = 1;
+  svc.s.answers["native.query"] = raw => {
+    if ((raw as { operation: string }).operation !== "history.page") return initialHistory(raw);
+    const value = { items: [{ historyId: "fragment-" + version, sequence: position(version + 1), revision: "1",
+      kind: "assistant", text: "Streamed fragment " + version + ".", toolStatus: null, recordedAt: at(version + 10), availability: "available" }],
+      nextCursor: null, highWatermark: "2", tailCursor: "nt1." + version, decisionRevision: svc.snapshot.history };
+    return { protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "g", version: "2", highWatermark: String(version + 2),
+      data: { type: "history", value } };
+  };
+  const changed = () => {
+    const base = String(version++);
+    const versionNow = String(version), sequence = String(version + 2);
+    svc.s.send({ type: "native_delta", projectId: "p", batch: { generation: "g", streamKey: { scope: "project", project_id: "p" },
+      fromSequence: sequence, throughSequence: sequence, changes: [{ kind: "task", id: "task-1", baseVersion: base, newVersion: versionNow,
+        operation: { type: "upsert", data: { kind: "task_projection", data: { ...svc.tasks[0], version: versionNow } } } }] } });
+  };
+  const updates: PortUpdate[] = [];
+  const { stop } = open(svc, "task-1", undefined, updates);
+  try {
+    await vi.waitFor(() => expect(feed()?.textContent).toContain("Coordinator reply for task-1."));
+    await settle();
+    const before = svc.decisionCalls.length;
+    const observed = updates.length;
+    changed();
+    await vi.waitFor(() => expect(feed()?.textContent).toContain("Streamed fragment 2."));
+    await settle();
+    expect(svc.decisionCalls).toHaveLength(before);
+    expect(updates.slice(observed).find(update => update.kind === "conversation")).toMatchObject({
+      projectId: "p", executionId: "exec-1", version: "4", conversation: { taskId: "task-1", historyRead: undefined },
+    });
+
+    options.open = true;
+    svc.snapshot.history = svc.snapshot.decisions = newer;
+    changed();
+    await vi.waitFor(() => expect(feed()?.textContent).toContain("Streamed fragment 3."));
+    // The verified conversation's cards also update the board at the covered watermark.
+    await vi.waitFor(() => expect(updates.some(update => update.kind === "enrichment" && update.update.version === "5"
+      && JSON.stringify(update.update).includes("Which branch for exec-1?"))).toBe(true));
+    expect(feed()?.querySelector(".dc")?.textContent).toContain("Which branch for exec-1?");
+    await settle();
+    expect(svc.decisionCalls).toHaveLength(before + 1);
+
+    const confirmed = svc.decisionCalls.length;
+    svc.snapshot.history = undefined;
+    changed();
+    await vi.waitFor(() => expect(svc.decisionCalls.length).toBeGreaterThan(confirmed));
+    expect(feed()?.textContent).not.toContain("Streamed fragment 4.");
+    expect(feed()?.textContent).toContain("Streamed fragment 3.");
+  } finally { stop(); }
 });
 
 it("restarts a stale decision walk without showing cards from its partial pages", async () => {
@@ -491,8 +562,12 @@ it("brings the question into view when Answer is pressed while the conversation 
     expect(into).toEqual([]);
     wait.release();
     await vi.waitFor(() => expect(feed()?.textContent).toContain("Coordinator reply for task-1."), { timeout: 4000 });
-    // Once shown, after the first pin to the end, the question card is brought into view.
-    await vi.waitFor(() => expect(into.some(node => node.classList.contains("dc") && node.textContent?.includes("Which branch for exec-1?"))).toBe(true));
+    await vi.waitFor(() => {
+      const choice = root.querySelector(".dc button[role=radio]");
+      expect(choice?.closest(".dc")?.textContent).toContain("Which branch for exec-1?");
+      expect(document.activeElement).toBe(choice);
+      expect(into).toContain(choice);
+    });
   } finally { Element.prototype.scrollIntoView = original; }
 });
 

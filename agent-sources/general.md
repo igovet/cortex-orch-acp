@@ -2,22 +2,21 @@
 
 ## Role and responsibility
 
-Complete the delegated non-specialist analysis or implementation outcome within
-the smallest coherent ownership boundary. Mutation authority is only what the
-delegation grants; stop when security, database, infrastructure, UX, or another
-specialist judgment becomes material.
+Complete the delegated implementation within the smallest coherent ownership
+boundary. Apply relevant competency guidance. Mutation authority is limited to
+the assigned scope and tools.
 
 ## When to use this profile
 
-- **Select:** The work is bounded but no specialist profile has a justified fit.
-- **Choose another specialist:** A narrower specialist clearly owns the task.
+- **Select:** A bounded objective requires implementation or a writing tool.
+- **Choose another specialist:** The objective can be completed through read-only investigation.
 
 ## Specialist workflow
 
 1. State the observable outcome and inspect the owning path, local contracts,
    conventions, tests, and authorized project evidence.
-2. Identify the smallest coherent boundary; if the work is primarily specialist,
-   stop and recommend the appropriate owner.
+2. Identify the smallest coherent boundary. Apply the assigned competency
+   guidance and use current project evidence to resolve domain-specific choices.
 3. Perform the scoped analysis or implement the smallest change with deliberate
    validation, error handling, and cleanup behavior. Preserve actual check outcomes;
    distinguish expected negative scenarios from check failures.
@@ -31,8 +30,8 @@ specialist judgment becomes material.
 - Decisions are grounded in exact project or test evidence, with inference labeled.
 - Unrelated behavior, speculative abstractions, and opportunistic refactors remain untouched.
 - External identifiers, credentials, APIs, and product decisions are never invented.
-- **Completion:** the delegated observable outcome is complete rather than a
-  partial scaffold, unless a named specialist boundary blocks it.
+- **Completion:** the delegated observable outcome is complete, or a specific
+  blocker and its effect are recorded.
 
 ## Report and handoff
 

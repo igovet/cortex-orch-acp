@@ -74,6 +74,9 @@ pub(crate) fn plan(actions: &Value, checks: &[Value], warnings: bool) -> Option<
         return None;
     }
     fingerprints.sort();
+    fingerprints.dedup();
+    let mut seen_names = std::collections::BTreeSet::new();
+    names.retain(|name| seen_names.insert(name.clone()));
     names.truncate(10);
     let reason = text(&actions["reason"], 500)
         .unwrap_or_else(|| "The recorded result is no longer current.".into());
@@ -134,7 +137,7 @@ pub(crate) fn finish_asks(checks: &[Value]) -> Vec<String> {
             )
     }) {
         let name = text(&check["name"], 160).unwrap_or_else(|| "unnamed check".into());
-        asks.push(match check["outcome"].as_str() {
+        let ask = match check["outcome"].as_str() {
             Some("failed") => format!("Finish although the check \u{201c}{name}\u{201d} failed."),
             Some("unverified") => {
                 format!("Finish although the check \u{201c}{name}\u{201d} could not be confirmed.")
@@ -143,7 +146,10 @@ pub(crate) fn finish_asks(checks: &[Value]) -> Vec<String> {
                 "Finish without the restricted check \u{201c}{name}\u{201d}. Agents are not allowed to run it."
             ),
             _ => format!("Finish without the check \u{201c}{name}\u{201d}. It was not run."),
-        });
+        };
+        if !asks.contains(&ask) {
+            asks.push(ask);
+        }
         if asks.len() == 10 {
             break;
         }
@@ -235,6 +241,7 @@ mod tests {
     fn finish_asks_name_every_open_check_in_plain_words() {
         let checks = vec![
             json!({"name":"deploy","outcome":"not_run","kind":"policy"}),
+            json!({"name":"lint","outcome":"failed","kind":"automated"}),
             json!({"name":"lint","outcome":"failed","kind":"automated"}),
             json!({"name":"human","outcome":"not_run","kind":"manual"}),
             json!({"name":"unit","outcome":"passed","kind":"automated"}),

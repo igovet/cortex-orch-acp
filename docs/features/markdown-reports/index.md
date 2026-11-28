@@ -1,7 +1,6 @@
 # Markdown reports
 
-Cortex stores immutable Markdown reports under the project-local `.cortex`
-store. A worker can submit complete Markdown inline with its structured result;
+Cortex stores immutable Markdown reports in the project's [private home store](../../project/storage.md#where-the-database-lives-and-how-it-moves). A worker can submit complete Markdown inline with its structured result;
 the runtime publishes it through the same owned-draft immutable-report path.
 Reviewers default to this inline route, retaining the shared decision brief and
 explicit verdict. Alternatively, a caller creates a server-owned draft, edits
@@ -71,6 +70,29 @@ publication and bounded report/draft reads through authenticated MCP channels.
 Worker results can reference their own published report, not another principal's
 report. Discovery and remaining limits are described in
 [native incoming ACP](../../project/native-incoming-acp.md).
+
+## Required inputs for an assignment
+
+A plan node can require selected immutable reports through `required_reports`.
+A `from_node` names a direct dependency in the same plan. The runtime resolves
+that dependency's accepted result in the current revision to its report ID and
+digest. An already published report in the same task can be named by its exact
+`report_id` and `sha256`. The assignment brief shows the resolved materials.
+
+The whole report is required by default. A `section` selects a half-open range
+of zero-based Unicode scalar values. Use `read_report` with the report ID and
+the section's `start`, then continue with each returned cursor as far as the
+exclusive end. For the whole report, start at the beginning and follow the
+cursors through the final page. Each direct read produces an exact receipt.
+An oversized page requests a smaller limit. Reads on another channel, skipped
+page chains and incomplete ranges do not satisfy the requirement.
+
+`result_submit` returns `required_reports_unread` with the outstanding
+materials before publishing a result. The same attempt can read the missing
+material and submit again. A replacement attempt reads it on its own channel.
+The runtime rechecks the immutable bytes on submission. If an exact input is
+unavailable, the worker can report the blocker through its question route.
+Other reports remain available for selective reading.
 
 ## Result submission arguments
 

@@ -152,8 +152,8 @@ fn choose(
         return chosen;
     }
     let environment = super::config_read::environment(config).map_err(|_| "no_settings")?;
-    let key = context::key(root).map_err(|_| "no_project_store")?;
-    let resolver = crate::native_routes::RouteResolver::load(root, &key.directory(), environment)
+    let directory = context::directory(root).map_err(|_| "no_project_store")?;
+    let resolver = crate::native_routes::RouteResolver::load(root, &directory, environment)
         .map_err(|_| "no_routing")?;
     let selected = resolver.task_coordinator(settings).map_err(|_| "no_route")?;
     let launch = selected

@@ -22,16 +22,18 @@ pub mod readers;
 pub mod scrub;
 pub mod setup;
 pub mod store;
+pub mod task_timings;
 pub mod worker_history;
 
 /// The subcommands, in the order `--help` lists them.
-pub const COMMANDS: [&str; 8] = [
+pub const COMMANDS: [&str; 9] = [
     "project-root",
     "task-id",
     "worker-history",
     "worker-results",
     "running-commands",
     "pipeline",
+    "task-timings",
     "config",
     "setup",
 ];
@@ -45,6 +47,7 @@ pub fn run(command: &str, argv: &[String]) -> Option<(String, i32)> {
         "worker-results" => readers::worker_results(argv),
         "running-commands" => readers::running_commands(argv),
         "pipeline" => readers::pipeline(argv),
+        "task-timings" => task_timings::run(argv),
         "config" => config::run(argv),
         "setup" => setup::run(argv),
         other => return dev_tools::run(other, argv).or_else(|| paseo_setup::run(other, argv)),

@@ -93,6 +93,39 @@ fn readers_neither_reserve_nor_wait_on_writer_scopes() {
         assert_eq!(claim_ready(&s, "t", &o, "c", &Allow).unwrap().len(), 2);
     }
 }
+#[test]
+fn declared_reader_leaves_nested_writer_scopes_available_and_plan_warns_writers() {
+    let (_p, s, o) = setup();
+    let plan = json!({"tasks":[
+        {"id":"qa", "role":"worker-qa-engineer", "read_only":true, "dependencies":[], "scope":["."]},
+        {"id":"wide", "role":"worker-backend-dev", "dependencies":[], "scope":[".cache/x/**"]},
+        {"id":"nested", "role":"worker-backend-dev", "dependencies":[], "scope":[".cache/x/legal/**"]},
+        {"id":"ordered", "role":"worker-backend-dev", "dependencies":["wide","nested"], "scope":[".cache/x/**"]},
+    ]});
+    s.write(|db| {
+        node(db, "t", "qa", "worker-qa-engineer", &["."], &[])?;
+        node(db, "t", "wide", "worker-backend-dev", &[".cache/x/**"], &[])?;
+        node(db, "t", "nested", "worker-backend-dev", &[".cache/x/legal/**"], &[])?;
+        node(db, "t", "ordered", "worker-backend-dev", &[".cache/x/**"], &["wide","nested"])?;
+        event_tx(db, "t", "PLAN_ACCEPTED", json!({"revision":1,"plan":plan}))?;
+        assert_eq!(plan_scope_warnings(db, "t", &plan)?, vec![json!({
+            "reason":"independent_write_scope_overlap", "node":"nested", "peer_node":"wide",
+            "paths":[".cache/x/legal/**",".cache/x/**"]
+        })]);
+        Ok(())
+    }).unwrap();
+    let claims = claim_ready(&s, "t", &o, "c", &Allow).unwrap();
+    let claimed = names(&s, &claims);
+    assert_eq!(claimed.len(), 2);
+    let qa = &claims[claimed.iter().position(|n| n == "qa").unwrap()];
+    s.write(|db| {
+        use cortex_core::channels;
+        let channel = channels::issue_tx(db, "t", &o, channels::Principal::Worker { assignment: qa })?;
+        assert!(channels::authenticate(db, &channel.channel_id, channel.secret(), false)?.read_only);
+        Ok(())
+    }).unwrap();
+}
+
 // Mirrors tests/test_runtime_task_machine.py::test_scheduler_respects_dependencies_and_the_session_worker_cap.
 #[test]
 fn dependencies_and_four_claimed_slots_are_transactional() {
@@ -132,6 +165,64 @@ fn dense_dependency_graph_is_memoized_and_stable() {
     assert_eq!(dependency_ready(&nodes, "execution").unwrap(), ["n0"]);
     nodes[0].dependencies.push("n63".into());
     assert!(dependency_ready(&nodes, "execution").is_err());
+}
+
+#[test]
+fn measured_scheduler_selects_a_long_node_over_three_short_nodes() {
+    for measured in [false, true] {
+        let (_p, s, o) = setup();
+        let measured_task = "history";
+        if measured {
+            TaskMachine::new(&s).create(measured_task, "prior work", "owner").unwrap();
+        }
+        s.write(|db| {
+            let long_role = "worker-devops-engineer";
+            let short_role = "worker-backend-dev";
+            node(db, "t", "short1", short_role, &["short1"], &[])?;
+            node(db, "t", "long", long_role, &["long"], &[])?;
+            node(db, "t", "short2", short_role, &["short2"], &["short1"])?;
+            node(db, "t", "short3", short_role, &["short3"], &["short2"])?;
+            // Z precedes A in the retained plan, despite their equal weights.
+            node(db, "t", "z", short_role, &["z"], &[])?;
+            node(db, "t", "a", short_role, &["a"], &[])?;
+            if measured {
+                for (id, role, kind, finish) in [
+                    ("long", long_role, "operations", "2026-01-01T00:05:00Z"),
+                    ("short", short_role, "implementation_backend", "2026-01-01T00:01:00Z"),
+                ] {
+                    event_tx(db, measured_task, "NATIVE_ROUTE_SELECTED", json!({
+                        "assignment_ref":id,"timing_work_kind":kind,"timing_complexity":"normal"
+                    }))?;
+                    let route = db.last_insert_rowid();
+                    let start = "2026-01-01T00:00:00Z";
+                    db.execute("INSERT INTO attempt_route_audit
+                        (id,attempt_id,task_id,role,engine,connection_id,model,params_fingerprint,decision,decision_detail_json,recorded_at)
+                        VALUES (?,?,?,?,'codex-acp','fixture','fixture','fixture','authorized',?,?)",
+                        (id,id,measured_task,role,json!({"route_event":route}).to_string(),start))?;
+                    for (event, at, payload) in [
+                        ("NATIVE_ATTEMPT_DELIVERY", start, json!({
+                            "assignment_ref":id,"attempt":id,"first":true,"route_event":route,"delivered_at":start
+                        })),
+                        ("WORKER_COMPLETED", finish, json!({"assignment_ref":id,"attempt_id":id})),
+                    ] {
+                        db.execute("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+                            VALUES (?,?,'runtime',?,?)", (measured_task,event,payload.to_string(),at))?;
+                    }
+                }
+            }
+            Ok(())
+        }).unwrap();
+        assert_eq!(
+            s.read(|db| node_duration(db, "t", "long")).unwrap(),
+            measured.then_some(300_000),
+        );
+        let order = names(&s, &claim_ready(&s, "t", &o, "c", &Allow).unwrap());
+        assert_eq!(order, if measured {
+            ["long", "short1", "z", "a"]
+        } else {
+            ["short1", "long", "z", "a"]
+        });
+    }
 }
 // Mirrors tests/test_runtime_task_machine.py::test_finished_node_holds_scope_until_engine_absence_is_observed.
 #[test]

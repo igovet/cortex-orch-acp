@@ -29,9 +29,9 @@ export function emptyMachine(input: Pick<Machine, "id" | "name" | "kind" | "conn
   };
 }
 /** What the real path shows before a service answers: this machine, offline, and nothing on it. */
-export function emptyWorkspace(): WorkspaceState {
+export function emptyWorkspace(machineName = "This machine"): WorkspaceState {
   return {
-    options: { models: [], efforts: [], modes: [], languages: [] }, machines: [emptyMachine({ id: LOCAL_MACHINE_ID, name: "This machine", kind: "local", connection: "disconnected" })],
+    options: { models: [], efforts: [], modes: [], languages: [] }, machines: [emptyMachine({ id: LOCAL_MACHINE_ID, name: machineName, kind: "local", connection: "disconnected" })],
     projects: [], tasks: [], sprints: [], workers: [], messages: [], sessions: [], events: [], engineUsage: [], purged: [], repos: [], reviews: [],
   };
 }

@@ -37,7 +37,7 @@ pub(super) async fn execute(
             cortex_engine::schema::validate(&tool["inputSchema"], &arguments)
                 .map_err(|_| CoreError::Refused("invalid_arguments"))?;
             let state = state.ok_or(CoreError::Refused("sprint_membership_required"))?;
-            crate::machine::sprint_revision::submit(store, &state, &i.task, &c.channel_id, &arguments)
+            crate::machine::sprint_revision::submit(store, &state, &i.task, &c.channel_id, &arguments, Some(&c))
         })?
         .await
         .map_err(|_| CoreError::Refused("native_host_closed"))?

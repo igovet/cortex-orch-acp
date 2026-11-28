@@ -75,6 +75,7 @@ pub(crate) const HOLDS: &[(&str, &str)] = &[
     ("settlement_blocked", "task_state_unknown"),
     ("settlement_blocked", "dependencies_blocked"),
     ("settlement_blocked", "automatic_acceptance_blocked"),
+    ("settlement_blocked", "workspace_unobservable"),
     ("settlement_blocked", "automatic_acceptance_required"),
     ("settlement_blocked", "stale_result"),
     ("settlement_blocked", "workspace_drift"),
@@ -108,6 +109,19 @@ pub(crate) const OWNER_ACTIONS: &[&str] = &[
     "change_run_mode",
     "close_as_is",
 ];
+
+#[test]
+fn unavailable_workspace_offers_observation_retry_without_agent_repair() {
+    use crate::native_driver::sprints::{automatic_hold, HoldFacts};
+    let hold = automatic_hold(
+        "settlement_blocked",
+        Some("task"),
+        "workspace_unobservable",
+        "Files changed during the workspace scan.",
+        &HoldFacts::default(),
+    );
+    assert_eq!(hold["ownerActions"], json!(["retry", "close_as_is"]));
+}
 
 #[test]
 fn every_automatic_hold_has_one_next_actor_and_owner_holds_have_actions() {

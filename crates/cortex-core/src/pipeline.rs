@@ -1,7 +1,6 @@
 //! The runtime-owned `pipeline.md` of each task: a human-readable projection of
-//! durable task state, published through the ordinary document publication path
-//! (`Publisher::create_pipeline_draft` / `publish`), so every edition is a
-//! journaled, hash-checked edition of the one pipeline report, newest first
+//! durable task state. The runtime publishes each edition directly through
+//! the shared crash intent and digest checks, newest first
 //! with older editions below in the same file.
 //!
 //! [`sync`] is idempotent and derived only from durable state. It publishes the
@@ -18,7 +17,7 @@ use crate::{
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 
-/// The principal that owns runtime pipeline drafts. Models never hold it.
+/// The principal that publishes runtime pipeline editions.
 pub const OWNER: &str = "runtime";
 const INITIAL_TITLE: &str = "Initial pipeline";
 const INITIAL_SUMMARY: &str =
@@ -335,16 +334,10 @@ pub fn sync(store: &Store, task: &str, route: Option<&Route<'_>>) -> CoreResult<
         &crate::digest(format!("{title}\n{summary}").as_bytes())[..16]
     );
     let publisher = Publisher::new(store);
-    let draft = publisher.create_pipeline_draft(task, OWNER, &request)?;
-    let markdown = format!("Cortex draft ID: `{}`\n\n{body}", draft.draft_id);
-    if draft.draft_path.symlink_metadata().is_ok() {
-        publisher.write_draft(task, OWNER, &draft.draft_id, &markdown)?;
-    }
-    let published = publisher.publish(
+    let published = publisher.publish_runtime_pipeline(
         task,
-        OWNER,
-        &draft.draft_id,
-        &format!("{request}:publish"),
+        &request,
+        &body,
         Publication {
             title: &title,
             summary: &summary,
@@ -493,6 +486,7 @@ mod tests {
         let page = Publisher::new(&s)
             .read_report("t", &id, None, 4000)
             .unwrap();
-        assert!(page.markdown.starts_with("Cortex draft ID: `"));
+        assert!(page.markdown.starts_with("# Runtime pipeline"));
+        assert_eq!(page.markdown, body);
     }
 }

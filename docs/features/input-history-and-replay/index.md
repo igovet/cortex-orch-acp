@@ -68,6 +68,8 @@ Every source event flows through four durable states:
 
 ### Crash recovery: persisted but never recorded
 
+> Historical implementation. The named functions below belong to the retired runtime. See [current queue and continuation handoff](#native-queue-and-continuation-handoff).
+
 If the process crashes after step 1 (source event durably captured) but
 before step 2 (recorded as a `task_events` row) -- for example a crash
 inside `_run_prompt_body` after `bootstrap_task`/
@@ -412,7 +414,7 @@ rows are not changed. This
 preserves a real runtime event even if the transport writer fails after
 enqueueing, without claiming that the host rendered it. These records are
 never read by, or fed into,
-`OrchestratingRuntime`/engine context -- display history and engine context
+engine context -- display history and engine context
 recovery are deliberately different data (engine context recovery is
 specified in the [recovery capsules](../recovery-capsules/index.md) page). Paseo may apply its presentation filters while replaying:
 hidden Cortex MCP and private `.cortex` operations remain durable records even

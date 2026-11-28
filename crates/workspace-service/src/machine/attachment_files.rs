@@ -400,7 +400,9 @@ pub fn migrate(state: &Path, project: &str, saved: &mut Value) -> Result<()> {
         let path = product_path(state, project)?;
         // Re-read under the lock: a save made meanwhile is converted, never overwritten.
         if let Ok(mut fresh) = settings::read_json(&path, json!({})) {
-            if matches!(externalize(state, &mut fresh), Ok(true)) {
+            if super::sprint_materialize::resolve_publication(project, &mut fresh).is_ok()
+                && matches!(externalize(state, &mut fresh), Ok(true))
+            {
                 let _ = settings::write_json(&path, &fresh);
             }
         }
@@ -504,6 +506,7 @@ pub fn retain_answer_files(root: &Path, state: &Path, project: &str) -> Result<(
     let _lock = settings::Lock::new(state, "machine.lock")?;
     let path = product_path(state, project)?;
     let mut saved = settings::read_json(&path, json!({}))?;
+    super::sprint_materialize::resolve_publication(project, &mut saved)?;
     if answer_references(&store, state, project, &mut saved)? {
         settings::write_json(&path, &saved)?;
     }

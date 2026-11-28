@@ -686,10 +686,10 @@ body[data-filter="errors"] [data-k]:not([data-k~="errors"]) { display: none; }
 .md ul { margin: 0 0 8px; padding-left: 18px; list-style: disc; }
 .md li { margin: 2px 0; }
 .evid { flex: none; border-bottom: 1px solid var(--line); }
-.evid summary { display: flex; align-items: center; gap: 12px; height: 34px; padding: 0 12px; font-size: var(--t-cap); list-style: none; }
-.evid summary::-webkit-details-marker { display: none; }
-.evid summary:hover { background: var(--bg-hover); }
-.evid[open] .i-chevron-right { transform: rotate(90deg); }
+.evid > summary { display: flex; align-items: center; gap: 12px; height: 34px; padding: 0 12px; font-size: var(--t-cap); list-style: none; }
+.evid > summary::-webkit-details-marker { display: none; }
+.evid > summary:hover { background: var(--bg-hover); }
+.evid[open] > summary > .i-chevron-right { transform: rotate(90deg); }
 .evid-b { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; padding: 0 12px 8px 12px; max-height: 148px; overflow-y: auto; }
 .evid-b .chk { min-width: 0; }
 .evid-b .chk > span:not(.src) { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

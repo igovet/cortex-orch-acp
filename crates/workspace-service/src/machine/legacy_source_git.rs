@@ -272,14 +272,16 @@ fn mask_ordered(
 }
 // Err is an oversized or unterminated selection; the caller reports the source
 // unobservable rather than assigning a different identity.
-pub(super) fn listed(root: &Path) -> Result<Option<Listed>, ()> {
+pub(super) fn listed(root: &Path) -> Result<(Option<Listed>, Option<&'static str>), ()> {
     if directory(root).is_err() {
-        return Ok(None);
+        return Ok((None, None));
     }
     let Ok(dirs) = metadata(root) else {
-        return Ok(None);
+        return Ok((None, fs::symlink_metadata(root.join(".git")).is_ok()
+            .then_some("git_metadata_unavailable")));
     };
-    let run = || -> io::Result<Option<Vec<u8>>> {
+    let mut fallback = "git_listing_unavailable";
+    let mut run = || -> io::Result<Option<Vec<u8>>> {
         directory(root)?;
         let scratch = Scratch::new()?;
         let output = scratch.0.join("stdout");
@@ -294,6 +296,7 @@ pub(super) fn listed(root: &Path) -> Result<Option<Listed>, ()> {
         writes.push(scratch.0.clone());
         let mut hidden = hidden;
         hidden.extend(crate::native_sandbox::live_stores(root));
+        fallback = "git_listing_sandbox_unavailable";
         let rules = std::sync::Arc::new(crate::native_sandbox::Sandbox::host(
             &crate::native_sandbox::HostPolicy { writes, hidden, ..Default::default() },
         )?);
@@ -340,7 +343,9 @@ pub(super) fn listed(root: &Path) -> Result<Option<Listed>, ()> {
                 rules.enter()
             });
         }
+        fallback = "git_listing_launch_unavailable";
         let mut child = command.spawn()?;
+        fallback = "git_listing_failed";
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut oversized = false;
         let status = loop {
@@ -373,9 +378,11 @@ pub(super) fn listed(root: &Path) -> Result<Option<Listed>, ()> {
         }
     };
     match run() {
-        Ok(Some(bytes)) if bytes.len() <= 64 * 1024 * 1024 => Listed::parse(&bytes).map(Some),
+        Ok(Some(bytes)) if bytes.len() <= 64 * 1024 * 1024 => {
+            Listed::parse(&bytes).map(|listed| (Some(listed), None))
+        }
         Ok(Some(_)) => Err(()),
         Err(e) if e.kind() == io::ErrorKind::FileTooLarge => Err(()),
-        _ => Ok(None),
+        _ => Ok((None, Some(fallback))),
     }
 }

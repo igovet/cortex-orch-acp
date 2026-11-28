@@ -17,18 +17,21 @@ across models for critical-role dispatch. This is a delivery qualification
 boundary, not evidence of effective model/tool enforcement. See [Claude
 support and limits](../claude-engine/index.md#current-support-0880-2026-10-08). The 2026-10-08 owner-requested Desktop run on 0.88.0 is bounded evidence, not clean qualification: Desktop evidence.
 
-All 23 worker role instructions remain available as canonical skill sources,
-composed from role specializations and the shared report protocol. The redundant
-`agents/*.toml` profile files have been removed. The developer generator
- renders the `agent-sources/`
-specializations and shared protocols into the canonical `skills/worker-*/SKILL.md`
-files and their `references/` copies; its `check` action (`scripts/cortex-xtask.sh profiles check`) asserts the 23 outputs
-and that each `profiles.json` `select_when`/`avoid_when` equals its source's
+Five worker profiles share the report protocol. A fresh plan selects the
+investigator or implementer and can specialize each assignment with domain
+competencies. Retained role identities continue to determine permissions,
+per-role route settings and report structure. See
+[adaptive worker profiles](../../project/adaptive-profiles.md).
+
+The developer generator renders the `agent-sources/` base profiles, specializations
+and shared protocols into the canonical `skills/worker-*/SKILL.md` files and their
+`references/` copies. Its `check` action (`scripts/cortex-xtask.sh profiles check`)
+asserts the five canonical outputs and that each `profiles.json` `select_when`/`avoid_when` equals its source's
 "When to use this profile" bullets. Generated YAML frontmatter and footer comments stay in those files for native skill loaders and are removed from the portable body that engines receive. Instructions describe intellectual work and evidence; they are not an
 authorization mechanism. Workers publish immutable Markdown reports and submit
 structured results through their authenticated channel. They receive explicit
 predecessor report references, not an automatic copy of the parent chat. The
-build-verification role is retained among the 23 but is runtime-reserved: plan
+build-verification profile is runtime-reserved: plan
 intake refuses it and no runtime path dispatches it, because the runtime runs the
 plan's verification commands itself (as the former runtime did). Its profile,
 instructions and tool catalogue stay complete and are exercised on a stored node
@@ -77,9 +80,9 @@ The profile catalogue (`profiles.json`) declares `access_class` as `write`,
 `read_only` or `consultant` for each profile. The generator selects the matching
 canonical verification block from `agent-sources/verification-*.md`; ordinary
 workers share `worker-protocol.md`, while consultants use `consultant-protocol.md`.
-A drift test asserts exact equality between catalogue non-writing roles (including
-the consultant alias) and the runtime's literal `READ_ONLY` set. This metadata
-selects instructions; it does not replace runtime authorization.
+Compatibility mappings retain the original access class of a historical role.
+The catalogue metadata selects instructions. The channel and stage enforce
+runtime authorization.
 
 Worker report examples, predecessor evidence and command-result requirements are
 specified once in the shared protocol; specializations retain only domain-specific
@@ -97,8 +100,7 @@ worker-only `knowledge-harvest` owns census and the canonical coverage contract.
 One shared-skill allowlist supplies read authorization and the role's `read_skill`
 enum; coordinators cannot read worker-only procedures, consultants cannot read
 these project procedures, and read-only roles cannot read the file-changing
-`skill-authoring` and `knowledge-harvest` procedures. All 23 profiles and their
-access classes remain intact.
+`skill-authoring` and `knowledge-harvest` procedures. The legacy role mappings retain their access classes.
 
 ## Capability-based delegation
 
@@ -219,15 +221,7 @@ Consultant exclusions remain unchanged. Situational entries are named in the
 catalog, not eagerly loaded, so an unavailable situational source does not
 block composition.
 
-Worker provisioning composes instructions in `_step_engine_session` before
-recording an engine-open intent or calling the opener. Its existing
-`_run_steps`/`_fail` path records failed status and error code, retains the
-engine-session step and clears the pending channel secret. The existing
-`OrchestratingRuntime._provision_and_prompt_inner` handler emits
-`assignment_failed` with the specific diagnostic instead of `assignment_ready`.
-This uses the existing provisioning error/step reporting, with no new lifecycle
-or permissions mechanism. After repairing the source, a failed delegation
-requires a fresh request; the same failed request is not reopened.
+The [native session host](../../../crates/workspace-service/src/native_sessions.rs) and [instruction composition](../../../crates/workspace-service/src/native_instructions.rs) own worker session setup and instruction delivery.
 
 Requirements intake and design workflow are coordinator-only situational skills.
 The five design-* skills have stage-specific worker allowlists in
@@ -257,10 +251,12 @@ draft/publication and result submission. It is not offered `command_run`, `proje
 `escalation_request`. Dispatch refuses the question, access and three lifecycle
 requests, so a consultation cannot cancel workers or recursively escalate; attempts
 to read project source through those routes fail with `gateway_read_denied`. The consultant is
-reached only through `escalation_request`: a plan that names it is refused
-(`consultant_requires_escalation`). The runtime builds its packet from the reports the
-escalation names, then the escalated revision's reports, each with its SHA-256 and recorded
-artifact versions. Missing evidence becomes a limitation in the consultant's report, and the
+selected by the runtime through an explicit escalation or dedicated recovery. A
+model-submitted plan that names it is refused
+(`consultant_requires_escalation`). The packet starts with the latest verified
+advice and includes the named reports and the reports of the revision being
+replaced, with SHA-256 and artifact versions. Missing evidence becomes a
+limitation in the consultant's report, and the
 consultant asks the user nothing. Its protocol states English-only
 communication, and its turn wrapper omits the question-language exception that
 other worker turns carry. No external MCP
@@ -279,7 +275,7 @@ within the read-only engine jail is not established without a live qualification
 Therefore the packet/report-only rule is the Cortex tool and prompt boundary,
 not a claim that every engine is technically unable to inspect source.
 
-The native runtime does not enforce situational skill triggers at worker `result_submit`: it retains neither a per-attempt tree manifest nor a record of which skills an attempt read (`read_skill` is a read that records nothing), so a refusal such as `situational_skill_required` cannot be grounded in observable data and is not issued. Skill use rests on the role instructions and the `read_skill` catalogue of situational triggers (for example `documentation-sync` before assessing documentation impact), and on independent review. The earlier per-attempt manifest gate belonged to the Python runtime.
+The native runtime retains authenticated gateway receipts for successful skill responses. Situational triggers still depend on the role instructions, the `read_skill` catalogue and independent review. The runtime does not enforce these triggers at `result_submit`, since the receipt records the response and does not establish whether the assignment required the skill or whether the model applied it. See [skill delivery evidence](../../project/adaptive-profiles.md#skill-delivery-evidence).
 
 Every worker finishes its own assignment within its role and permissions. A
 `result_submit` that leaves something the worker can still do is refused

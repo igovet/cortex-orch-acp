@@ -283,7 +283,8 @@ alone and continues as a `native_recovery_failed` continuation when its store
 still accepts one (otherwise it is held with that blocker), and the project
 still opens. Recovery is idempotent: a task already
 held for the same reason, or a worker wait already marked lost, records
-nothing again on the next restart.
+nothing again on the next restart. Startup restores an existing owner wait
+without recording a resume for the unchanged wait.
 
 A finished desktop task the retired host ran is adopted too (`NATIVE_TASK_ADOPTED`
 with `finished: true`, nothing replayed): a new owner epoch fences the old host
@@ -357,7 +358,10 @@ unconfirmed exit or a failure of the second attempt is final: it is recorded as
 `NATIVE_SESSION_START_FAILED` with its attempt number, phase, error, role and
 blocker, the reservation is settled, the channel is revoked and the task stops
 with the blocker as its reason: `coordinator_session_start_failed` for a
-coordinator, `native_session_start_failed` for a worker. Each recorded attempt
+coordinator, `native_session_start_failed` for a worker. Invalid launch
+configuration detected before spawning records a static diagnostic and uses
+infrastructure backoff from the first refusal, preserving the current
+strategy rung. Each recorded attempt
 whose engine process ran carries the process's exit status, the transport's
 close reason and its stderr size, and names a private, redacted stderr tail file
 (see `SECURITY.md`). A channel with a retried attempt is never settled as

@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
-import { ACCESS_LABELS, EFFORT_BY_TIER, effortLabel, engineLabel, ENGINE_KEYS, ENGINES, FALLBACK_ORDER, HOT_PERCENT, kindLabel, modelLabel, orphanTokens, policyOf, projectsWithRouting, RANK_ORDER, RESERVED_ROLE, ROLE_CATALOG, routingSource, setAffinity, setDeny, setPin, setPreferred, setStretch, TIER_LABELS, TIERS, tierFor, unmappedWindows, WORK_KINDS, type EngineKey, type QuotaWindow, type RoutePin, type RoutingRules } from "@cortex/workspace-domain";
+import { ACCESS_LABELS, EFFORT_BY_TIER, effortLabel, engineLabel, ENGINE_KEYS, ENGINES, FALLBACK_ORDER, HOT_PERCENT, kindLabel, modelLabel, orphanTokens, policyOf, projectsWithRouting, RANK_ORDER, RESERVED_ROLE, roleUse, ROLE_CATALOG, routingSource, setAffinity, setDeny, setPin, setPreferred, setStretch, TIER_LABELS, TIERS, tierFor, unmappedWindows, WORK_KINDS, type EngineKey, type QuotaWindow, type RoutePin, type RoutingRules } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { A, I, MenuItem, Pop } from "./kit";
 import { HELP } from "./orch-help";
@@ -56,9 +56,9 @@ function Roles(props: { c: Ctx }) {
       <Show when={open() === id}><PinEditor role={id} label={name} c={props.c} done={() => setOpen(null)} /></Show>
     </>;
   };
-  const group = (title: string, access: "writing" | "read_only" | "consultant") => <>
+  const group = (title: string, use: ReturnType<typeof roleUse>) => <>
     <div class="gr orrow th ws-group"><span>{title}</span><span></span><span></span><span></span><span></span></div>
-    <For each={ROLE_CATALOG.filter(r => r.access === access)}>{r => {
+    <For each={ROLE_CATALOG.filter(r => roleUse(r.id) === use)}>{r => {
       return row(r.id, r.label, ACCESS_LABELS[r.access], kindLabel(r.kind), ladderWords(r.id));
     }}</For>
   </>;
@@ -66,7 +66,7 @@ function Roles(props: { c: Ctx }) {
     <div class="surface"><div class="gt">
       <div class="gr orrow th"><span>Role<Hint text={HELP.pins} label="role pins" /></span><span class="row ws-gap4">Work kind<Lock text="" /></span><span class="row ws-gap4">Tier<Lock text="" /></span><span>Pin</span><span></span></div>
       {row("*", "All roles", "Pin for every role without its own", null, null)}
-      {group("Writing", "writing")}{group("Read-only", "read_only")}{group("Consultant", "consultant")}
+      {group("New plan nodes", "plan")}{group("Runtime stages", "runtime")}{group("Retained roles from earlier plans", "retained")}
     </div></div>
     <div class="note-box plain"><I n="lock" s={14} /><span>Flagship is reached only by escalation, a confirmed request of yours, or a pin. Ordinary work tops out at deep, and low complexity moves a role one tier lighter.</span></div>
   </>;
@@ -85,12 +85,11 @@ function WorkKinds(props: { c: Ctx }) {
       <div class="gr okrow th"><span>Work kind</span><span>Lean to engine<Hint text={HELP.affinity} label="lean to engine" /></span><span>Preferred models</span><span>Light models also standard</span></div>
       <div class="gr okrow"><span class="w500">All kinds</span><span>{lean("*", null)}</span><span></span><span></span></div>
       <For each={WORK_KINDS}>{k => {
-        const roles = () => ROLE_CATALOG.filter(x => x.kind === k.id);
         const preferred = () => models().filter(x => policyOf(r(), x.engine, x.id).preferredFor?.includes(k.id));
         const lights = () => models().filter(x => r().engines[x.engine].tiers[x.id]?.includes("light"));
         const key = slug(k.id);
         return <div class="gr okrow">
-          <span class="trunc"><span class="w500">{k.label}</span><span class="sub">{roles().length} role{roles().length === 1 ? "" : "s"}</span>
+          <span class="trunc"><span class="w500">{k.label}</span>
             <Show when={k.bound}><span class="chip ws-static ws-mt4">Requires its engine</span></Show></span>
           <span>{lean(k.id, k.lean)}</span>
           <span class="ws-tags">
@@ -240,7 +239,7 @@ export function Routing(props: { tab?: string }) {
       <Show when={ENGINES.some(e => m().config.catalogue[e.id].models.length > 0)} fallback={<div class="surface ws-empty">No models known yet: refresh the model lists under Models.</div>}><ModelPolicies c={c} /></Show>
     </Group>
     <Group id="set-roles" title="Roles and pins" hint={[HELP.pins, "role pins"]}>
-      <Rec>No pins: automatic routing balances cost, quota and quality.</Rec>
+      <Rec>New plans choose General or Explorer with competencies for the work. Review, verification and consultation use runtime-assigned roles. A pin on an earlier role applies to nodes that retain that role.</Rec>
       <Roles c={c} />
     </Group>
     <Group id="set-kinds" title="Work kinds" hint={[HELP.affinity, "work kinds"]}>

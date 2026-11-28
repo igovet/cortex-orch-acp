@@ -1,4 +1,4 @@
-import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch, useContext, type Accessor } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch, useContext, type Accessor, type JSX } from "solid-js";
 import { automaticQueueOf, COMPLEXITY_LABELS, dependencyProblem, isOpen, openPlanningQuestion, queueDrivenMode, runBlocker, sprintCloseBlockers, SPRINT_RUN_MODES, type AttachmentInput, type PlanItem, type Sprint, type SprintGraphEdit, type WorkspaceState } from "@cortex/workspace-domain";
 import { attachmentName } from "./attachments";
 import { dependentWhy, editNotice, linkProblem, linkWords, liveModel, placeWords, watchLiveGraphs, type LiveModel } from "./live-graph";
@@ -164,30 +164,24 @@ export function SprintCrumb(props: { sprint: Sprint }) {
     closed={{ class: "cur trunc ws-title", text: saved => <>Sprint: {saved}</> }} />;
 }
 
-export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }) {
+function sprintLifecycle(sprint: () => Sprint) {
   const ws = useWs();
-  const planning = () => props.sprint.planning !== "created";
+  const targetName = () => [ws.store.state().projects.find(p => p.id === sprint().projectId)?.name, sprintTitle(sprint())].filter(Boolean).join(" / ");
   const closeWhy = createMemo(() => {
-    const blocked = sprintCloseBlockers(ws.store.state(), props.sprint);
+    const blocked = sprintCloseBlockers(ws.store.state(), sprint());
     return ws.gate("close_sprint") ?? (blocked.length ? `Close sprint is blocked by: ${blocked.map(b => `${b.title}: ${b.reason}`).join("; ")}.` : undefined);
   });
-  // A shared-worktree sprint is merged into its target once, after every member finished onto its branch.
-  const mergeable = () => props.sprint.checkout?.kind === "worktree" && props.sprint.checkout.shared === true && !props.sprint.merge && !props.sprint.archivedAt
-    && props.sprint.planning === "created" && (() => { const members = ws.store.state().tasks.filter(t => t.sprintId === props.sprint.id && !t.archive); return members.length > 0 && members.every(t => t.status === "done"); })();
-  const mergeSprint = () => {
-    const target = props.sprint.targetBranch ?? "the target branch";
-    ws.open({kind:"confirm",title:"Merge the sprint branch?",action:"Merge sprint",note:`All finished tasks are merged into ${target} as one commit, then the sprint worktree is removed. The branch stays in Git.`,
-      go:async () => (await ws.run({type:"merge_sprint",sprintId:props.sprint.id,confirmed:true})).ok});
-  };
   const close = () => {
     if (closeWhy()) return;
-    ws.open({kind:"confirm",title:"Close this sprint?",action:"Close sprint",note:SPRINT_CLOSE_NOTE,
-      go:async () => { const r = await ws.run({type:"close_sprint",sprintId:props.sprint.id,confirmed:true}); if (r.ok) ws.go({name:"archive",machine:ws.machine().id}); return r.ok; }});
+    const { id: sprintId, projectId } = sprint();
+    ws.open({kind:"confirm",title:"Close this sprint?",action:"Close sprint",note:`${targetName()}. ${SPRINT_CLOSE_NOTE}`,
+      go:async () => { const r = await ws.run({type:"close_sprint",projectId,sprintId,confirmed:true}); if (r.ok) ws.go({name:"archive",machine:ws.machine().id}); return r.ok; }});
   };
   const remove = () => {
-    const id = props.sprint.id, projectId = props.sprint.projectId;
-    const count = new Set([...props.sprint.taskIds,...ws.store.state().tasks.filter(t => t.sprintId === id).map(t => t.id)]).size;
-    const note = `Permanently delete this sprint and all ${count} tasks? The queue and running work will be stopped. Only clean app-created worktrees are removed; other worktrees are kept and their paths shown. The project folder and Git branches are never deleted. This cannot be undone.`;
+    if (ws.gate("delete_sprint")) return;
+    const id = sprint().id, projectId = sprint().projectId;
+    const count = new Set([...sprint().taskIds,...ws.store.state().tasks.filter(t => t.projectId === projectId && t.sprintId === id).map(t => t.id)]).size;
+    const note = `${targetName()}. Permanently delete this sprint and all ${count} tasks? The queue and running work will be stopped. Only clean app-created worktrees are removed; other worktrees are kept and their paths shown. The project folder and Git branches are never deleted. This cannot be undone.`;
     // A refusal is shown once, on the run's own error line (with any kept worktree paths), not repeated in the body.
     // A deletion that started but still waits for a task's stop has happened in part: the dialog closes, the receipt
     // says what is left, and the sprint's own Deleting strip and Retry delete… carry it on.
@@ -198,6 +192,29 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
         if (r.ok) ws.go({name:"home",machine:ws.machine().id});
         return r.ok || r.outcome === "partial_effect";
       }});
+  };
+  return { closeWhy, close, remove };
+}
+
+export function SprintLifecycleItems(props: { sprint: Sprint; focusTrigger?: () => void }) {
+  const actions = sprintLifecycle(() => props.sprint);
+  return <>
+    <Show when={!props.sprint.archivedAt && !props.sprint.deletion}><MenuItem icon="archive" label="Close sprint…" disabled={actions.closeWhy()} onSelect={() => { props.focusTrigger?.(); actions.close(); }} /></Show>
+    <MenuItem icon="trash" label={props.sprint.deletion ? "Retry delete…" : "Delete sprint…"} needs="delete_sprint" onSelect={() => { props.focusTrigger?.(); actions.remove(); }} />
+  </>;
+}
+
+export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }) {
+  const ws = useWs();
+  const planning = () => props.sprint.planning !== "created";
+  const { closeWhy, close, remove } = sprintLifecycle(() => props.sprint);
+  // A shared-worktree sprint is merged into its target once, after every member finished onto its branch.
+  const mergeable = () => props.sprint.checkout?.kind === "worktree" && props.sprint.checkout.shared === true && !props.sprint.merge && !props.sprint.archivedAt
+    && props.sprint.planning === "created" && (() => { const members = ws.store.state().tasks.filter(t => t.sprintId === props.sprint.id && !t.archive); return members.length > 0 && members.every(t => t.status === "done"); })();
+  const mergeSprint = () => {
+    const target = props.sprint.targetBranch ?? "the target branch";
+    ws.open({kind:"confirm",title:"Merge the sprint branch?",action:"Merge sprint",note:`All finished tasks are merged into ${target} as one commit, then the sprint worktree is removed. The branch stays in Git.`,
+      go:async () => (await ws.run({type:"merge_sprint",sprintId:props.sprint.id,confirmed:true})).ok});
   };
   const deleteButton = () => <button class="btn btn-line" {...ws.needs("delete_sprint")} onClick={remove}>Delete sprint…</button>;
   return <Show when={!props.sprint.archivedAt} fallback={<Show when={props.sprint.deletion} fallback={<><span class="st st-idle">Closed sprint</span>{deleteButton()}</>}>
@@ -213,8 +230,7 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
       <Show when={props.sprint.planning === "created"}><div class="tb-fold-only"><MenuItem icon="plus" label="New task" onSelect={() => ws.newItem("task", props.sprint.projectId, props.sprint.id)} /></div></Show>
       <Show when={planning() && props.sprint.planning !== "cancelled"}><MenuItem icon="x" label="Cancel planning" needs="cancel_planning" onSelect={() => ws.run({ type: "cancel_planning", sprintId: props.sprint.id })} /></Show>
       <Show when={props.sprint.planning === "cancelled" && !planningChangeRequired(props.sprint)}><MenuItem icon="play" label={props.sprint.planningFailure ? "Retry planning" : "Resume planning"} needs="resume_planning" onSelect={() => ws.run({ type: "resume_planning", sprintId: props.sprint.id })} /></Show>
-      <MenuItem icon="archive" label="Close sprint…" disabled={closeWhy()} onSelect={close} />
-      <MenuItem icon="trash" label="Delete sprint…" needs="delete_sprint" onSelect={remove} />
+      <SprintLifecycleItems sprint={props.sprint} />
     </Pop>
   </></Show>;
 }
@@ -241,7 +257,7 @@ const planningRoute = (machine: string, sprint: Sprint, tab: "planning" | "worke
 /** One conversation from the first frame. The planner supplies a runtime feed only once its linked row exists. */
 function SprintConversation(props: {
   sprint: Sprint; taskId: string | null; hidden: boolean; changingRequest: Accessor<boolean>;
-  onOpenPlan: () => void; onUnsent: (unsent: boolean) => void;
+  onOpenPlan: () => void; onUnsent: (unsent: boolean) => void; actions?: JSX.Element;
 }) {
   const ws = useWs();
   const s = () => props.sprint;
@@ -322,16 +338,20 @@ function SprintConversation(props: {
           <Match when={e().kind === "event"}><div class="answered"><I n="check" s={14} /><span>{e().text}</span><Show when={e().at !== null}><span class="faint">{clock(e().at)}</span></Show></div></Match>
         </Switch>}</Keyed>
         <SentMessages place={sentHere()} />
-        <PlanLine sprint={s()} onOpenPlan={props.onOpenPlan} />
-        <Show when={asks().length > 0}><QuestionForm asks={asks()} needs="answer_planning" blocked={() => undefined} projectId={s().projectId} note={() => null} onSend={answer}
-          waiting={ask => ask.at === null ? "" : clock(ask.at)} /></Show>
         <Show when={pending()}>{label => <div class="answered" role="status">{label()}</div>}</Show>
     </>;
-    return { tail, count: () => thread().length + ws.store.sends.shown(sentHere()).length + asks().length + (s().plan ? 1 : 0) };
+    const actions = <>
+        <PlanLine sprint={s()} onOpenPlan={props.onOpenPlan} />
+        <Show when={asks().length > 0}><QuestionForm asks={asks()} needs="answer_planning" blocked={() => undefined} projectId={s().projectId}
+          draftScope={[ws.machine().id, s().projectId, s().id, s().planningTaskId ?? null, "planning-history"]}
+          note={() => null} onSend={answer}
+          waiting={ask => ask.at === null ? "" : clock(ask.at)} /></Show>
+    </>;
+    return { tail, actions, count: () => thread().length + ws.store.sends.shown(sentHere()).length + asks().length + (s().plan ? 1 : 0) };
   };
   const sprintFeed = { brief: <SprintBrief sprint={s()} />, saved, onUnsent: props.onUnsent };
   return <PlanningPlace.Provider value={{ sprint: s, changingRequest: props.changingRequest }}>
-    <TaskConversation model={model} now={now()} pick={model() ? firstWorker(model()!) : ""} onPick={onPick} hidden={props.hidden} sprintFeed={sprintFeed} />
+    <TaskConversation model={model} now={now()} pick={model() ? firstWorker(model()!) : ""} onPick={onPick} hidden={props.hidden} sprintFeed={sprintFeed} actions={props.actions} />
   </PlanningPlace.Provider>;
 }
 
@@ -855,6 +875,9 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
     if (chatTab() || sp.swap) return "minmax(0, 1fr)";
     return [sp.replaced && details() ? "" : "minmax(0, 1fr)", details() ? (sp.replaced ? "minmax(0, 1fr)" : "var(--inspector-w)") : ""].filter(Boolean).join(" ");
   };
+  const conversationTab = () => chatTab() && !workersTab();
+  const createButton = () => <button class="btn btn-primary" aria-disabled={createBlocked() ? "true" : undefined} data-why={createBlocked()} aria-describedby={createBlocked() ? why : undefined} {...ws.needs("materialize_plan")} onClick={create} aria-label={s().plan ? createLabel(n(), s().plan!.version) : undefined}>{s().plan ? <>{createLabel(n(), s().plan!.version).replace(/ from Plan v\d+$/, "")}<span class="l-tight-hide">from Plan v{s().plan!.version}</span></> : "Create tasks"}</button>;
+  const planningActions = () => cancelled() ? (failure() ? failed : stopped).action : planning.action;
   return <Page class="l-work sp-page" scroll="none"
     head={<Show when={!fullOn()}>
       <Toolbar class="sp-h" label="Sprint"
@@ -868,11 +891,11 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
         end={<>
           <RunMode sprint={s()} describedBy={created() ? queueWhy : why} /><QueueHelp sprint={s()} />
           <SprintTarget sprint={s()} summary={props.summary} class="l-tight-hide" />
-          <Show when={created()} fallback={<button class="btn btn-primary" aria-disabled={createBlocked() ? "true" : undefined} data-why={createBlocked()} aria-describedby={createBlocked() ? why : undefined} {...ws.needs("materialize_plan")} onClick={create} aria-label={s().plan ? createLabel(n(), s().plan!.version) : undefined}>{s().plan ? <>{createLabel(n(), s().plan!.version).replace(/ from Plan v\d+$/, "")}<span class="l-tight-hide">from Plan v{s().plan!.version}</span></> : "Create tasks"}</button>}><QueueButton sprint={s()} steady describedBy={queueWhy} /></Show>
+          <Show when={created()} fallback={<Show when={!conversationTab()}>{createButton()}</Show>}><QueueButton sprint={s()} steady describedBy={queueWhy} /></Show>
         </>} />
       <Tabs route={props.route} sprint={s()} />
     </Show>}
-    status={<StatusLane items={lane()} />}>
+    status={<StatusLane items={lane()} hideActions={conversationTab() && !created()} />}>
     <Modal open={!!requestEdit()} onClose={closeRequest} label="Edit original request">
       <div class="dlg-h"><h2>Edit original request</h2></div>
       <div class="dlg-b">
@@ -890,7 +913,11 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
     </Modal>
     <div ref={body} class="sp-body" data-reading={details() ? "true" : undefined} data-full={fullOn() ? "" : undefined} style={{ "grid-template-columns": columns() }}>
       <SprintConversation sprint={s()} taskId={planningTask()} hidden={!chatTab() || workersTab()} changingRequest={changingRequest}
-        onUnsent={setUnsent} onOpenPlan={() => ws.go(at("plan"))} />
+        onUnsent={setUnsent} onOpenPlan={() => ws.go(at("plan"))} actions={
+          <Show when={conversationTab() && !created()}>
+            <ActionBar place="card" label="Planning actions">{planningActions()}{createButton()}</ActionBar>
+          </Show>
+        } />
       <Show when={workersTab() && planningTask()} keyed>{task => <PlanningTaskWorkers sprint={s()} taskId={task} worker={props.route.worker} />}</Show>
       <Plan sprint={s()} draft={draft()} setDraft={setDraft} reading={reading()} onRead={key => { if (key) setOpened("details"); setReading(key); }} rows={setRows}
         hidden={chatTab() || (space().replaced && details())} full={fullOn()} setFull={setFull} conv={conv}
@@ -906,6 +933,11 @@ function SummaryTab(props: { route: SprintRoute; sprint: Sprint }) {
   watchLiveGraphs(ws.store, () => [props.sprint]);
   const data = createMemo(() => sprintSummary(ws.store.index(), props.sprint));
   const gap = createMemo(() => sprintGap(ws.store.index(), props.sprint));
+  const revisionSources = createMemo(() => {
+    const tasks = data().rows.map(row => row.view.task);
+    if (props.sprint.archivedAt || props.sprint.deletion || !tasks.some(t => t.status === "draft" && !t.executionId)) return [];
+    return tasks.filter(t => t.status === "working" && t.process === "live" && t.executionId && !t.archive);
+  });
   const cols = "18px minmax(0,2fr) 150px minmax(0,1.4fr) minmax(0,1fr)";
   const planning = (): Route => ({ ...props.route, tab: "planning" });
   const gapStrip = createGapStrip(() => props.sprint);
@@ -939,6 +971,11 @@ function SummaryTab(props: { route: SprintRoute; sprint: Sprint }) {
         </div></div>
       </Show>
       <Show when={data().closed > 0}><div class="cap muted">{data().closed} closed without a merge.</div></Show>
+      <Show when={revisionSources().length > 0}><details class="surface ws-revision-request">
+        <summary>{ws.t("requestSprintRevision")}</summary>
+        <p>{ws.t("requestSprintRevisionHelp")}</p>
+        <For each={revisionSources()}>{task => <A class="lnk" to={{ name: "task", machine: props.route.machine, task: task.id }}>{task.title}</A>}</For>
+      </details></Show>
       <SprintRevisions sprint={props.sprint} graph={ws.store.liveGraph(props.sprint.id)?.graph ?? null} history />
       <div class="cap faint">This is an index of real results. A check that did not run is shown as not run, never as a pass.</div>
     </div></div>

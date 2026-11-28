@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
-import { effortLabel, kindLabel, previewContext, previewGrid, previewRoute, ROLE_CATALOG, TIER_LABELS, WORK_KINDS, type Complexity, type RoutingRules } from "@cortex/workspace-domain";
+import { effortLabel, kindLabel, previewContext, previewGrid, previewRoute, roleUse, ROLE_CATALOG, TIER_LABELS, WORK_KINDS, type Complexity, type RoutingRules } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { I } from "./kit";
 import { RouterRules } from "./orch-routing";
@@ -13,7 +13,7 @@ export function RoutePreview() {
   const ws = useWs();
   const d = useRouting();
   const m = () => ws.machine(), scope = () => ws.settings.scope();
-  const [role, setRole] = createSignal("worker-backend-dev");
+  const [role, setRole] = createSignal("worker-general");
   const [kind, setKind] = createSignal("implementation_backend");
   const [complexity, setComplexity] = createSignal<Complexity>("normal");
   const [attempt, setAttempt] = createSignal<"first" | "escalated">("first");
@@ -29,7 +29,7 @@ export function RoutePreview() {
   return <Shell section="routing" wide back={{ to: orchTo(m().id, "routing"), label: "Routing" }} title="Route preview" lead="What would run this work, and why the other routes are out. Read-only." bar={<Bar d={d} />}>
     <SourceStrips />
     <div class="surface ws-pad ws-pv-in">
-      <span class="row ws-gap4"><span class="cap muted">Role</span><Pick id="m-pv-role" label="Role" width="170px" value={role()} options={ROLE_CATALOG.map(r => ({ id: r.id, label: r.label }))} onPick={pickRole} /></span>
+      <span class="row ws-gap4"><span class="cap muted">Role</span><Pick id="m-pv-role" label="Role" width="170px" value={role()} options={ROLE_CATALOG.map(r => ({ id: r.id, label: r.label, sub: roleUse(r.id) === "retained" ? "Retained role" : roleUse(r.id) === "runtime" ? "Runtime stage" : "New plan nodes" }))} onPick={pickRole} /></span>
       <span class="row ws-gap4"><span class="cap muted">Work kind</span><Pick id="m-pv-kind" label="Work kind" width="200px" value={kind()} options={WORK_KINDS.map(k => ({ id: k.id, label: k.label }))} onPick={setKind} /></span>
       <span class="row ws-gap4"><span class="cap muted">Complexity</span><Seg label="Complexity" value={complexity()} options={COMPLEXITIES} onChange={setComplexity} /></span>
       <span class="row ws-gap4"><span class="cap muted">Attempt</span><Seg label="Attempt" value={attempt()} options={[{ id: "first", label: "First" }, { id: "escalated", label: "Escalated" }] as const} onChange={setAttempt} /></span>
@@ -39,7 +39,7 @@ export function RoutePreview() {
     <Show when={view() === "one"} fallback={
       <div class="surface"><div class="gt">
         <div class="gr ogrow th"><span>Role</span><span>Low</span><span>Normal</span><span>High</span></div>
-        <For each={grid()}>{r => <div class="gr ogrow"><span class="w500 trunc">{r.label}</span><For each={r.cells}>{c => <button class={`ws-cellbtn cap trunc ${c.blocked ? "st-bad" : ""}`} aria-label={`Fill the inputs: ${r.label}, ${c.complexity}: ${c.text}`} onClick={() => open(r.role, c.complexity)}>{c.text}</button>}</For></div>}</For>
+        <For each={grid()}>{r => <div class="gr ogrow"><span class="w500 trunc">{r.label}<Show when={roleUse(r.role) === "retained"}><span class="sub">Retained role</span></Show></span><For each={r.cells}>{c => <button class={`ws-cellbtn cap trunc ${c.blocked ? "st-bad" : ""}`} aria-label={`Fill the inputs: ${r.label}, ${c.complexity}: ${c.text}`} onClick={() => open(r.role, c.complexity)}>{c.text}</button>}</For></div>}</For>
       </div></div>
     }>
       <Show when={result().blocked}>{b => <div class="note-box bad" role="status"><I n="x-circle" s={14} /><span>{b().text}</span></div>}</Show>

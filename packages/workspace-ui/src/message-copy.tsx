@@ -3,9 +3,12 @@ import { I } from "./kit";
 
 /** Text handed to the clipboard as it is, or false when the clipboard refused it or is not there at all. */
 export async function writeClipboard(text: string): Promise<boolean> {
-  const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
-  if (!clipboard?.writeText) return false;
-  try { await clipboard.writeText(text); return true; } catch { return false; }
+  try {
+    const clipboard = globalThis.navigator?.clipboard;
+    if (!clipboard?.writeText) return false;
+    await clipboard.writeText(text);
+    return true;
+  } catch { return false; }
 }
 
 const SHOWN_MS = 1600;

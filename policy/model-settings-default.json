@@ -28,10 +28,15 @@
         "auto": [
           "opus",
           "fable",
+          "claude-sonnet-5",
           "haiku",
           "sonnet"
         ],
         "tiers": {
+          "claude-sonnet-5": [
+            "standard",
+            "light"
+          ],
           "fable": "flagship",
           "haiku": "light",
           "opus": [
@@ -45,6 +50,23 @@
           ]
         },
         "policy": {
+          "claude-sonnet-5": {
+            "effort_floor": "medium",
+            "max_effort": "xhigh",
+            "preferred_for": [
+              "implementation_frontend",
+              "investigation",
+              "review",
+              "analysis",
+              "operations",
+              "writing",
+              "debugging",
+              "testing",
+              "design",
+              "planning",
+              "implementation_backend"
+            ]
+          },
           "fable": {
             "effort_floor": "low",
             "max_effort": "high",
@@ -231,7 +253,7 @@
         },
         {
           "models": [
-            "sonnet"
+            "claude-sonnet-5"
           ],
           "window": "seven_day_sonnet"
         },

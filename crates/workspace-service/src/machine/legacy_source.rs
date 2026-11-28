@@ -36,13 +36,18 @@ const EXCLUDED_DIR: &[&str] = &[
     ".pytest_cache",
     ".mypy_cache",
 ];
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum ScanError {
-    Unavailable,
+    Changed,
+    Unavailable(&'static str),
 }
 impl From<io::Error> for ScanError {
-    fn from(_: io::Error) -> Self {
-        Self::Unavailable
+    fn from(error: io::Error) -> Self {
+        match error.kind() {
+            io::ErrorKind::NotFound => Self::Changed,
+            _ if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => Self::Changed,
+            _ => Self::Unavailable("source_io_unavailable"),
+        }
     }
 }
 type ScanResult<T> = Result<T, ScanError>;
@@ -53,6 +58,7 @@ struct Budget {
     max_bytes: u64,
     deadline: Instant,
     listed: Option<super::legacy_source_git::Listed>,
+    listing_fallback: Option<&'static str>,
 }
 impl Default for Budget {
     fn default() -> Self {
@@ -63,13 +69,14 @@ impl Default for Budget {
             max_bytes: 512 * 1024 * 1024,
             deadline: Instant::now() + Duration::from_secs(20),
             listed: None,
+            listing_fallback: None,
         }
     }
 }
 impl Budget {
     fn time(&self) -> ScanResult<()> {
         if Instant::now() > self.deadline {
-            Err(ScanError::Unavailable)
+            Err(ScanError::Unavailable("source_scan_timeout"))
         } else {
             Ok(())
         }
@@ -102,7 +109,8 @@ fn open_at(
     directory: bool,
     expected: &Metadata,
 ) -> ScanResult<File> {
-    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| ScanError::Unavailable)?;
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| ScanError::Unavailable("invalid_source_entry"))?;
     let flags = libc::O_RDONLY
         | libc::O_CLOEXEC
         | libc::O_NOFOLLOW
@@ -110,19 +118,18 @@ fn open_at(
         | if directory { libc::O_DIRECTORY } else { 0 };
     let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
     if fd < 0 {
-        return Err(ScanError::Unavailable);
+        return Err(io::Error::last_os_error().into());
     }
     let file = unsafe { File::from_raw_fd(fd) };
     let actual = file.metadata()?;
-    if actual.dev() != expected.dev()
-        || actual.ino() != expected.ino()
+    if !same(&actual, expected)
         || if directory {
             !actual.is_dir()
         } else {
             !actual.is_file()
         }
     {
-        return Err(ScanError::Unavailable);
+        return Err(ScanError::Changed);
     }
     Ok(file)
 }
@@ -159,13 +166,13 @@ fn hash_file(
         size += read as u64;
         budget.bytes += read as u64;
         if size > 64 * 1024 * 1024 || budget.bytes > budget.max_bytes {
-            return Err(ScanError::Unavailable);
+            return Err(ScanError::Unavailable("source_read_limit"));
         }
         hash.update(&buf[..read]);
         hook("read", path);
     }
     if !same(&before, &file.metadata()?) {
-        return Err(ScanError::Unavailable);
+        return Err(ScanError::Changed);
     }
     Ok(format!("{:x}", hash.finalize()))
 }
@@ -197,7 +204,7 @@ fn walk(
     // Python recurses once per level and would exhaust its interpreter stack in a
     // tree this deep. An explicit unobservable result is the bounded native outcome.
     if prefix.iter().filter(|b| **b == b'/').count() >= 128 {
-        return Err(ScanError::Unavailable);
+        return Err(ScanError::Unavailable("source_depth_limit"));
     }
     let before = folder.metadata()?;
     // /proc resolves only our owned descriptor. Every child open is relative
@@ -229,7 +236,7 @@ fn walk(
         }
         budget.files += 1;
         if budget.listed.is_none() && budget.files > budget.max_files {
-            return Err(ScanError::Unavailable);
+            return Err(ScanError::Unavailable("source_entry_limit"));
         }
         let shown = String::from_utf8_lossy(&path).into_owned();
         hook("entry", &shown);
@@ -239,6 +246,9 @@ fn walk(
                 continue;
             }
             let digest = hash_file(&mut file, budget, &shown, hook)?;
+            if !same(&st, &file.metadata()?) {
+                return Err(ScanError::Changed);
+            }
             records.push(record(
                 b"f",
                 &path,
@@ -264,7 +274,7 @@ fn walk(
     }
     hook("scanned", &String::from_utf8_lossy(prefix));
     if !same(&before, &folder.metadata()?) {
-        return Err(ScanError::Unavailable);
+        return Err(ScanError::Changed);
     }
     Ok(())
 }
@@ -278,7 +288,8 @@ fn scan(
     let selecting = Instant::now();
     // An oversized selection or an exhausted mask walk has no bounded successful
     // list: the source is reported unobservable, never partially identified.
-    budget.listed = super::legacy_source_git::listed(root).map_err(|_| ScanError::Unavailable)?;
+    (budget.listed, budget.listing_fallback) = super::legacy_source_git::listed(root)
+        .map_err(|_| ScanError::Unavailable("git_listing_limit"))?;
     // Python starts the tree budget after Git selection, including its timeout.
     // Preserve a caller's stricter test budget rather than resetting it blindly.
     budget.deadline += selecting.elapsed();
@@ -295,7 +306,8 @@ fn scan_selected(
     let folder = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(root)?;
+        .open(root)
+        .map_err(|_| ScanError::Unavailable("source_root_unavailable"))?;
     let mut records = vec![];
     walk(&folder, b"", budget, &mut records, hook)?;
     records.sort_by_cached_key(|r| python_order(r));
@@ -326,14 +338,44 @@ pub(super) fn capture(root: &Path) -> CoreResult<Option<String>> {
     Ok(captured)
 }
 fn fresh(root: &Path) -> Option<String> {
+    counted_scan(root, &mut Budget::default(), &mut |_, _| {})
+        .ok()
+        .map(|(digest, _)| digest)
+}
+/// Acceptance always uses a fresh, complete witness. Retry only a detected race,
+/// keeping the same selection and digest rules for each observation.
+pub(super) fn capture_for_acceptance(root: &Path) -> Result<String, (&'static str, Option<&'static str>)> {
+    fresh_checked(root, &mut |_, _| {})
+}
+fn fresh_checked(
+    root: &Path,
+    hook: &mut impl FnMut(&str, &str),
+) -> Result<String, (&'static str, Option<&'static str>)> {
+    let started = Instant::now();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let mut budget = Budget::default();
+        match counted_scan(root, &mut budget, hook) {
+            Ok((digest, _)) => return Ok(digest),
+            Err(ScanError::Changed) if attempts == 1 && started.elapsed() < Duration::from_secs(10) => continue,
+            Err(error) => return Err((match error {
+                ScanError::Changed => "source_changed_during_scan",
+                ScanError::Unavailable(code) => code,
+            }, budget.listing_fallback)),
+        }
+    }
+}
+fn counted_scan(
+    root: &Path,
+    budget: &mut Budget,
+    hook: &mut impl FnMut(&str, &str),
+) -> ScanResult<(String, Vec<Vec<u8>>)> {
     #[cfg(test)]
     if let Ok(mut scans) = SCANS.lock() {
         *scans.entry(root.to_owned()).or_default() += 1;
     }
-    match scan(root, &mut Budget::default(), &mut |_, _| {}) {
-        Ok((digest, _)) => Some(digest),
-        Err(ScanError::Unavailable) => None,
-    }
+    scan(root, budget, hook)
 }
 #[cfg(test)]
 static SCANS: std::sync::LazyLock<
@@ -656,7 +698,7 @@ mod tests {
                 root.join(".git/index")
             })
             .unwrap();
-            let selection = listed(&root).unwrap();
+            let (selection, _) = listed(&root).unwrap();
             let expected = if selection.is_some() {
                 "selected"
             } else {
@@ -721,6 +763,7 @@ mod tests {
             assert!(
                 super::super::legacy_source_git::listed(&root.0)
                     .unwrap()
+                    .0
                     .is_none(),
                 "{poison}"
             );
@@ -843,7 +886,7 @@ mod tests {
             });
             assert!(fired);
             assert!(
-                matches!(result, Err(ScanError::Unavailable)),
+                matches!(result, Err(ScanError::Changed)),
                 "{phase}: {result:?}"
             );
         }
@@ -865,5 +908,34 @@ mod tests {
         fs::create_dir(root.0.join(".git")).unwrap();
         // Unusable Git metadata falls back to the same bounded whole-tree observer.
         assert!(capture(&root.0).unwrap().is_some());
+    }
+    #[test]
+    fn acceptance_retries_one_race_and_falls_back_to_a_complete_tree_scan() {
+        let root = Root::new();
+        fs::write(root.0.join("reviewed"), "verified content").unwrap();
+        fs::write(root.0.join(".git"), "invalid pointer").unwrap();
+        fs::create_dir(root.0.join("other")).unwrap();
+        let mut changed = false;
+        let result = fresh_checked(&root.0, &mut |phase, path| {
+            if !changed && phase == "scanned" && path == "other" {
+                fs::write(root.0.join("other/new"), "concurrent change").unwrap();
+                changed = true;
+            }
+        });
+        assert!(changed);
+        assert_eq!(result.unwrap(), capture(&root.0).unwrap().unwrap());
+        assert_eq!(fs::read_to_string(root.0.join("reviewed")).unwrap(), "verified content");
+
+        let failure = fresh_checked(&root.0, &mut |phase, path| {
+            if phase == "scanned" && path == "other" {
+                let extra = root.0.join("other/unstable");
+                if extra.exists() {
+                    fs::remove_file(extra).unwrap();
+                } else {
+                    fs::write(extra, "concurrent change").unwrap();
+                }
+            }
+        });
+        assert_eq!(failure, Err(("source_changed_during_scan", Some("git_metadata_unavailable"))));
     }
 }

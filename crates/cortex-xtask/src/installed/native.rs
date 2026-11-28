@@ -7,6 +7,11 @@ use crate::json::{dumps, Format, Res, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub(crate) const GENERAL_WORKER_READY_QUERY: &str =
+    "SELECT EXISTS(SELECT 1 FROM delegation_provisioning
+     WHERE role_id='worker-general' AND status='ready'
+     AND task_id=(SELECT task_id FROM runtime_tasks ORDER BY rowid DESC LIMIT 1))";
+
 fn digest(value: &Value) -> String {
     sha_bytes(canon(value).as_bytes())
 }
@@ -193,11 +198,13 @@ pub fn count(db: &Path, sql: &str) -> Res<i64> {
         .map_err(|_| "store query returned no count".to_string())
 }
 
-pub fn state(root: &Path, channel: &Channel) -> Res<Option<String>> {
-    let db = channel.store_db(root);
-    if !db.exists() {
-        return Ok(None);
+pub fn state(home: &Path, root: &Path, channel: &Channel) -> Res<Option<String>> {
+    match channel.store_anchor(root).symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {}
     }
+    let db = channel.store_db(home, root)?;
     let out = query(
         &db,
         "SELECT state FROM runtime_tasks ORDER BY rowid DESC LIMIT 1",
@@ -205,8 +212,8 @@ pub fn state(root: &Path, channel: &Channel) -> Res<Option<String>> {
     Ok((!out.is_empty()).then_some(out))
 }
 
-pub fn evidence(root: &Path, channel: &Channel, paused: bool) -> Res<Vec<(&'static str, Value)>> {
-    let db = channel.store_db(root);
+pub fn evidence(home: &Path, root: &Path, channel: &Channel, paused: bool) -> Res<Vec<(&'static str, Value)>> {
+    let db = channel.store_db(home, root)?;
     let row = query(
         &db,
         "SELECT task_id||'|'||state FROM runtime_tasks ORDER BY rowid DESC LIMIT 1",
@@ -242,7 +249,8 @@ pub fn evidence(root: &Path, channel: &Channel, paused: bool) -> Res<Vec<(&'stat
 }
 
 pub fn journey(input: &Input, backend: &str, channel: &Channel) -> Res<()> {
-    let root = PathBuf::from("/home/acceptance/native-journey");
+    let home = Path::new("/home/acceptance");
+    let root = home.join("native-journey");
     input.click("Add project", &[], false)?;
     wait("native project picker", || {
         Ok(input
@@ -302,10 +310,10 @@ pub fn journey(input: &Input, backend: &str, channel: &Channel) -> Res<()> {
         input.click_in(TASK_COMPOSER, "Start")?;
         if paused {
             wait_secs("native worker live", 60, || {
-                if state(&root, channel)?.as_deref() != Some("EXECUTING") {
+                if state(home, &root, channel)?.as_deref() != Some("EXECUTING") {
                     return Ok(false);
                 }
-                Ok(count(&channel.store_db(&root), "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')")? == 1)
+                Ok(count(&channel.store_db(home, &root)?, GENERAL_WORKER_READY_QUERY)? == 1)
             })?;
             // The composer is empty here, so its action button is Stop.
             wait("native stop button", || input.has_in(TASK_COMPOSER, "Stop"))?;
@@ -314,13 +322,13 @@ pub fn journey(input: &Input, backend: &str, channel: &Channel) -> Res<()> {
                 // Exact controls, not text: the opposite button must be shown and this one gone.
                 Ok(input.has_in(TASK_COMPOSER, "Resume")?
                     && !input.any_button("Stop")?
-                    && state(&root, channel)?.as_deref() == Some("PAUSED"))
+                    && state(home, &root, channel)?.as_deref() == Some("PAUSED"))
             })?;
             write(&root.join("scenario.txt"), "")?;
             input.click_in(TASK_COMPOSER, "Resume")?;
         }
         wait_secs("native task completed", 90, || {
-            Ok(state(&root, channel)?.as_deref() == Some("COMPLETED"))
+            Ok(state(home, &root, channel)?.as_deref() == Some("COMPLETED"))
         })?;
         wait_secs("native result rendered", 30, || {
             input.seen("Fixture result.")
@@ -330,7 +338,7 @@ pub fn journey(input: &Input, backend: &str, channel: &Channel) -> Res<()> {
             "unchanged native result was labelled stale",
         )?;
         let mut pairs = vec![("backend", s(backend))];
-        pairs.extend(evidence(&root, channel, paused)?);
+        pairs.extend(evidence(home, &root, channel, paused)?);
         emit("native_task_journey", pairs);
         input.click("native-journey", &["link"], false)?;
         wait("native return to project board", || {

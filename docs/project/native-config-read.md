@@ -9,18 +9,7 @@ lane and has no Python fallback. It does not start a scheduler, acquire a projec
 owner, or open a project store. Machine `config.save` now uses the separate
 [native writer](../configuration.md#native-machine-saves) for routing, defaults
 and MCP, without Python fallback.
-`config.action` uses [native connection metadata edits](../configuration.md#native-machine-actions)
-for rename/session limits, the separate native confirmed default-preset reset,
-and profile read/create/save/update/delete/deactivate. Qualified format-1/2 four-section
-activation, wider ignored profile-document metadata and absent-only preset application
-also run natively. Unqualified catalog/setup, wider modeled fields/backing files, unqualified
-activation documents and custom
-preset documents still select Python before admission. The separate action adapter
-implements filesystem-reference validate and canonical secret-file removal without
-reading secret contents; valid keyring validation and removal with unsupported defaults
-retain Python; stale-revision keyring refusals are native. This does not widen the passive reader or
-change provider admission; see the per-action table linked above. Native lazy Claude quota refresh is not
-implemented. Display never runs those producers.
+The [native action dispatcher](../../crates/workspace-service/src/machine/config_action.rs) handles connection edits, supported validation and removal, presets, profiles, refresh and setup. It refuses unsupported shapes. These operations use the action lane and do not extend the passive reader. See [machine actions](../configuration.md#native-machine-actions).
 
 The separate machine `engine.connection` `login_command` action now runs in Rust
 on the bounded inspection lane. It selects a qualified channel-local bundle or
@@ -35,12 +24,7 @@ references retain their state/timestamps on reuse, as in Python. Native failures
 and uncertain registry writes never replay. `add_key` also uses Rust, with separate
 create/write/validate registry transactions, canonical private secret-file writes
 and known-failure removal/opt-out. Failed cleanup or uncertain replacement remains
-unknown, never replayed. Valid keyring validation, unqualified catalog producers and
-OpenCode onboarding with a binary candidate remain Python. Pinned Codex/Claude
-installation and no-candidate OpenCode onboarding are native
-([pinned install](../configuration.md#native-pinned-engine-install)), and every
-other `engine.connection` action is a native `unsupported_action` refusal, so that
-operation never starts the helper.
+unknown, never replayed. Supported installation and onboarding are described in [machine actions](../configuration.md#native-machine-actions).
 No OS-keyring reference is converted into a file or native backend.
 Default native
 service startup no longer requires Python. Setup bundle lookup uses the trusted
@@ -66,16 +50,10 @@ replies/tree/modes and exact transcripts with zero helper calls.
 
 The exact-hash Codex 2.3.0 bundle is now patched and observed natively; its
 adapter is byte-identical to the recorded former patch, and the digest and every patched call site
-are still checked before launch. Potentially usable OpenCode installs,
-OS-keyrings, unqualified
-Codex/Claude candidates (including unsafe artifact state or non-ASCII/control-bearing
-bundled-binary paths), unsafe names/roots, missing locks and unqualified projections
-retain the whole Python request before effects. Unqualified Claude same-name
+are still checked before launch. Unsupported engine candidates, credentials and unsafe paths fail closed. Unqualified Claude same-name
 model effort fallback and over-bound diagnostics refuse after observation without
 snapshot/replay. Redacted lines retain a 400-character prefix plus truncation
-metadata, with a 256-KiB file cap; known launch secret echoes are refused. No native keyring backend,
-installer or onboarding producer is claimed. The lazy Python Settings provider
-is still required. Qualified Codex installs now resolve nested/hoisted npm
+metadata, with a 256-KiB file cap; known launch secret echoes are refused. Qualified Codex installs now resolve nested/hoisted npm
 dependencies, generate source-guarded private adapter/launcher artifacts and
 merge offline debug-model efforts. Their catalog launcher now uses the compiled
 Rust service as a native Linux shebang interpreter, not Python or a shell.
@@ -84,8 +62,7 @@ replay; existing open files survive replacement. 39 offline execution comparison
 cover argv/environment/cwd/stdio, checks, timeouts/reaping and final PID/status/signals.
 The 62 catalog comparisons explicitly validate the changed launcher content;
 all other reply/tree/mode/transcript comparisons are unchanged. Unsupported
-interpreter paths still retain Python before effects. Separate engine/session
-launching is not claimed Python-free. Debug stdout/stderr are never
+interpreter paths are refused. Debug stdout/stderr are never
 retained and each is bounded to 4 MiB; overflow/I/O uncertainty refuses replay.
 Ordinary optional debug failures retain the ACP effort set. See the linked
 producer boundary for captured versions, modes and reproducibility commands.
@@ -155,9 +132,7 @@ is now an explicit passive machine-read contract, not full side-effect parity.
 | Workspace defaults, routing precedence, profile modified/interrupted state, revision tokens, MCP view and setup/usage aggregation | Native display projection now maps completed management observations into the settings envelope, including workspace defaults, revisions, profiles, MCP, setup and weekly usage aggregation. The management-composed path below now loads defaults/profile observations and profile status/differences. The Workspace-composed path below now supplies Workspace defaults; setup-composed discovery now supplies passive setup observations. The additional routing-composed path below now loads routing precedence and cached effort observations. |
 
 The native machine dispatcher composes the completed views and delivers advisory
-diagnostics. Machine config.action retains Python launch-capable catalog/setup refresh;
-native selected-filesystem refresh remains host-only, and native keyring refresh is
-unavailable. A read starts the background limits refresh but never waits for it
+diagnostics. Machine configuration actions use the native dispatcher. The separate selected-filesystem refresh remains host-only. A read starts the background limits refresh but never waits for it
 ([plan usage](../features/token-and-plan-usage/index.md#claude-plan-usage-the-local-usage-cli)). No read claims freshness when those
 observations are missing. Existing unknown-effect and single-owner fences remain:
 a native refusal or partially executed refresh never replays through Python.
@@ -169,14 +144,12 @@ names/bytes/modes are compared at the service socket with zero helper calls,
 including refusals. Additional real-dispatch captures cover format-1/2 four-section
 activation and wider ignored profile-document metadata across all seven verbs in
 Rust. Wider modeled/backing-file numbers and unqualified materialization documents
-still select Python before admission. The action adapter preserves management diagnostics rather
+can be refused before admission. The action adapter preserves management diagnostics rather
 than substituting the passive reader's deliberately coarse diagnostics. Profile
 format-1 writes back up/verify/restore; format-2 metadata writes change only the
 profile file. See [profile provider and safety limits](../configuration.md#native-machine-actions).
 MCP Settings edits already use native config.save; config.action has no
-MCP-management action. This does not finish every profile activation or the
-remaining setup/keyring producers. Native service startup is Python-independent;
-retained requests still start their provider on demand.
+MCP-management action. Unsupported setup and keyring operations return native refusals.
 
 ## Settings display compositor
 
@@ -546,8 +519,7 @@ nonmutation and propagation of upstream refusals.
 
 Machine `config.read` now uses this native setup composition through passive
 host dispatch. Selected-connection refresh and the unsupported keyring-result
-contract remain host-only. Explicit catalog/setup producers still use Python;
-native lazy usage refresh and launch-time trust replacement are not supplied here.
+contract remain host-only and separate from native catalog and setup actions.
 The service-boundary comparison and failure checks are described below.
 
 ## Explicit filesystem registry refresh

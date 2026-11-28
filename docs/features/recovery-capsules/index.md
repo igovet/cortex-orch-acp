@@ -23,9 +23,17 @@ bounded by construction and never stops a task for size:
   (`NATIVE_TURN_DEGENERATE`), guidance, routing and delivery events. The list is
   `NOISE` in `crates/cortex-core/src/recovery_context.rs`; a busy worker turn
   therefore no longer pushes the plan, verification and answer decisions out of
-  the 6,000-character decision budget. `command_events_not_restated` counts the
-  command events, and `unresolved_commands` lists every started command without
-  a recorded outcome (marked "do not replay").
+  the 6,000-character decision budget. The runtime finds the newest retained
+  decisions by event type and reads the matching payloads. `command_events_not_restated` counts the
+  command events up to 1,024. When more events exist,
+  `command_events_not_restated_is_lower_bound` is true. The separate
+  `unresolved_commands` section lists started commands without a recorded
+  outcome (marked "do not replay"). A matching finished or recovered event
+  must belong to the same task and follow the start in journal ID order. The
+  receipt reference takes precedence over a legacy top-level reference. A
+  recovery event can record that the outcome remains unknown. The journal
+  preserves that disposition, and an outcome must come from its retained
+  evidence.
 - Only a worker capsule carries `capacity` (its task's capacity reservations);
   a coordinator capsule omits the section, which no coordinator decision uses.
 - The full capsule is sent once per context generation (session open, session

@@ -18,6 +18,13 @@ describe("a task whose engine is still starting", () => {
     expect(v.fact.text).toBe("Planning");
   });
 
+  it("keeps a functioning task's status independent of a historical setup failure", () => {
+    const state = launching({ phase: "planning", executionState: "running" });
+    const setup = state.machines[0].config.setup["codex-acp"];
+    Object.assign(setup, { status: "connected", automaticPhase: "setup_failed", automaticStage: "checking_saved_catalog" });
+    expect(view(state).fact).toMatchObject({ text: "Planning", tone: "st-idle" });
+  });
+
   it("shows the runtime's own retry notice, and its give-up as a failure that needs the owner", () => {
     const retry = "⟳ The engine did not start (EngineTransportClosed). Retry 3 in 20 s…";
     const retrying = view(launching({ phase: "planning", executionState: "starting", waitReason: retry, warnings: ["engine_launch_retrying"] }));

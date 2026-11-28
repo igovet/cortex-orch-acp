@@ -175,6 +175,24 @@ pub struct RouteEnvironment {
     pub routing_override: Option<PathBuf>,
 }
 impl RouteEnvironment {
+    pub(crate) fn user_state(
+        var: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Option<PathBuf> {
+        var("XDG_STATE_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| var("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+    }
+
+    pub(crate) fn workspace_dev_state(
+        channel_state: &Path,
+        launch_override: Option<&Path>,
+    ) -> PathBuf {
+        launch_override
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| channel_state.join("state"))
+    }
+
     pub fn for_user() -> CoreResult<Self> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -182,9 +200,8 @@ impl RouteEnvironment {
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"));
-        let state = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/state"));
+        let state = Self::user_state(|name| std::env::var_os(name))
+            .ok_or(CoreError::Refused("native_route_home_unavailable"))?;
         Ok(Self {
             home,
             config,
@@ -200,11 +217,10 @@ impl RouteEnvironment {
             environment.config = config
                 .launch_config_root()
                 .unwrap_or_else(|| config.state_dir.join("config"));
-            environment.state = config
-                .launch
-                .dev_state
-                .clone()
-                .unwrap_or_else(|| config.state_dir.join("state"));
+            environment.state = Self::workspace_dev_state(
+                &config.state_dir,
+                config.launch.dev_state.as_deref(),
+            );
             if config.launch.extracted_dev {
                 environment.routing_override = None;
             }
@@ -987,6 +1003,28 @@ pub struct ConfiguredRoutes {
     pub relay: PathBuf,
 }
 impl ConfiguredRoutes {
+    fn resolver(&self, root: &Path) -> CoreResult<RouteResolver> {
+        let key = super::native_runtime::key(root)?;
+        let directory = crate::store_locations::directory(key)?;
+        RouteResolver::load(root, &directory, self.environment.clone())
+    }
+
+    fn worker_session(
+        &self,
+        root: &Path,
+        resolver: &RouteResolver,
+        selected: SelectedRoute,
+    ) -> CoreResult<crate::native_sessions::SessionRoute> {
+        // Use the existing observed quota band only after the authorized route
+        // is selected. Squeeze concurrency without changing that selection.
+        let hot = policy::hot(resolver.usage(&selected.candidate).ok().flatten());
+        let mut session = self.session(root, selected)?;
+        if hot {
+            session.connection_limit = session.connection_limit.min(1);
+        }
+        Ok(session)
+    }
+
     fn registered(&self, field: impl Fn(&Value) -> String) -> Vec<String> {
         read(
             &self.environment.config.join("cortex/connections.json"),
@@ -1010,7 +1048,7 @@ impl ConfiguredRoutes {
         let launch = selected.session_launch(root)?;
         let relay = executable_path(&self.relay)?;
         Ok(crate::native_sessions::SessionRoute {
-            launch, relay, broker_parent:key.directory(),connection:selected.connection().into(),
+            launch, relay, broker_parent:crate::store_locations::directory(key)?,connection:selected.connection().into(),
             connection_limit:selected.connection_limit(),model:selected.model().into(),parameters:selected.parameters.clone(),
             instructions:"Use the channel-served tools. Only the Rust runtime owns lifecycle, review, verification and completion.".into(),
             deadline:std::time::Duration::from_secs(30),
@@ -1139,8 +1177,7 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         settings: &Value,
         option: &str,
     ) -> CoreResult<bool> {
-        let key = super::native_runtime::key(root)?;
-        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let resolver = self.resolver(root)?;
         let selected = resolver.task_coordinator(settings)?;
         let parameters = if matches!(option, "model" | "provider") {
             // A host echo of the saved route is not a change (Python keeps the
@@ -1194,10 +1231,10 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         escalated: bool,
         previous: Option<&str>,
     ) -> CoreResult<crate::native_sessions::SessionRoute> {
-        let key = super::native_runtime::key(root)?;
-        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
-        self.session(
+        let resolver = self.resolver(root)?;
+        self.worker_session(
             root,
+            &resolver,
             resolver.choose(role, node, evidence, escalated, previous)?,
         )
     }
@@ -1211,17 +1248,15 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         previous: Option<&str>,
         context: &mut WorkerRouteContext,
     ) -> CoreResult<(crate::native_sessions::SessionRoute, Value)> {
-        let key = super::native_runtime::key(root)?;
-        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let resolver = self.resolver(root)?;
         let selected =
             resolver.choose_with_context(role, node, evidence, escalated, previous, context)?;
         let mut decision = selected.decision.clone();
         decision["route_engine"] = json!(selected.engine());
-        Ok((self.session(root, selected)?, decision))
+        Ok((self.worker_session(root, &resolver, selected)?, decision))
     }
     fn menu(&self, root: &Path, evidence: &cortex_core::routing::Evidence) -> CoreResult<Value> {
-        let key = super::native_runtime::key(root)?;
-        RouteResolver::load(root, &key.directory(), self.environment.clone())?.menu(evidence)
+        self.resolver(root)?.menu(evidence)
     }
     fn previews(
         &self,
@@ -1229,8 +1264,7 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         plan: &Value,
         evidence: &cortex_core::routing::Evidence,
     ) -> CoreResult<Value> {
-        let key = super::native_runtime::key(root)?;
-        RouteResolver::load(root, &key.directory(), self.environment.clone())?
+        self.resolver(root)?
             .previews(plan, evidence)
     }
     fn mcp_registry(&self) -> CoreResult<crate::native_mcp::Registry> {
@@ -1243,24 +1277,20 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
     /// the qualified, launchable owner routes (see `presentation`).
     fn options(&self, root: &Path, settings: &Value) -> Value {
         let read = || -> CoreResult<Value> {
-            let key = super::native_runtime::key(root)?;
-            let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+            let resolver = self.resolver(root)?;
             Ok(json!(resolver.view(root, settings).options))
         };
         read().unwrap_or_else(|_| json!([]))
     }
     fn sprint_route(&self, root: &Path, complexity: &str) -> CoreResult<Option<Value>> {
-        let key = super::native_runtime::key(root)?;
-        RouteResolver::load(root, &key.directory(), self.environment.clone())?.sprint_route(complexity)
+        self.resolver(root)?.sprint_route(complexity)
     }
     fn select(&self, root: &Path, settings: &Value, id: &str, value: &str) -> CoreResult<Value> {
-        let key = super::native_runtime::key(root)?;
-        RouteResolver::load(root, &key.directory(), self.environment.clone())?
+        self.resolver(root)?
             .select(root, settings, id, value)
     }
     fn listing(&self, root: &Path) -> Vec<Value> {
-        super::native_runtime::key(root)
-            .and_then(|key| RouteResolver::load(root, &key.directory(), self.environment.clone()))
+        self.resolver(root)
             .map(|r| r.listing(root))
             .unwrap_or_default()
     }
@@ -1276,8 +1306,7 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         connection: &str,
         after: &str,
     ) -> CoreResult<bool> {
-        let key = super::native_runtime::key(root)?;
-        let current = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let current = self.resolver(root)?;
         Ok(current.candidates.iter().any(|c| {
             c.connection_id() == connection
                 && c.entry["evidence"]["configured"]["source"] == "discovery"
@@ -1291,8 +1320,7 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         root: &Path,
         route: &crate::native_sessions::SessionRoute,
     ) -> CoreResult<()> {
-        let key = super::native_runtime::key(root)?;
-        let current = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let current = self.resolver(root)?;
         let candidate = current
             .candidates
             .iter()
@@ -1316,8 +1344,7 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         settings: &Value,
     ) -> CoreResult<crate::native_sessions::SessionRoute> {
         // An explicit route choice does not need a resolvable owner default.
-        let key = super::native_runtime::key(root)?;
-        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let resolver = self.resolver(root)?;
         self.session(root, resolver.task_coordinator(settings)?)
     }
     fn fallback_coordinator(
@@ -1325,8 +1352,7 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         root: &Path,
         stored: &Value,
     ) -> CoreResult<crate::native_sessions::SessionRoute> {
-        let key = super::native_runtime::key(root)?;
-        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let resolver = self.resolver(root)?;
         let mut same_model = stored.clone();
         if same_model["model"].as_str().is_some_and(|m| !m.is_empty()) {
             // Same model, effort moved to the nearest level its range allows.
@@ -1342,13 +1368,11 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         root: &Path,
         current: &crate::native_sessions::SessionRoute,
     ) -> CoreResult<Option<Value>> {
-        let key = super::native_runtime::key(root)?;
-        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let resolver = self.resolver(root)?;
         resolver.alternate_pin(&current.connection, &current.model)
     }
     fn coordinator_pin(&self, root: &Path, settings: &Value) -> CoreResult<Option<Value>> {
-        let key = super::native_runtime::key(root)?;
-        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let resolver = self.resolver(root)?;
         Ok(Some(resolver.pin(settings)?))
     }
     fn pinned_route(
@@ -1357,29 +1381,17 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
         pin: &Value,
         effort: Option<&str>,
     ) -> CoreResult<crate::native_sessions::SessionRoute> {
-        let key = super::native_runtime::key(root)?;
-        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let resolver = self.resolver(root)?;
         self.session(root, resolver.pinned(pin, effort)?)
     }
     fn route(&self, root: &Path, role: &str) -> CoreResult<crate::native_sessions::SessionRoute> {
-        let key = super::native_runtime::key(root)?;
-        let resolver = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let resolver = self.resolver(root)?;
         let selected = if role == "orchestrator" {
             resolver.coordinator()?
         } else {
             resolver.worker(role)?
         };
-        let launch = selected.session_launch(root)?;
-        let relay = executable_path(&self.relay)?;
-        Ok(crate::native_sessions::SessionRoute {
-            launch, relay, broker_parent: key.directory(),
-            connection: selected.connection().into(),
-            connection_limit: selected.connection_limit(),
-            model: selected.model().into(),
-            parameters: selected.parameters.clone(),
-            instructions: "Use the channel-served tools. Only the Rust runtime owns lifecycle, review, verification and completion.".into(),
-            deadline: std::time::Duration::from_secs(30),
-        })
+        self.session(root, selected)
     }
 }
 fn valid_tiers(v: &Value) -> bool {

@@ -26,6 +26,7 @@ pub struct Identity {
     pub role: String,
     pub profile: Option<String>,
     pub stage: Option<String>,
+    pub read_only: bool,
     pub assignment: Option<String>,
     pub session: Option<String>,
 }
@@ -141,7 +142,11 @@ pub fn authenticate(
              WHEN c.role='coordinator' AND EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=c.task_id
                  AND e.type='OWNER_DECISION_COORDINATOR_STARTED' AND json_extract(e.payload_json,'$.channel_id')=c.channel_id)
              THEN 'owner_decision' ELSE n.stage END,
-        CASE WHEN c.role='worker' THEN p.idempotency_key END,p.engine_session_ref,p.step,p.status,t.state
+        CASE WHEN c.role='worker' THEN p.idempotency_key END,p.engine_session_ref,p.step,p.status,t.state,
+        EXISTS(SELECT 1 FROM runtime_events e, json_each(e.payload_json,'$.plan.tasks') j
+          WHERE e.id=(SELECT max(p.id) FROM runtime_events p WHERE p.task_id=n.task_id
+            AND p.type IN ('PLAN_ACCEPTED','PLAN_AMENDED') AND json_extract(p.payload_json,'$.revision')=n.revision)
+            AND json_extract(j.value,'$.id')=n.node_id AND json_extract(j.value,'$.read_only')=1)
         FROM trusted_channels c JOIN task_owners o ON o.task_id=c.task_id AND o.epoch=c.owner_epoch
         JOIN runtime_tasks t ON t.task_id=c.task_id
         JOIN delegation_provisioning p ON p.task_id=c.task_id AND p.channel_id=c.channel_id
@@ -154,7 +159,7 @@ pub fn authenticate(
             AND c.assignment_id=n.assignment_ref AND p.role_id=n.role)",
         (channel, crate::now()), |r| Ok((r.get(0)?, Identity {
             task:r.get(1)?,attempt:r.get(2)?,principal:r.get(3)?,epoch:r.get(4)?,role:r.get(5)?,
-            profile:r.get(6)?,stage:r.get(7)?,assignment:r.get(8)?,session:r.get(9)?,
+            profile:r.get(6)?,stage:r.get(7)?,assignment:r.get(8)?,session:r.get(9)?, read_only:r.get(13)?,
         },r.get(10)?,r.get(11)?,r.get(12)?))).optional()?;
     let (hash, identity, step, status, state) =
         row.ok_or(CoreError::Refused("channel_authority_refused"))?;

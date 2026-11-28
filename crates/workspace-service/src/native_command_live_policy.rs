@@ -84,6 +84,9 @@ pub(crate) fn controls(
     env: &BTreeMap<OsString, OsString>,
 ) -> io::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
+    paths.extend(
+        crate::native_store_policy::roots(env).map_err(|_| unavailable("invalid_control_path"))?,
+    );
     let home = env_path(env, "HOME").filter(|p| p.is_absolute());
     if let Some(home) = &home {
         paths.extend(
@@ -137,7 +140,7 @@ pub(crate) fn controls(
 pub(crate) fn protected_target(root: &Path, path: &Path) -> bool {
     protected_target_environment(root, path, &std::env::vars_os().collect())
 }
-pub(super) fn protected_target_environment(
+pub(crate) fn protected_target_environment(
     root: &Path,
     path: &Path,
     env: &BTreeMap<OsString, OsString>,

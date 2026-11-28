@@ -1,5 +1,5 @@
 import { createContext, useContext, type Accessor, type JSX } from "solid-js";
-import type { CommandReceipt, ConnectOutcome, ConnectResult, Machine, McpServer, SurfaceKey, WorkerRoute, WorkspaceCommand } from "@cortex/workspace-domain";
+import type { CommandReceipt, ConnectOutcome, ConnectResult, Machine, McpServer, Sprint, SurfaceKey, WorkerRoute, WorkspaceCommand } from "@cortex/workspace-domain";
 import type { CopyKey } from "./copy";
 import type { WsDialog } from "./dialogs";
 import type { Buffers } from "./editor-buffers";
@@ -130,6 +130,7 @@ export type Ws = {
   terminal?: TerminalPort;
   voice?: VoicePort;
   terminalAvailable: Accessor<boolean>; toggleTerminal: () => void;
+  openSprintMenu: (sprint: Pick<Sprint, "id" | "projectId">, trigger: HTMLElement, point?: { x: number; y: number }) => void;
   openPalette: () => void; openHelp: () => void; openTaskMenu: (taskId: string, trigger: HTMLElement, point?: { x: number; y: number }) => void;
   /** Opens New task or sprint; a sprint id preselects that sprint for a new task. */
   newItem: (kind: "task" | "sprint", project?: string | null, sprint?: string | null) => void;
@@ -139,6 +140,7 @@ export type Ws = {
   closeTask: (taskId: string, how?: "external" | "already_in_target", refused?: (message: string) => void) => void;
   /** Unsent composer text, per task and worker, so moving around never loses it. */
   drafts: Map<string, string>;
+  localDrafts?: import("./local-drafts").LocalDrafts;
   /** The one open review or Git dialog. */
   dialog: Accessor<WsDialog | null>; open: (dialog: WsDialog) => void; closeDialog: () => void;
   /** Accepts this version, or asks first when any check did not pass. */

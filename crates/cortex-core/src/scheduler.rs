@@ -7,8 +7,8 @@ use crate::{
     ownership::{self, OwnerEpoch},
     CoreResult, Store,
 };
-use rusqlite::Transaction;
-use serde_json::json;
+use rusqlite::{Connection, OptionalExtension, Transaction};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 pub mod policy;
 pub mod retry;
@@ -19,8 +19,42 @@ pub struct Node {
     pub status: String,
     pub dependencies: Vec<String>,
 }
+pub fn role_kind(role: &str) -> &'static str {
+    match role.trim_start_matches("worker-") {
+        "accessibility-auditor" | "security-auditor" | "code-reviewer" => "review",
+        "architect" | "database-architect" | "ux-designer" => "design",
+        "senior-consultant" => "consultation",
+        "accessibility-fixer" | "frontend-dev" | "mobile-dev" => "implementation_frontend",
+        "devops-engineer" => "operations",
+        "explorer" => "investigation",
+        "technical-writer" => "writing",
+        "planner" => "planning",
+        "qa-engineer" | "build-verification" => "testing",
+        "debugger" | "performance-engineer" => "debugging",
+        _ => "implementation_backend",
+    }
+}
+
+/// Classify actual work using the retained plan and stable role defaults.
+pub fn node_classification<'a>(role: &str, node: &'a Value) -> (&'a str, &'a str) {
+    let kind = match role.trim_start_matches("worker-") {
+        "code-reviewer" => "review",
+        "senior-consultant" => "consultation",
+        _ => node["work_kind"].as_str().unwrap_or(role_kind(role)),
+    };
+    (kind, node["complexity"].as_str().unwrap_or("normal"))
+}
+
 /// Stable longest-remaining-chain first. Cycles/unknown dependencies fail closed.
 pub fn dependency_ready(nodes: &[Node], stage: &str) -> CoreResult<Vec<String>> {
+    dependency_ready_with_durations(nodes, stage, &BTreeMap::new())
+}
+
+fn dependency_ready_with_durations(
+    nodes: &[Node],
+    stage: &str,
+    estimates: &BTreeMap<String, u64>,
+) -> CoreResult<Vec<String>> {
     let map: BTreeMap<_, _> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     if map.len() != nodes.len() || nodes.len() > crate::lifecycle::MAX_NODES {
         return refuse("invalid_plan_graph");
@@ -52,22 +86,35 @@ pub fn dependency_ready(nodes: &[Node], stage: &str) -> CoreResult<Vec<String>> 
     for n in nodes {
         visit(&n.id, &map, &mut BTreeSet::new(), &mut depth)?;
     }
-    fn remaining(id: &str, nodes: &[Node], memo: &mut BTreeMap<String, usize>) -> usize {
-        if let Some(n) = memo.get(id) {
+    fn remaining(
+        node: &Node,
+        nodes: &[Node],
+        memo: &mut BTreeMap<String, u64>,
+        estimates: &BTreeMap<String, u64>,
+        fallback: Option<u64>,
+    ) -> u64 {
+        if let Some(n) = memo.get(&node.id) {
             return *n;
         }
-        let value = 1 + nodes
-            .iter()
-            .filter(|n| n.dependencies.iter().any(|d| d == id))
-            .map(|n| remaining(&n.id, nodes, memo))
-            .max()
-            .unwrap_or(0);
-        memo.insert(id.to_owned(), value);
+        let value = if fallback.is_some() && !unfinished(node) {
+            0
+        } else {
+            let own = estimates.get(&node.id).copied().or(fallback).unwrap_or(1);
+            let tail = nodes
+                .iter()
+                .filter(|n| n.dependencies.contains(&node.id))
+                .map(|n| remaining(n, nodes, memo, estimates, fallback))
+                .max()
+                .unwrap_or(0);
+            own.saturating_add(tail)
+        };
+        memo.insert(node.id.clone(), value);
         value
     }
+    let fallback = median(estimates.values().copied().collect());
     let mut priority = BTreeMap::new();
     for n in nodes {
-        remaining(&n.id, nodes, &mut priority);
+        remaining(n, nodes, &mut priority, estimates, fallback);
     }
     let completed: BTreeSet<_> = nodes
         .iter()
@@ -85,10 +132,123 @@ pub fn dependency_ready(nodes: &[Node], stage: &str) -> CoreResult<Vec<String>> 
     ready.sort_by_key(|n| std::cmp::Reverse(priority[&n.id]));
     Ok(ready.iter().map(|n| n.id.clone()).collect())
 }
+pub(crate) fn revision_nodes(
+    db: &rusqlite::Connection,
+    task: &str,
+    revision: i64,
+) -> CoreResult<Vec<(Node, String)>> {
+    let rows=db.prepare("SELECT node_id,stage,status,dependencies_json,role FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid")?
+            .query_map((task,revision),|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?)))?.collect::<Result<Vec<_>,_>>()?;
+    rows.into_iter()
+        .map(|(id, stage, status, deps, role)| {
+            Ok((
+                Node {
+                    id,
+                    stage,
+                    status,
+                    dependencies: serde_json::from_str(&deps)?,
+                },
+                role,
+            ))
+        })
+        .collect()
+}
+fn unfinished(node: &Node) -> bool {
+    matches!(node.status.as_str(), "pending" | "running")
+}
+
+fn median(mut values: Vec<u64>) -> Option<u64> {
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    let upper = *values.get(middle)?;
+    let lower = values[(values.len() - 1) / 2];
+    Some(lower + (upper - lower) / 2)
+}
+
+fn measured_duration(
+    db: &Connection,
+    role: &str,
+    kind: &str,
+    complexity: &str,
+) -> CoreResult<Option<u64>> {
+    const SAMPLES: usize = 16;
+    Ok(median(crate::observability::recent_node_durations(
+        db, role, kind, complexity, SAMPLES,
+    )?)
+    .map(|ms| ms.max(1)))
+}
+
+/// The observed duration estimate of a node in the current retained revision.
+pub fn node_duration(db: &Connection, task: &str, node: &str) -> CoreResult<Option<u64>> {
+    let row = db
+        .query_row(
+            "SELECT n.role,t.plan_json FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+         WHERE n.task_id=? AND n.revision=t.revision AND n.node_id=?",
+            (task, node),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    let Some((role, plan)) = row else {
+        return Ok(None);
+    };
+    let plan: Value = serde_json::from_str(plan.as_deref().unwrap_or("{}"))?;
+    let routing = crate::lifecycle::plan::node_routing(&plan, node);
+    let (kind, complexity) = node_classification(&role, &routing);
+    measured_duration(db, &role, kind, complexity)
+}
+
+fn duration_estimates(
+    db: &Connection,
+    nodes: &[(Node, String)],
+    plan: Option<&str>,
+) -> CoreResult<BTreeMap<String, u64>> {
+    let plan: Value = serde_json::from_str(plan.unwrap_or("{}"))?;
+    let mut classes = BTreeMap::new();
+    let mut estimates = BTreeMap::new();
+    for (node, role) in nodes.iter().filter(|(node, _)| unfinished(node)) {
+        let routing = crate::lifecycle::plan::node_routing(&plan, &node.id);
+        let (kind, complexity) = node_classification(role, &routing);
+        let key = (role, kind.to_owned(), complexity.to_owned());
+        let estimate = match classes.get(&key) {
+            Some(estimate) => *estimate,
+            None => {
+                let estimate = measured_duration(db, role, kind, complexity)?;
+                classes.insert(key, estimate);
+                estimate
+            }
+        };
+        if let Some(ms) = estimate {
+            estimates.insert(node.id.clone(), ms);
+        }
+    }
+    Ok(estimates)
+}
+
+pub const DEFAULT_WORKER_LIMIT: u16 = 4;
+pub const MAX_WORKER_LIMIT: u16 = 4;
+
+fn bounded_worker_limit(setting: Option<&str>) -> u16 {
+    setting
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(DEFAULT_WORKER_LIMIT, |value| {
+            value.clamp(1, u64::from(MAX_WORKER_LIMIT)) as u16
+        })
+}
+
+fn worker_limit() -> i64 {
+    i64::from(bounded_worker_limit(
+        std::env::var("CORTEX_WORKER_LIMIT").ok().as_deref(),
+    ))
+}
+
 /// Additional adapter restrictions, checked in the same transaction after the
 /// mandatory NativePolicy. Returning true never bypasses native policy.
 pub trait SchedulingPolicy {
     fn may_claim(&self, db: &Transaction<'_>, task: &str, node: &str) -> CoreResult<bool>;
+
+    fn supports_assignment_worktrees(&self) -> bool {
+        false
+    }
 }
 pub fn claim_ready(
     store: &Store,
@@ -108,6 +268,24 @@ pub fn claim_ready_tx(
     channel: &str,
     policy: &dyn SchedulingPolicy,
 ) -> CoreResult<Vec<String>> {
+    Ok(claim_ready_batch_tx(db, task, owner, channel, policy)?.assignments)
+}
+
+#[derive(Default)]
+pub struct ClaimBatch {
+    pub assignments: Vec<String>,
+    pub measured_priority: bool,
+}
+
+/// Claim new nodes and tell the host when their dispatch needs the measured
+/// priority instead of the legacy plan order.
+pub fn claim_ready_batch_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    owner: &OwnerEpoch,
+    channel: &str,
+    policy: &dyn SchedulingPolicy,
+) -> CoreResult<ClaimBatch> {
     ownership::check_tx(db, task, owner)?;
     let stopped: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM task_stopped WHERE task_id=?)",
@@ -115,47 +293,50 @@ pub fn claim_ready_tx(
         |r| r.get(0),
     )?;
     if stopped {
-        return Ok(Vec::new());
+        return Ok(ClaimBatch::default());
     }
-    let (state, revision): (String, i64) = db.query_row(
-        "SELECT state,revision FROM runtime_tasks WHERE task_id=?",
+    let (state, revision, plan): (String, i64, Option<String>) = db.query_row(
+        "SELECT state,revision,plan_json FROM runtime_tasks WHERE task_id=?",
         [task],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let stage = match state.as_str() {
         "EXECUTING" => "execution",
         "REVIEWING" => "review",
-        _ => return Ok(Vec::new()),
+        _ => return Ok(ClaimBatch::default()),
     };
-    let rows=db.prepare("SELECT node_id,stage,status,dependencies_json FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid")?
-            .query_map((task,revision),|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?.collect::<Result<Vec<_>,_>>()?;
-    let nodes = rows
-        .into_iter()
-        .map(|(id, stage, status, deps)| {
-            Ok(Node {
-                id,
-                stage,
-                status,
-                dependencies: serde_json::from_str(&deps)?,
-            })
-        })
-        .collect::<CoreResult<Vec<_>>>()?;
+    let nodes = revision_nodes(db, task, revision)?;
     let used:i64=db.query_row("SELECT COUNT(*) FROM (
             SELECT coalesce(assignment_ref,'node:'||node_id) FROM runtime_nodes WHERE task_id=? AND revision=? AND status='running'
             UNION SELECT coalesce(p.idempotency_key,'attempt:'||r.attempt_id) FROM capacity_reservations r
             LEFT JOIN delegation_provisioning p ON p.attempt_id=r.attempt_id
             WHERE r.task_id=? AND r.kind='worker' AND r.state IN ('reserved','ambiguous'))",(task,revision,task),|r|r.get(0))?;
-    let mut slots = (4 - used).max(0);
+    let mut slots = worker_limit().saturating_sub(used).max(0);
+    if slots == 0 {
+        return Ok(ClaimBatch::default());
+    }
+    let estimates = duration_estimates(db, &nodes, plan.as_deref())?;
+    let nodes = nodes.into_iter().map(|(node, _)| node).collect::<Vec<_>>();
     let mut claimed = Vec::new();
-    for node in dependency_ready(&nodes, stage)? {
+    for node in dependency_ready_with_durations(&nodes, stage, &estimates)? {
         if slots == 0 {
             break;
         }
-        if !self::policy::NativePolicy::default().may_claim(db, task, &node)?
-            || !policy.may_claim(db, task, &node)?
-        {
+        if !policy.may_claim(db, task, &node)?
+            || crate::workspace::worktrees::assignments::pending_dependencies(db, task, revision, &node)? {
             continue;
         }
+        let native = self::policy::NativePolicy::default();
+        let isolated = if native.may_claim(db, task, &node)? {
+            false
+        } else if stage == "execution" && policy.supports_assignment_worktrees()
+            && native.may_claim_with_checkout(db, task, &node, true)?
+            && crate::workspace::worktrees::assignments::beneficial(db, task, revision, &node)?
+        {
+            true
+        } else {
+            continue;
+        };
         let retry:i64=db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'
                 AND json_extract(payload_json,'$.node')=? AND json_extract(payload_json,'$.revision')=?",(task,&node,revision),|r|r.get(0))?;
         let key = format!("runtime:{revision}:{node}:{retry}");
@@ -168,10 +349,17 @@ pub fn claim_ready_tx(
             "ASSIGNMENT_CREATED",
             json!({"node":node,"assignment_ref":assignment,"revision":revision}),
         )?;
+        if isolated {
+            event_tx(db, task, "ASSIGNMENT_WORKTREE_SELECTED",
+                json!({"node":node,"assignment_ref":assignment,"revision":revision}))?;
+        }
         claimed.push(assignment);
         slots -= 1;
     }
-    Ok(claimed)
+    Ok(ClaimBatch {
+        assignments: claimed,
+        measured_priority: !estimates.is_empty(),
+    })
 }
 /// Replace only the already-running claim whose exact provider-refused channel
 /// was revoked and reaped. Keep its slot in the task's DAG; dependencies are
@@ -185,7 +373,11 @@ pub fn replace_provider_refused_claim_tx(
     channel: &str,
 ) -> CoreResult<String> {
     ownership::check_tx(db, task, owner)?;
-    use rusqlite::OptionalExtension;
+    if crate::workspace::worktrees::assignments::selected(db, task, assignment)?
+        || crate::workspace::worktrees::assignments::root_on(db, task, assignment)?.is_some()
+    {
+        return refuse("assignment_worktree_provider_replacement_unavailable");
+    }
     let row: Option<(String, i64)> = db.query_row(
         "SELECT n.node_id,n.revision FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
          JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
@@ -272,7 +464,7 @@ pub fn worker_capacity_available(
         (connection, task),
         |v| Ok((v.get(0)?, v.get(1)?)),
     )?;
-    Ok(total < 4 && on_connection < i64::from(connection_limit))
+    Ok(total < worker_limit() && on_connection < i64::from(connection_limit))
 }
 pub fn reserve_tx(db: &Transaction<'_>, r: &Reservation<'_>) -> CoreResult<Option<String>> {
     if r.kind == ReservationKind::Worker
@@ -315,4 +507,22 @@ pub fn settle_tx(
         WHERE reservation_id=? AND state IN ('reserved','ambiguous')",
         (state, crate::now(), observation, reservation),
     )? == 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_worker_limit_stays_within_the_runtime_boundary() {
+        assert_eq!(bounded_worker_limit(None), 4);
+        assert_eq!(bounded_worker_limit(Some("invalid")), 4);
+        assert_eq!(bounded_worker_limit(Some("0")), 1);
+        assert_eq!(bounded_worker_limit(Some("2")), 2);
+        assert_eq!(bounded_worker_limit(Some("64")), MAX_WORKER_LIMIT);
+        assert_eq!(
+            bounded_worker_limit(Some("18446744073709551615")),
+            MAX_WORKER_LIMIT
+        );
+    }
 }

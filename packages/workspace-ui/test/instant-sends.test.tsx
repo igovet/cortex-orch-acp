@@ -1,6 +1,6 @@
 import { render } from "solid-js/web";
 import { createRoot, createSignal } from "solid-js";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type CommandReceipt, type Decision, type Message, type Sprint, type Task, type TimelineEntry, type WorkspaceCommand, type WorkspaceState } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { createSends } from "../src/sends";
@@ -28,11 +28,13 @@ function world(task: Partial<Task>, timeline: TimelineEntry[] = [], decisions: D
   return state;
 }
 let version = 1;
-async function mount(state: WorkspaceState) {
+async function mount(state: WorkspaceState, draftNamespace?: readonly string[]) {
+  dispose?.();
+  document.body.innerHTML = "";
   const p = scriptedPort({ capabilities: { everything: true, operations: [] } });
   history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/t/t`);
   const root = document.createElement("div"); document.body.append(root);
-  dispose = render(() => <Workspace port={p.port} />, root);
+  dispose = render(() => <Workspace port={p.port} draftNamespace={draftNamespace} />, root);
   await settle(); p.emit(projection(String(++version), state)); await settle();
   return p;
 }
@@ -164,3 +166,123 @@ it("matches a worker message by its request id and a planner message among the l
   expect(receipts).toEqual([]);
   done();
 }));
+
+const namespace = ["desktop", "local-peer"];
+const draftBinding = { runtimeTaskId: "runtime-1", ownerEpoch: "7", sessionId: "session-1" };
+const draftTask = { ...live, draftBinding };
+const fieldValue = () => $<HTMLTextAreaElement>('.dock [aria-label="Message"]')?.value;
+const localDraftValues = () => Object.keys(localStorage).filter(k => k.startsWith("cw.unsent-text.v1:")).map(k => localStorage.getItem(k));
+
+it("restores an unsent conversation draft only in the exact app profile and execution", async () => {
+  const first = await mount(world(draftTask), namespace);
+  typeMessage("Local unsent text");
+  expect(first.commands).toEqual([]);
+  expect(localDraftValues()).toContain("Local unsent text");
+  for (const [task, profile] of [
+    [{ ...draftTask, executionId: "e2" }, namespace],
+    [{ ...draftTask, draftBinding: { ...draftBinding, sessionId: "session-2", ownerEpoch: "8" } }, namespace],
+    [draftTask, ["desktop", "another-owner"]],
+    [draftTask, ["phone", "another-machine", "123"]],
+  ] as const) {
+    const other = await mount(world(task), profile);
+    expect(fieldValue()).toBe("");
+    expect(other.commands).toEqual([]);
+  }
+  const reopened = await mount(world(draftTask), namespace);
+  expect(fieldValue()).toBe("Local unsent text");
+  expect(reopened.commands).toEqual([]);
+  named("Discard text draft")!.click(); await settle();
+  expect(fieldValue()).toBe("");
+  expect(localDraftValues()).not.toContain("Local unsent text");
+  await mount(world(draftTask), namespace);
+  expect(fieldValue()).toBe("");
+});
+
+it("keeps failed text through a fresh window and clears the exact sent version", async () => {
+  const first = await mount(world(draftTask), namespace);
+  typeMessage("Text to retry");
+  named("Send message now")!.click(); await settle();
+  expect(fieldValue()).toBe("");
+  expect(localDraftValues()).toContain("Text to retry");
+  first.receipt(false); await settle();
+  expect($('.timeline [data-sent="failed"]')?.textContent).toContain("Text to retry");
+  const reopened = await mount(world(draftTask), namespace);
+  expect(fieldValue()).toBe("Text to retry");
+  named("Send message now")!.click(); await settle();
+  reopened.receipt(); await settle();
+  expect(localDraftValues()).not.toContain("Text to retry");
+  await mount(world(draftTask), namespace);
+  expect(fieldValue()).toBe("");
+});
+
+it("a late receipt leaves a newer edit intact, even when it contains the same text", async () => {
+  const p = await mount(world(draftTask), namespace);
+  typeMessage("Identical text");
+  named("Send message now")!.click(); await settle();
+  typeMessage("Identical text");
+  p.receipt(); await settle();
+  expect(fieldValue()).toBe("Identical text");
+  await mount(world(draftTask), namespace);
+  expect(fieldValue()).toBe("Identical text");
+});
+
+const answerField = (id: string) => $<HTMLTextAreaElement>(`#decision-${id} textarea`)!;
+function typeAnswer(id: string, text: string) {
+  const field = answerField(id);
+  field.value = text;
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+}
+const pending = (id: string, prompt: string, revision = "1") => question({
+  id, text: prompt, options: [], batchId: "batch", draftBinding: { executionId: "e", sessionId: "session-1", ownerEpoch: "7", requirementRevision: revision },
+});
+
+it("restores each answer in a group, preserves all on refusal and clears only versions confirmed by the group", async () => {
+  const state = world(draftTask, [], [pending("d1", "First question?"), pending("d2", "Second question?")]);
+  const p = await mount(state, namespace);
+  typeAnswer("d1", "First text");
+  typeAnswer("d2", "Second text");
+  expect(p.commands).toEqual([]);
+  await mount(world(draftTask, [], [pending("d1", "Revised first question?", "2"), pending("d2", "Second question?")]), namespace);
+  expect(answerField("d1").value).toBe("");
+  expect(answerField("d2").value).toBe("Second text");
+  const reopened = await mount(state, namespace);
+  expect(answerField("d1").value).toBe("First text");
+  expect(answerField("d2").value).toBe("Second text");
+  named("Send answers")!.click(); await settle();
+  expect(reopened.commands.at(-1)?.payload).toMatchObject({ type: "answer_decision", answers: [
+    { decisionId: "d1", answer: "First text" }, { decisionId: "d2", answer: "Second text" },
+  ] });
+  reopened.receipt(false); await settle();
+  expect(answerField("d1").value).toBe("First text");
+  expect(answerField("d2").value).toBe("Second text");
+  named("Send answers")!.click(); await settle();
+  // Simulate another window or a reloaded WebView editing while the first is waiting for its receipt.
+  const another = await mount(state, namespace);
+  typeAnswer("d2", "Newer second text");
+  reopened.receipt(); await settle();
+  const again = await mount(state, namespace);
+  expect(answerField("d1").value).toBe("");
+  expect(answerField("d2").value).toBe("Newer second text");
+  expect(again.commands).toEqual([]);
+  expect(another.commands).toEqual([]);
+  named("Discard answer draft", "#decision-d2")!.click(); await settle();
+  expect(answerField("d2").value).toBe("");
+});
+
+it("allows editing and sending when the device cannot persist text", async () => {
+  const p = await mount(world(draftTask), namespace);
+  const setItem = Storage.prototype.setItem;
+  const blocked = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+    if (key.startsWith("cw.unsent-text.v1:")) throw new DOMException("Storage denied", "SecurityError");
+    return setItem.call(this, key, value);
+  });
+  try {
+    typeMessage("Text held in this window");
+    expect(fieldValue()).toBe("Text held in this window");
+    expect($(".dock [role=status]")?.textContent).toContain("The local draft could not be updated on this device.");
+    named("Send message now")!.click(); await settle();
+    expect(sends(p).at(-1)?.payload).toMatchObject({ text: "Text held in this window" });
+    p.receipt(); await settle();
+    expect(fieldValue()).toBe("");
+  } finally { blocked.mockRestore(); }
+});

@@ -106,6 +106,13 @@ from the exact answer. Persisted unsafe labels fail closed after restart; see
 
 Ordinary single and batch questions (coordinator and worker) take each option as a plain string label or as an object `{label, detail}`. The optional `detail` is a short explanation (1–1000 characters, like the label); unknown object fields are refused. Plain-string options stay accepted. Workspace shows the detail under the option; selecting the option returns only its label, so answer matching, routing and replay are unchanged. Skill-proposal approve/decline pairs require plain strings, and runtime stop questions keep their own options. Question text should write file paths in backticks so Workspace can make them clickable. A worker's `ask_question` is one short question line: the details, evidence and consequences go once into the worker's message before the call. This is prompt guidance, not runtime enforcement of Markdown or of one line.
 
+In Workspace, an owner who wants to answer later can enter `/cortex-defer`
+as free text on an ordinary question. The owner can also say “I'll let you
+know when processing finishes” or «Сообщу, когда обработка закончится».
+The runtime records the answer and pauses the task under the normal Pause
+rules. The task keeps its pending work and resumes through Continue. Permission
+cards, skill proposals and runtime stop options keep their own answer rules.
+
 The question contract is role-neutral: structured questions emitted from coordinator, worker, and runtime fallback paths use the same provider handling. The runtime request carries the question text and any answer options; a supported client can render them as a structured form. Paseo uses its installed `QuestionFormCard` with choice labels and an "Other..." field. Related questions can be carried in one batch and displayed in one **paginated** form; the user navigates among members and must answer every member before one all-member submission. This does not mean every field is simultaneously visible. Tabs use the supplied short topic (or bounded question-text fallback), never raw ids. Duplicate headers gain ` 2`, ` 3`, etc., within 24 characters. The provider uses that same unique header list to map Paseo's header-keyed submission back to exact question identities; complete legacy id-keyed maps remain accepted, but mixed key spaces are rejected.
 
 Paseo's provider binds a response to the exact question/session (and, for a batch, each member identity) and sends it to Cortex through the `cortex_question_answer` session-config route. It waits for Cortex's durable acknowledgement before echoing answers or retiring the native card; it retires with deny, never grants an option action. Partial, foreign, conflicting, or rejected answers do not complete the question. Retries preserve the delivery key and payload. On rejection the form remains recoverable; after a successful answer, replay does not add duplicate answer history. A chat reply is also an answer through the normal runtime route.
@@ -280,8 +287,9 @@ coordinator at once, without waiting for the workers or restarting unaffected on
 The Workspace service runs one serial steering turn beside the active workers on the
 existing coordinator route. In it the coordinator can answer in the conversation,
 submit `steer_plan` (a runtime-validated amendment of nodes no worker has claimed yet:
-the retained plan digest, dependency graph, role/scope policy and `deny-write` rules
-are rechecked, the execution revision, existing attempts and results are kept, and the
+add, edit or omit unclaimed nodes and adjust their dependencies. The runtime
+rechecks the plan digest, full dependency graph, role/scope policy and `deny-write`
+rules. The execution revision, existing attempts and results are kept, and the
 scheduler picks up the amended work), or send targeted instructions to one exact live
 worker attempt. Targeted guidance reuses cancel-and-next-prompt on that worker's own
 session, never overlaps prompts and never cancels siblings. Repeated stable action keys

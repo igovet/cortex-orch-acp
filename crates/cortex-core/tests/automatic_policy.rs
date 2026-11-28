@@ -73,6 +73,22 @@ fn event_count(s: &Store, task: &str, kind: &str) -> i64 {
     .unwrap()
 }
 
+#[test]
+fn invalid_session_launch_backs_off_without_a_strategy_rung() {
+    let (_project, store, task, _) = start(true);
+    store.write(|db| {
+        assert_eq!(domain::stop_tx(db, &task, automatic::INVALID_SESSION_LAUNCH)?, TaskState::Recovering);
+        let owed = automatic::owed(db, &task)?.unwrap();
+        assert_eq!(owed.evidence["infrastructure"], "invalid_launch_arguments");
+        assert_eq!(owed.evidence["pause_kind"], automatic::INFRASTRUCTURE_PAUSE);
+        assert!(!owed.waiting.is_empty());
+        assert!(!automatic::escalated(db, &task)?);
+        assert!(automatic::resume_tx(db, &task, owed.event)?.is_none());
+        Ok(())
+    }).unwrap();
+    assert_eq!(event_count(&store, &task, "AUTOMATIC_CONTINUATION"), 0);
+}
+
 fn review_case(s: &Store, task: &str, verdict: &str) {
     let rev: i64 = s.write(|db| {
         let revision = domain::task_tx(db, task)?.1 + 1;
@@ -535,7 +551,7 @@ fn a_real_work_question_is_kept_and_replans_change_approach_without_a_limit() {
                 assert_eq!(result["decision"], "replan");
                 domain::settle_recovery_tx(db, &task, TaskState::Planning)?;
             }
-            // The fourth replan is accepted, as a senior consultation.
+            // The fourth ordinary replan is accepted without adding consultation.
             let result = domain::propose_replan_tx(
                 db,
                 &task,
@@ -545,15 +561,15 @@ fn a_real_work_question_is_kept_and_replans_change_approach_without_a_limit() {
                 &json!({"reason":"Further repair"}),
             )?;
             assert_eq!(result["accepted"], true);
-            assert_eq!(result["decision"], "senior_consultation");
-            assert_eq!(result["strategy"], "consult");
+            assert_eq!(result["decision"], "replan");
+            assert!(result["strategy"].is_null());
             domain::settle_recovery_tx(db, &task, TaskState::Planning)?;
             let accepted = plan::accept_tx(db, &task, "coordinator", "consulted", &support::with_goal(&test_plan()))?;
             assert_eq!(accepted["state"], "PLAN_READY");
             Ok(())
         })
         .unwrap();
-        assert_eq!(event_count(&s, &task, "CONSULTATION_REQUIRED"), 1);
+        assert_eq!(event_count(&s, &task, "CONSULTATION_REQUIRED"), 0);
         assert_eq!(event_count(&s, &task, "AUTOMATIC_CONTINUATION"), 0);
         assert_eq!(support::count(&s, "pending_questions"), 0);
     }
@@ -953,11 +969,55 @@ fn a_review_cycle_limit_runs_the_senior_consultation_before_anything_else() {
         domain::stop_tx(db, &task, "review_cycle_limit")?;
         let owed = automatic::owed(db, &task)?.unwrap();
         assert_eq!(owed.evidence["strategy"], "consult");
+        automatic::resume_tx(db, &task, owed.event)?.unwrap();
+        let graph = support::with_goal(&test_plan());
+        plan::accept_tx(db, &task, "coordinator", "consult-once", &graph)?;
+        let authorizing: i64 = db.query_row("SELECT max(id) FROM runtime_events
+            WHERE task_id=? AND type='AUTOMATIC_CONSULTATION_REQUESTED'", [&task], |row| row.get(0))?;
+        let consumed: i64 = db.query_row("SELECT json_extract(payload_json,'$.request_event')
+            FROM runtime_events WHERE task_id=? AND type='CONSULTATION_REQUIRED' ORDER BY id DESC LIMIT 1",
+            [&task], |row| row.get(0))?;
+        assert_eq!(consumed, authorizing);
+        domain::propose_replan_tx(db, &task, "coordinator", "ordinary", "replan_request", &json!({"reason":"Reorganize execution"}))?;
+        domain::settle_recovery_tx(db, &task, TaskState::Planning)?;
+        plan::accept_tx(db, &task, "coordinator", "without-consult", &graph)?;
         Ok(())
     })
     .unwrap();
     assert_eq!(event_count(&s, &task, "AUTOMATIC_CONSULTATION_REQUESTED"), 1);
+    assert_eq!(event_count(&s, &task, "CONSULTATION_REQUIRED"), 1);
     assert_eq!(support::count(&s, "pending_questions"), 0);
+}
+
+#[test]
+fn automatic_recovery_keeps_a_pending_explicit_question_in_one_consultation() {
+    let (_p, s, task, _) = start(true);
+    s.write(|db| {
+        domain::propose_replan_tx(db, &task, "coordinator", "explicit", "escalation_request",
+            &json!({"question":"Which design fits the stored evidence?",
+                "reason":"Two explanations remain consistent with prior work"}))?;
+        domain::settle_recovery_tx(db, &task, TaskState::Planning)?;
+        domain::stop_tx(db, &task, "review_cycle_limit")?;
+        let recovery = automatic::owed(db, &task)?.unwrap();
+        assert_eq!(recovery.evidence["strategy"], "consult");
+        automatic::resume_tx(db, &task, recovery.event)?.unwrap();
+        plan::accept_tx(db, &task, "coordinator", "plan", &support::with_goal(&test_plan()))?;
+        let raw: String = db.query_row("SELECT payload_json FROM runtime_events WHERE task_id=?
+            AND type='CONSULTATION_REQUIRED' ORDER BY id DESC LIMIT 1", [&task], |row| row.get(0))?;
+        let receipt: Value = serde_json::from_str(&raw)?;
+        for (field, kind) in [("request_event","REPLAN_REQUEST_ACCEPTED"),
+            ("recovery_request_event","AUTOMATIC_CONSULTATION_REQUESTED")] {
+            let event: String = db.query_row("SELECT type FROM runtime_events WHERE task_id=? AND id=?",
+                (&task, receipt[field].as_i64()), |row| row.get(0))?;
+            assert_eq!(event, kind);
+        }
+        let objective: String = db.query_row("SELECT objective FROM runtime_nodes WHERE task_id=? AND node_id='_consultation'",
+            [&task], |row| row.get(0))?;
+        assert!(objective.contains("Which design fits the stored evidence?"));
+        assert!(objective.contains("Automatic recovery context"));
+        Ok(())
+    }).unwrap();
+    assert_eq!(event_count(&s, &task, "CONSULTATION_REQUIRED"), 1);
 }
 
 /// A store error inside a runtime transition (`storage_unavailable`) is neither a

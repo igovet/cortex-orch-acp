@@ -1,0 +1,1 @@
+Trace the interaction through its accessible name, semantics, focus order, keyboard behavior, announcements and visual affordances. Separate inspected behavior from assistive-technology checks actually performed.

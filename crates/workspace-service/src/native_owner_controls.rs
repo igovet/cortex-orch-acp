@@ -484,6 +484,74 @@ const STEP_SEQUENCE: i64 = 1 << 40;
 const STEP_PREFIX: &str = "Workspace step: ";
 /// Rows of one worker-page read. Older rows are reached with the `activityCursor` it returns.
 const PAGE: usize = 200;
+
+fn worker_refusal_summary(
+    db: &rusqlite::Connection, task: &str, attempt: &str,
+) -> CoreResult<Value> {
+    let mut recent = db.prepare(
+        "SELECT json_extract(payload_json,'$.code'),
+                CASE WHEN json_type(payload_json,'$.missing')='array'
+                THEN json_extract(payload_json,'$.missing') END
+         FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
+           AND json_extract(payload_json,'$.attempt')=? AND json_type(payload_json,'$.code')='text'
+         ORDER BY id LIMIT 101",
+    )?;
+    let recent = recent.query_map((task, attempt), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?.collect::<Result<Vec<_>, _>>()?;
+    if recent.len() < 101 {
+        let Some((latest, missing)) = recent.last() else { return Ok(Value::Null); };
+        let mut codes = Vec::new();
+        for (code, _) in &recent {
+            if !codes.contains(&code) {
+                codes.push(code);
+            }
+        }
+        return Ok(refusal_summary(recent.len() as i64, latest, codes, missing.as_deref()));
+    }
+
+    let mut query = db.prepare(
+        "WITH grouped AS (
+            SELECT json_extract(payload_json,'$.code') AS code, count(*) AS n,
+                   min(id) AS first, max(id) AS last
+            FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
+              AND json_extract(payload_json,'$.attempt')=? AND json_type(payload_json,'$.code')='text'
+            GROUP BY 1
+         )
+         SELECT g.code,g.n,g.last,
+                CASE WHEN json_type(e.payload_json,'$.missing')='array'
+                THEN json_extract(e.payload_json,'$.missing') END
+         FROM grouped g JOIN runtime_events e ON e.id=g.last ORDER BY g.first",
+    )?;
+    let mut rows = query.query((task, attempt))?;
+    let mut count = 0_i64;
+    let mut codes = Vec::new();
+    let mut latest = None;
+    while let Some(row) = rows.next()? {
+        let code: String = row.get(0)?;
+        count += row.get::<_, i64>(1)?;
+        let id: i64 = row.get(2)?;
+        if latest.as_ref().is_none_or(|(last, _, _)| id > *last) {
+            latest = Some((id, code.clone(), row.get::<_, Option<String>>(3)?));
+        }
+        codes.push(code);
+    }
+    let Some((_, code, missing)) = latest else { return Ok(Value::Null); };
+    Ok(refusal_summary(count, &code, &codes, missing.as_deref()))
+}
+
+fn refusal_summary(
+    count: i64, code: &str, codes: impl serde::Serialize, missing: Option<&str>,
+) -> Value {
+    let mut summary = json!({"count":count,"code":code,"codes":codes});
+    let missing: Vec<String> = missing
+        .and_then(|value| serde_json::from_str::<Vec<Value>>(value).ok()).unwrap_or_default()
+        .iter().filter_map(Value::as_str).take(3).map(|s| s.chars().take(300).collect()).collect();
+    if !missing.is_empty() {
+        summary["missing"] = json!(missing);
+    }
+    summary
+}
 /// Host check receipts of one result that one read presents. Beyond it the result is marked
 /// `checksPartial` and cannot be accepted from this view.
 const CHECK_RECEIPTS: usize = 1000;
@@ -1345,13 +1413,11 @@ impl Runtime {
                     // newest steps fill what the bound leaves; a cut keeps `activityPartial` and its `activityCursor`.
                     // Refusals of this attempt's result submissions, by code only, oldest first.
                     // With each code, the outstanding items it named (paths, report ids or parts), if any.
-                    let refusal_rows:Vec<(String,Option<String>)>=match attempt.as_deref() {
-                        Some(a)=>db.prepare("SELECT json_extract(payload_json,'$.code'),CASE WHEN json_type(payload_json,'$.missing')='array' THEN json_extract(payload_json,'$.missing') END FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
-                            AND json_extract(payload_json,'$.attempt')=? AND json_type(payload_json,'$.code')='text' ORDER BY id LIMIT 101")?
-                            .query_map((&task,a),|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?)))?.collect::<Result<Vec<_>,_>>()?,
-                        None=>Vec::new(),
+                    let refusals = if let Some(attempt) = attempt.as_deref() {
+                        worker_refusal_summary(db, &task, attempt)?
+                    } else {
+                        Value::Null
                     };
-                    let refusals:Vec<String>=refusal_rows.iter().map(|(code,_)|code.clone()).collect();
                     if let (Some(session),Some(own))=(&session,attempt.as_deref().and_then(|a|calls.get(a))) {
                         let mut steps=Vec::new();
                         for (call,first,last,stamp) in own {
@@ -1392,8 +1458,11 @@ impl Runtime {
                             && s["text"].as_str().unwrap_or("").rsplit("__").next().unwrap_or("").rsplit('.').next().unwrap_or("").trim()=="result_submit")
                             .map(|(n,_)|n).collect();
                         submits.sort_by_key(|n|steps[*n]["sequence"].as_i64().unwrap_or(0));
-                        if !submits.is_empty() && submits.len()==refusals.len() && (refusals.len()==1 || refusals.iter().all(|c|c==&refusals[0])) {
-                            for (n,code) in submits.into_iter().zip(&refusals) { steps[n]["refusal"]=json!(code); }
+                        if !submits.is_empty()
+                            && refusals["count"].as_u64() == Some(submits.len() as u64)
+                            && refusals["codes"].as_array().is_some_and(|codes| codes.len() == 1)
+                        {
+                            for n in submits { steps[n]["refusal"] = refusals["code"].clone(); }
                         }
                         activity.extend(steps);
                     }
@@ -1435,7 +1504,9 @@ impl Runtime {
                                 "edits":edits.iter().map(|(path,add,del)|json!({"path":path,"add":add,"del":del})).collect::<Vec<_>>()});
                             if let Some(report)=r["report_ref"].as_str() {result["reportId"]=json!(report);}
                             // The worker itself reported the assignment failed: the card says so.
-                            if status=="failed" {result["outcome"]=json!("failed");}
+                            if status == "failed" {
+                                crate::native_results::add_failed_result_fields(&mut result, &r);
+                            }
                             result
                         })
                         .filter(|r|!r["summary"].as_str().unwrap_or("").is_empty());
@@ -1494,16 +1565,8 @@ impl Runtime {
                         let ended=if stopped {Some("stopped_by_owner")} else if status=="cancelled" {Some("cancelled_by_coordinator")} else if lost {Some("worker_lost")} else {None};
                         if let Some(ended) = ended {worker["endedReason"]=json!(ended);}
                     }
-                    // Every distinct refusal code (oldest first) and up to three items the latest
-                    // refusal named, so the owner reads why it was sent back, not only that it was.
-                    if let Some(last)=refusals.last() {
-                        let mut codes:Vec<&String>=Vec::new();
-                        for code in &refusals { if !codes.contains(&code) {codes.push(code);} }
-                        let missing:Vec<String>=refusal_rows.last().and_then(|(_,m)|m.as_deref())
-                            .and_then(|m|serde_json::from_str::<Vec<Value>>(m).ok()).unwrap_or_default()
-                            .iter().filter_map(Value::as_str).take(3).map(|s|s.chars().take(300).collect()).collect();
-                        worker["resultRefusals"]=json!({"count":refusals.len(),"code":last,"codes":codes});
-                        if !missing.is_empty() {worker["resultRefusals"]["missing"]=json!(missing);}
+                    if !refusals.is_null() {
+                        worker["resultRefusals"] = refusals;
                     }
                     // A worker the coordinator cancelled whose session is still being stopped.
                     if status=="cancelled" && !matches!(process.as_str(),"terminated"|"ambiguous") {worker["stopping"]=json!(true);}
@@ -1577,14 +1640,18 @@ impl Runtime {
                 }
                 let result = &mut task["result"];
                 identify(result, &actions);
-                if let Some(Value::Array(mut skipped)) = actions
+                if let Some(Value::Array(skipped)) = actions
                     .as_object_mut()
                     .and_then(|actions| actions.remove("notRunChecks"))
                 {
                     // Keep receipt indices stable for owner reruns. These appended rows
                     // describe checks that did not execute and are not rerun targets.
                     if let Some(checks) = result["checks"].as_array_mut() {
-                        checks.append(&mut skipped);
+                        for row in skipped {
+                            if !checks.contains(&row) {
+                                checks.push(row);
+                            }
+                        }
                     }
                 }
                 result["kind"] = json!(if work { "work" } else { "answer" });
@@ -1750,6 +1817,34 @@ fn present_worker_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_refusal_summary_includes_latest_after_display_cap() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE runtime_events(id INTEGER PRIMARY KEY,task_id TEXT,type TEXT,payload_json TEXT);").unwrap();
+        let insert = |task: &str, attempt: &str, code: &str, missing: Value| {
+            db.execute("INSERT INTO runtime_events(task_id,type,payload_json) VALUES (?,'WORKER_RESULT_REFUSED',?)",
+                (task,json!({"attempt":attempt,"code":code,"missing":missing}).to_string())).unwrap();
+        };
+        assert!(worker_refusal_summary(&db,"task","attempt").unwrap().is_null());
+        insert("task","attempt","command_not_settled",json!(["old item"]));
+        insert("task","attempt","open_failed_check",json!(["short history latest"]));
+        assert_eq!(worker_refusal_summary(&db,"task","attempt").unwrap(), json!({
+            "count":2,"code":"open_failed_check",
+            "codes":["command_not_settled","open_failed_check"],"missing":["short history latest"]
+        }));
+        for _ in 0..99 {
+            insert("task","attempt","command_not_settled",json!(["old item"]));
+        }
+        insert("task","attempt","open_failed_check",json!(["latest item"]));
+        insert("task","other","ignored",json!([]));
+        insert("other","attempt","ignored",json!([]));
+        assert_eq!(worker_refusal_summary(&db,"task","attempt").unwrap(), json!({
+            "count":102,"code":"open_failed_check",
+            "codes":["command_not_settled","open_failed_check"],"missing":["latest item"]
+        }));
+    }
+
     /// A worker's page holds that worker's own narration, from the history the Conversation no longer shows it in: only
     /// messages whose identity carries its attempt (older builds' rows too), chunks of one message joined, in order with its steps.
     #[test]
@@ -2086,6 +2181,16 @@ impl NativeHost {
         owner: &ownership::OwnerEpoch,
         argv: &[String],
     ) -> CoreResult<Value> {
+        self.owner_verify_mode(task, owner, argv, crate::native_cargo::Mode::Ordinary, None).await
+    }
+    pub(super) async fn owner_verify_mode(
+        &self,
+        task: &str,
+        owner: &ownership::OwnerEpoch,
+        argv: &[String],
+        mode: crate::native_cargo::Mode,
+        expected_revision: Option<i64>,
+    ) -> CoreResult<Value> {
         let checkout = self.execution_checkout(task, owner).await?;
         let root = checkout.path().to_owned();
         let reference = format!("native-command:{}", native_effects::identity()?);
@@ -2106,7 +2211,12 @@ impl NativeHost {
         let prepared = async {
             recv(self.executor.write(move |db| {
                 ownership::check_tx(db, &t, &o)?;
-                let revision = domain::task_tx(db, &t)?.1;
+                let (state, revision) = domain::task_tx(db, &t)?;
+                if expected_revision.is_some_and(|expected| {
+                    revision != expected || state != cortex_core::TaskState::Verifying
+                }) {
+                    return Err(CoreError::Refused("verification_intent_missing"));
+                }
                 lifecycle::event_tx(
                     db,
                     &t,
@@ -2126,7 +2236,14 @@ impl NativeHost {
                 return Err(error);
             }
         };
-        let result = if checkout.worktree.is_some() {
+        let result = if let Some(selection) = crate::native_cargo::selection(argv)
+            .filter(|_| mode != crate::native_cargo::Mode::Ordinary)
+        {
+            native_effects::verify_cargo(
+                root.clone(), checkout.worktree.as_ref().map(|_| self.root.clone()),
+                argv, &selection, mode, receiver,
+            ).await
+        } else if checkout.worktree.is_some() {
             native_effects::verify_worktree(root.clone(), self.root.clone(), argv, receiver).await
         } else {
             native_effects::verify_cancelled(root.clone(), argv, receiver).await
@@ -2156,6 +2273,9 @@ impl NativeHost {
         };
         match fresh {
             Ok(fresh) => {
+                if !fresh.incomplete && !fresh.metadata_only && !fresh.cap_reached && receipt["cargo_artifact"].is_object() {
+                    receipt["cargo_artifact"]["source_digest"] = json!(fresh.project_digest);
+                }
                 receipt["revision_digest"] = json!(fresh.project_digest.unwrap_or_default())
             }
             Err(error) => {

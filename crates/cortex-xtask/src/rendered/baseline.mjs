@@ -1,6 +1,7 @@
 // Test-only observation of desktop IPC and of actual X11 root pixels.
 import { createServer, createConnection } from 'node:net';
 import { spawn } from 'node:child_process';
+import { Transform } from 'node:stream';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -40,6 +41,43 @@ export function exactHistoryRow(page) {
   return rows?.[0];
 }
 
+const FOLLOW = 'native.history.follow';
+
+export function capabilityFrame(message, request, arm) {
+  const methods = message.result?.methods;
+  if (message.jsonrpc !== '2.0' || message.id !== request.id || !Array.isArray(methods)
+      || methods.filter(x => x === FOLLOW).length !== 1 || !['pull','push'].includes(arm)) {
+    throw new Error('matched comparison requires one real history-follow capability');
+  }
+  if (arm === 'pull') message.result.methods = methods.filter(x => x !== FOLLOW);
+  const body = Buffer.from(JSON.stringify(message));
+  const prefix = Buffer.alloc(4);
+  prefix.writeUInt32BE(body.length);
+  return Buffer.concat([prefix,body]);
+}
+
+export function followFrame(request, event, state) {
+  if (request?.method !== FOLLOW || !state.ack) throw new Error('private history on an unacknowledged or unrelated socket');
+  for (const key of ['projectId', 'taskId', 'executionId']) {
+    if (typeof event[key] !== 'string' || !event[key] || event[key] !== request.params?.[key]) {
+      throw new Error('private history scope mismatch: ' + key);
+    }
+  }
+  if (event.type === 'native_history_resync') return;
+  if (event.type !== 'native_history_page' || !Array.isArray(event.page?.items)
+      || typeof event.generation !== 'string' || !event.generation
+      || typeof event.throughSequence !== 'string' || !/^(0|[1-9]\d{0,19})$/.test(event.throughSequence)
+      || (state.through != null && BigInt(event.throughSequence) <= state.through)
+      || event.fromCursor !== state.cursor
+      || (state.generation != null && state.generation !== event.generation)) {
+    throw new Error('incomplete or discontinuous private history frame');
+  }
+  state.generation = event.generation;
+  state.through = BigInt(event.throughSequence);
+  state.cursor = event.page.tailCursor ?? null;
+  return exactHistoryRow(event.page);
+}
+
 export function parsePeerTrace(text) {
   const match = /^([1-9]\d{0,9}) (fixture-[1-9]\d{0,7}) (\d{1,16}) (\d{1,16})\n$/.exec(text);
   if (!match) throw new Error('missing, duplicate or malformed peer emission record');
@@ -58,6 +96,7 @@ export function bindPeer(emission, bindings, scope, start, history) {
   }
   for (const [field, matches] of [
     ['task', binding.taskId === scope.taskId], ['project', binding.projectId === scope.projectId],
+    ['execution', scope.delivery !== 'native_history_page' || binding.executionId === scope.executionId],
     ['session', binding.sessionId === emission.sessionId],
     ['runtime task', /^t_[a-f0-9]{32}$/.test(binding.runtimeTaskId)],
     ['attempt', /^xa_[a-f0-9]{32}$/.test(binding.attemptId)],
@@ -89,6 +128,26 @@ export function rateSummary(events, start, end) {
     if (bin) bin[kind]++;
   }
   return {durationNs: end - start, totals, windows};
+}
+
+export function sqliteWindow(records, start, end) {
+  if (!records.length) return {coverage:'uninstrumented'};
+  if (records.length % 16 || records.length > 64000000) throw new Error('truncated or overflowing SQLite trace');
+  const labels = ['invalid', 'start', 'opens', 'otherStatements', 'readonlyResultStatements', 'resultRows', 'triggerSteps', 'closes'];
+  const totals = Object.fromEntries(labels.slice(2).map(label => [label,0]));
+  let starts = 0, openBeforeEnd = 0;
+  for (let at = 0; at < records.length; at += 16) {
+    const time = Number(records.readBigUInt64LE(at)), kind = Number(records.readBigUInt64LE(at+8));
+    if (!Number.isSafeInteger(time) || time <= 0 || !labels[kind] || !kind) throw new Error('invalid SQLite trace');
+    if (kind === 1) {
+      if (at || time >= start) throw new Error('SQLite trace started late or duplicated');
+      starts++;
+    } else if (kind === 2 && time < end) openBeforeEnd++;
+    if (time >= start && time < end) totals[labels[kind]]++;
+  }
+  if (starts !== 1 || !openBeforeEnd) throw new Error('SQLite connection observation unavailable');
+  return {coverage:'service process, all rusqlite connections and threads', ...totals,
+    statements:totals.otherStatements + totals.readonlyResultStatements};
 }
 
 export function correlate(arrival, frames, arrivalEnd = arrival) {
@@ -127,7 +186,7 @@ export function decoder(callback) {
         let message;
         try { message = JSON.parse(pending.toString('utf8', 4, len + 4)); }
         catch { throw new Error('invalid observation frame JSON'); }
-        callback(message, time);
+        callback(message, time, len + 4);
         pending = pending.subarray(len + 4);
       }
     },
@@ -158,7 +217,8 @@ function ocr(header, image, peerTiming) {
 
 function capture(window, arrival, ready, fail, peerTiming) {
   const spawnTime = now();
-  const proc = spawn('/opt/cortex-render/baseline-frame', [window], {stdio: ['ignore', 'pipe', 'ignore']});
+  const helper = peerTiming ? '/harness/baseline-frame' : '/opt/cortex-render/baseline-frame';
+  const proc = spawn(helper, [window], {stdio: ['ignore', 'pipe', 'ignore']});
   let pending = Buffer.alloc(0), header, length, size, complete = false, resolving;
   const frames = [];
   let count = 0, first, last, maxGap = 0, maxCapture = 0, maxReadLag = 0;
@@ -187,10 +247,12 @@ function capture(window, arrival, ready, fail, peerTiming) {
       if (!Number.isSafeInteger(end) || begin < spawnTime || begin < (last?.end ?? 0)
           || end < begin || end > received) return fail('capture clock alignment failed');
       if (!arrival()) {
-        if (frames.length === 6) frames.shift();
+        if (frames.length === 12) frames.shift();
       }
-      if ((!arrival() || begin <= arrival() + 2 * SECOND) && frames.length < 100) {
-        frames.push({begin, end, image: Buffer.from(pending.subarray(16, 16 + length))});
+      if ((!arrival() || begin <= arrival() + 2 * SECOND) && frames.length < 512) {
+        const image = pending.subarray(16, 16 + length);
+        const previous = frames.at(-1)?.image;
+        frames.push({begin, end, image: previous?.equals(image) ? previous : Buffer.from(image)});
       } else if (arrival() && begin <= arrival() + 2 * SECOND) {
         return fail('frame retention overflow');
       }
@@ -228,25 +290,31 @@ function capture(window, arrival, ready, fail, peerTiming) {
   };
 }
 
-async function observe(dir, backend, front, peerTrace) {
+async function observe(dir, backend, front, peerTrace, sqliteTrace, arm) {
   const readTrace = () => {
     const size = statSync(peerTrace).size;
     if (!size) return undefined;
     if (size > 128) throw new Error('peer trace overflow or duplicate emission');
     return parsePeerTrace(readFileSync(peerTrace, 'ascii'));
   };
-  let liveEmission;
+  let liveEmission, firstPush, firstPull;
   const publish = (name, value) => {
     writeFileSync(join(dir, name + '.tmp'), JSON.stringify(value), {mode: 0o600});
     renameSync(join(dir, name + '.tmp'), join(dir, name));
   };
   const fail = reason => {
-    if (!failure) { failure = reason; publish('failure', reason); }
+    if (!failure) { failure = reason; publish('failure', incomplete(reason)); }
   };
   let failure, start, end, sampler, arrival, scope, expectedTask;
   const warmupStart = now();
   let subscriptions = 0, warmupRefreshes = 0, activeRequests = 0, connections = 0;
   const events = [], clients = new Set(), warmupMethods = new Set();
+  const requests = new Map();
+  const stream = {opens:0, acknowledgements:0, closes:0, resyncs:0, pages:0, rows:0, bytes:0, decisionPages:0, markerPushes:0, markerPulls:0,
+    projectionCountersThroughLastFrame:null, resyncReasons:{}};
+  const incomplete = reason => reason + '; incomplete wire observation ' +
+    JSON.stringify({arm:arm ?? 'transparent',activeRequests,stream});
+  let capabilitiesCompared = 0;
   let subscribeRequests = 0, subscribeReplies = 0, subscribeClosed = 0;
   const server = createServer(client => {
     if (clients.size >= 256) { fail('too many observed connections'); client.destroy(); return; }
@@ -254,11 +322,16 @@ async function observe(dir, backend, front, peerTrace) {
     const service = createConnection(backend);
     clients.add(client);
     let request, subscribed = false, req, res;
+    const follow = {ack:false, cursor:null, generation:null, terminal:false};
     req = decoder((message, time) => {
       if (request || message.jsonrpc !== '2.0' || typeof message.method !== 'string' || !message.id) {
         throw new Error('unsupported request envelope');
       }
       request = message;
+      if (request.method === FOLLOW) {
+        follow.cursor = request.params?.cursor ?? null;
+        follow.generation = request.params?.generation ?? null;
+      }
       if (start === undefined && /^service\.[A-Za-z.]+$/.test(message.method)) warmupMethods.add(message.method);
       if (isSubscription(message.method)) subscribeRequests++;
       const kind = classify(message);
@@ -266,10 +339,65 @@ async function observe(dir, backend, front, peerTrace) {
         if (kind === 'fullRefresh') warmupRefreshes++;
       } else if (end === undefined) {
         if (++activeRequests > 8192) throw new Error('request observation overflow');
+        const method = ['workspace','native.query','machine.call'].includes(message.method)
+          ? message.method + '/' + (message.params?.operation ?? message.params?.op) : message.method;
+        if (!/^[a-z][a-z0-9._/]{0,99}$/.test(method)) throw new Error('unrecognized RPC method name');
+        requests.set(method, (requests.get(method) ?? 0) + 1);
+        if (request.method === FOLLOW) stream.opens++;
         if (kind) events.push({kind, time});
       }
     });
-    res = decoder((message, time) => {
+    res = decoder((message, time, bytes) => {
+      const active = start !== undefined && end === undefined;
+      if (request?.method === FOLLOW && message.id === request.id) {
+        if (follow.ack || message.result?.subscribed !== true) throw new Error('private history subscription refused or replayed');
+        follow.ack = true;
+        if (active) stream.acknowledgements++;
+      }
+      const event = message.method === 'service.event' ? message.params : undefined;
+      if (peerTrace && event && isSubscription(request?.method) && JSON.stringify(event).includes(PEER_MARKER)) {
+        throw new Error('private fixture transcript appeared on the general notification socket');
+      }
+      if (event?.type === 'native_history_page' || event?.type === 'native_history_resync') {
+        if (follow.terminal) throw new Error('private event after terminal resync');
+        const row = followFrame(request, event, follow);
+        follow.terminal = event.type === 'native_history_resync';
+        if (row && start === undefined) throw new Error('private marker arrived before measurement');
+        if (event.observation) {
+          for (const key of ['projectionReads','decisionReads','emptyReads']) {
+            const n = event.observation[key], previous = follow.observation?.[key] ?? 0;
+            if (!Number.isSafeInteger(n) || n < previous) throw new Error('invalid private projection counter');
+            if (active) {
+              stream.projectionCountersThroughLastFrame ??= {projectionReads:0,decisionReads:0,emptyReads:0};
+              stream.projectionCountersThroughLastFrame[key] += n - previous;
+            }
+          }
+          follow.observation = event.observation;
+        }
+        if (active) {
+          stream.bytes += bytes;
+          if (follow.terminal) {
+            stream.resyncs++;
+            const reason = event.reason;
+            if (typeof reason !== 'string' || !/^[a-z_]{1,64}$/.test(reason)) throw new Error('unrecognized stream resync reason');
+            stream.resyncReasons[reason] = (stream.resyncReasons[reason] ?? 0) + 1;
+          }
+          else {
+            stream.pages++;
+            stream.rows += event.page.items.length;
+            if (event.decisions != null) stream.decisionPages++;
+          }
+          if (row) {
+            if (event.taskId !== expectedTask || ++stream.markerPushes > 1) throw new Error('unexpected or replayed pushed marker');
+            firstPush ??= time;
+            if (!arrival) {
+              scope = {delivery:'native_history_page',projectId:event.projectId,taskId:event.taskId,executionId:event.executionId,
+                generation:event.generation,throughSequence:event.throughSequence,historyId:row.historyId,historySequence:row.sequence,rpcId:request.id};
+              arrival = time;
+            }
+          }
+        }
+      }
       if (isSubscription(request?.method) && message.id === request.id) {
         subscribeReplies++;
         if (message.result?.subscribed) {
@@ -288,8 +416,10 @@ async function observe(dir, backend, front, peerTrace) {
         if (start === undefined) throw new Error('text marker already arrived before measurement');
         const p = request.params;
         const taskId = p.payload?.target ?? p.target;
+        if (active && row && taskId !== expectedTask) throw new Error('private fixture marker in another task history');
+        if (active && row && taskId === expectedTask) { stream.markerPulls++; firstPull ??= time; }
         if (taskId === expectedTask && !arrival) {
-          scope = {projectId: p.projectId, taskId, rpcId: request.id};
+          scope = {delivery:'history.page',projectId: p.projectId, taskId, rpcId: request.id};
           if (!scope.projectId) throw new Error('missing history correlation identity');
           if (row) {
             if (!row.historyId || !row.sequence) throw new Error('missing fixture history row identity');
@@ -316,6 +446,7 @@ async function observe(dir, backend, front, peerTrace) {
     }
     client.on('close', () => {
       clients.delete(client);
+      if (follow.ack && start !== undefined && end === undefined) stream.closes++;
       if (subscribed) {
         subscribeClosed++;
         subscriptions--;
@@ -325,7 +456,25 @@ async function observe(dir, backend, front, peerTrace) {
     });
     service.on('close', () => client.end());
     client.pipe(service);
-    service.pipe(client);
+    if (arm) {
+      // Only the capability response changes in the control. Both arms use the
+      // same buffering and framing; all subscription bytes are forwarded intact.
+      const capability = decoder(message => {
+        gate.push(capabilityFrame(message, request, arm));
+        capabilitiesCompared++;
+      });
+      const gate = new Transform({
+        transform(chunk, encoding, next) {
+          try {
+            if (request?.method === 'service.capabilities') { capability.push(chunk, 0); next(); }
+            else next(null,chunk);
+          } catch (error) { next(error); }
+        },
+        flush(next) { next(capability.complete() ? undefined : new Error('partial capability frame')); },
+      });
+      gate.on('error', error => { fail(error.message); client.destroy(); service.destroy(); });
+      service.pipe(gate).pipe(client);
+    } else service.pipe(client);
   });
   server.on('error', () => fail('observer socket failed'));
   server.listen(front, () => {
@@ -379,11 +528,33 @@ async function observe(dir, backend, front, peerTrace) {
     const summary = emission
       ? await sampler.analyze(emission.begin, emission.end)
       : await sampler.analyze(arrival);
+    if (emission) {
+      const push = firstPush != null && firstPush <= summary.firstVisible.end;
+      const pull = firstPull != null && firstPull <= summary.firstVisible.end;
+      stream.firstPixelSource = push && pull ? 'ambiguous_push_and_pull'
+        : push && firstPush <= summary.firstVisible.begin ? 'private_push'
+        : pull && firstPull <= summary.firstVisible.begin ? 'history_reply'
+        : push || pull ? 'overlapping_frame_capture' : 'unobserved';
+      stream.firstMarkerPushNs = firstPush ?? null;
+      stream.firstMarkerPullNs = firstPull ?? null;
+    }
+    if (arm && (!capabilitiesCompared || stream.firstPixelSource !== (arm === 'push' ? 'private_push' : 'history_reply')
+        || (arm === 'pull' && stream.opens !== 0) || stream.resyncs)) {
+      throw new Error('matched delivery failed: arm=' + arm + ', source=' + stream.firstPixelSource
+        + ', opens=' + stream.opens + ', resyncs=' + stream.resyncs);
+    }
     publish('result', {...summary, ...rateSummary(events, start, end), scope, peerTiming,
+      deliveryComparison:{arm:arm ?? 'transparent',capabilitiesCompared},
+      stream, requestsByMethod:Object.fromEntries(requests),
+      sqlite:sqliteTrace ? sqliteWindow(readFileSync(sqliteTrace), start, end) : {coverage:'uninstrumented'},
       arrivalNsFromWindowStart: arrival - start, warmupNs: start - warmupStart,
       warmupRefreshes, subscriptions, activeRequests, connections});
     // Rust stops this observer only after it closes the measured desktop window.
     await new Promise(resolve => process.once('SIGTERM', resolve));
+  } catch (error) {
+    // Keep the measured prefix even when a timeout, refusal, wrong source or
+    // incomplete page disqualifies this trial. It is never a passing sample.
+    throw new Error(incomplete(error.message));
   } finally {
     await sampler?.stop();
     for (const connection of clients) connection.destroy();
@@ -392,8 +563,8 @@ async function observe(dir, backend, front, peerTrace) {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  const [dir, backend, front, peerTrace] = process.argv.slice(2);
-  observe(dir, backend, front, peerTrace).catch(error => {
+  const [dir, backend, front, peerTrace, sqliteTrace, arm] = process.argv.slice(2);
+  observe(dir, backend, front, peerTrace, sqliteTrace, arm).catch(error => {
     writeFileSync(join(dir, 'failure'), JSON.stringify(error.message), {mode: 0o600});
     process.exitCode = 1;
   });

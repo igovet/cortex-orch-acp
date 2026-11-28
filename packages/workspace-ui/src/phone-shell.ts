@@ -7,7 +7,7 @@ import type { VoicePort } from "./voice-client";
  * interface never reaches the network, the camera or the key store itself.
  */
 export type PhoneMachine = { id: string; name: string; state: "connecting" | "connected" | "offline" | "rejected" | "update_needed";
-  path: "direct" | "relay" | "unknown" | null; lastConnectedAt: number | null };
+  path: "direct" | "relay" | "unknown" | null; lastConnectedAt: number | null; pairedAt?: number };
 export type PhoneState = { active: string | null; machines: PhoneMachine[] };
 export interface PhoneShell {
   state(): Promise<PhoneState>;

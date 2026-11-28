@@ -199,7 +199,7 @@ fn routes(
     }
     Ok(found)
 }
-fn read_db(db: &Connection, project: &str, params: &Value) -> CoreResult<Value> {
+pub(super) fn read_db(db: &Connection, project: &str, params: &Value) -> CoreResult<Value> {
     let worker = params.get("workerId").unwrap_or(&Value::Null);
     if worker
         .as_str()
@@ -316,7 +316,7 @@ fn read_db(db: &Connection, project: &str, params: &Value) -> CoreResult<Value> 
             } else {
                 &attempt["status"]
             };
-            let status = match terminal.first().and_then(|v| v["event_type"].as_str()) {
+            let mut status = match terminal.first().and_then(|v| v["event_type"].as_str()) {
                 Some("worker_result") => "completed",
                 Some("assignment_failed") => "failed",
                 Some("assignment_cancelled") => "cancelled",
@@ -333,6 +333,7 @@ fn read_db(db: &Connection, project: &str, params: &Value) -> CoreResult<Value> 
                 .as_str()
                 .unwrap_or(assignment["node_key"].as_str().unwrap_or(""));
             let results=query(db,&format!("SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref IN ({marks}) AND event_type='worker_result' ORDER BY id DESC LIMIT 1"),&args)?;
+            let mut failure = None;
             let result = if let Some(r) = results.first() {
                 let p = object(r["payload_json"].as_str().unwrap_or(""));
                 // A checks field that is not a list cannot be read as checks. Show one
@@ -350,9 +351,19 @@ fn read_db(db: &Connection, project: &str, params: &Value) -> CoreResult<Value> 
                 // withdrawal that cannot be re-derived stays a displayed failed claim.
                 let mut kept: Vec<Value> = active.to_vec();
                 if let Some(provision) = provision {
-                    let node=query(db,"SELECT result_json FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",&[json!(runtime),provision["idempotency_key"].clone()])?;
+                    let node=query(db,"SELECT status,result_json FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",&[json!(runtime),provision["idempotency_key"].clone()])?;
                     if let Some(n) = node.first().filter(|n| truthy(&n["result_json"])) {
+                        let recorded_failed = n["status"] == "failed";
                         let n = object(n["result_json"].as_str().unwrap_or(""));
+                        if matches!(status, "completed" | "failed")
+                            && recorded_failed
+                            && n["assignment_outcome"] == "failed"
+                            && n["report_ref"].is_string()
+                            && n["report_ref"] == p["report_ref"]
+                        {
+                            status = "failed";
+                            failure = Some(n.clone());
+                        }
                         if let Some(stored) = n.get("checks").and_then(Value::as_array) {
                             let identities = |a: &[Value]| {
                                 a.iter()
@@ -383,12 +394,17 @@ fn read_db(db: &Connection, project: &str, params: &Value) -> CoreResult<Value> 
                     .get("summary")
                     .filter(|v| truthy(v))
                     .or_else(|| p.get("text").filter(|v| truthy(v)))
+                    .or_else(|| failure.as_ref().and_then(|recorded| recorded.get("summary")))
                     .map(worker_history::py_str)
                     .unwrap_or_default()
                     .chars()
                     .take(8000)
                     .collect::<String>();
-                json!({"summary":summary,"checks":checks,"reportId":p["report_ref"]})
+                let mut result = json!({"summary":summary,"checks":checks,"reportId":p["report_ref"]});
+                if let Some(recorded) = &failure {
+                    crate::native_results::add_failed_result_fields(&mut result, recorded);
+                }
+                result
             } else {
                 Value::Null
             };
@@ -406,6 +422,11 @@ fn read_db(db: &Connection, project: &str, params: &Value) -> CoreResult<Value> 
                 "attempt":if attempt.is_null(){Value::Null}else{json!({"n":attempt["attempt_no"],"of":total})},
                 "elapsedMs":null,"runningSince":if status=="working"{worker_history::at(db,&assignment["created_at"])?}else{Value::Null},
                 "context":null,"usage":null,"result":result});
+            if let Some(kind) = failure.as_ref().and_then(|recorded| recorded["blocker"].get("kind"))
+                .filter(|kind| cortex_core::lifecycle::review::valid_blocker(kind))
+            {
+                item["blockerKind"] = kind.clone();
+            }
             let metadata = bytes(&item);
             if metadata > 60000 {
                 return Err(CoreError::Refused("worker_content_too_large"));

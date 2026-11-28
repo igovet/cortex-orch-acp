@@ -243,17 +243,23 @@ fn profiles() -> &'static BTreeMap<String, String> {
     DATA.get_or_init(|| {
         let doc: Value =
             serde_json::from_str(include_str!("../../../profiles.json")).unwrap_or(Value::Null);
-        doc["profiles"]
+        let mut templates: BTreeMap<String, String> = doc["profiles"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|p| {
                 Some((
-                    p["name"].as_str()?.to_owned(),
+                    format!("worker-{}", p["name"].as_str()?.replace('_', "-")),
                     p["report_template"].as_str()?.to_owned(),
                 ))
             })
-            .collect()
+            .collect();
+        if let Some(legacy) = doc["legacy_report_templates"].as_object() {
+            templates.extend(legacy.iter().filter_map(|(role, template)| {
+                Some((role.clone(), template.as_str()?.to_owned()))
+            }));
+        }
+        templates
     })
 }
 
@@ -262,7 +268,7 @@ pub fn template_for(profile: &str, stage: &str) -> &'static str {
     if stage == "review" {
         return "general";
     }
-    let name = profile.trim_start_matches("worker-").replace('-', "_");
+    let name = format!("worker-{}", profile.trim_start_matches("worker-"));
     match profiles().get(&name).map(String::as_str) {
         Some("implementation") => "implementation",
         Some("investigation") => "investigation",
@@ -525,6 +531,7 @@ pub fn review_reports(db: &Connection, task: &str, review: &str) -> CoreResult<V
         report: String,
         marker: Option<String>,
         wrote: bool,
+        typed_output: bool,
     }
     let nodes: Vec<Node> = db
         .prepare(
@@ -533,7 +540,11 @@ pub fn review_reports(db: &Connection, task: &str, review: &str) -> CoreResult<V
                 EXISTS(SELECT 1 FROM runtime_events e JOIN trusted_channels c ON c.task_id=e.task_id
                   AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
                   WHERE e.task_id=n.task_id AND e.type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED')
-                  AND c.assignment_id=n.assignment_ref)
+                  AND c.assignment_id=n.assignment_ref),
+                EXISTS(SELECT 1 FROM reports r JOIN editions d ON d.report_id=r.id
+                  JOIN report_provenance p ON p.edition_sequence=d.sequence JOIN json_each(p.artifacts) a
+                  WHERE r.task_id=n.task_id AND r.id=json_extract(n.result_json,'$.report_ref')
+                    AND json_extract(a.value,'$.kind') IN ('json','markdown'))
              FROM runtime_nodes n WHERE n.task_id=? AND n.revision=? AND n.rowid!=?
              AND json_type(n.result_json,'$.report_ref')='text' ORDER BY n.rowid",
         )?
@@ -546,6 +557,7 @@ pub fn review_reports(db: &Connection, task: &str, review: &str) -> CoreResult<V
                 report: r.get(4)?,
                 marker: r.get(5)?,
                 wrote: r.get(6)?,
+                typed_output: r.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?
@@ -571,6 +583,11 @@ pub fn review_reports(db: &Connection, task: &str, review: &str) -> CoreResult<V
         round.iter().copied().filter(|n| n.wrote).collect()
     };
     chosen.extend(previous);
+    for node in &nodes {
+        if node.stage == "execution" && node.typed_output && !chosen.iter().any(|n| n.row == node.row) {
+            chosen.push(node);
+        }
+    }
     let entry = |n: &Node, revision: Option<i64>| -> CoreResult<Value> {
         let mut e = report_entry(db, task, &n.report, Some(&n.id), Some(&n.role))?;
         e["page_characters"] = json!(PAGE_CHARACTERS);
@@ -635,6 +652,7 @@ pub fn review_reports(db: &Connection, task: &str, review: &str) -> CoreResult<V
                     report: r.get(4)?,
                     marker: r.get(5)?,
                     wrote: false,
+                    typed_output: false,
                 })
             },
         )?
@@ -755,9 +773,53 @@ pub fn extras(
     let mut v = json!({"acceptance":acceptance(db, task)?,"constraints":constraints(db, task)?,
         "report":skeleton(role, stage),"user_question_language":language});
     if stage != "review" {
+        if let Some(plan) = crate::lifecycle::plan::plan_in_force(db, task)? {
+            if let Some(choice) = crate::lifecycle::plan::competency_decision(
+                &crate::lifecycle::plan::node_routing(&plan, node),
+            ) {
+                v["competency_decision"] = choice;
+            }
+        }
         let reports = predecessor_reports(db, task, node)?;
         if !reports.is_empty() {
             v["predecessor_reports"] = json!(reports);
+        }
+        let required = crate::required_reports::selected(db, task, node)?;
+        if !required.is_empty() {
+            v["required_reports"] = json!(required);
+            v["required_reports_guidance"] = json!("Use read_report on this assignment to read each required report or its specified section completely before submitting your result. Other predecessor reports are available when needed.");
+        }
+        if node != "_consultation" {
+            let revision: Option<i64> = db.query_row(
+                "SELECT revision FROM runtime_tasks WHERE task_id=?",
+                [task],
+                |r| r.get(0),
+            ).optional()?;
+            if let Some(revision) = revision {
+                if let Some(advice) = crate::lifecycle::plan::previous_consultation(db, task, revision)? {
+                    v["previous_consultation"] = advice;
+                }
+            }
+        }
+    }
+    if node == "_consultation" {
+        let plan: Option<String> = db.query_row(
+            "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
+            [task], |row| row.get(0),
+        )?;
+        if let Some(plan) = plan {
+            let plan: Value = serde_json::from_str(&plan)?;
+            let proposed = plan["tasks"].as_array().into_iter().flatten()
+                .filter(|item| item["id"] != "_consultation");
+            let total = proposed.clone().count();
+            let nodes = proposed.take(12).map(|item| json!({
+                "node":item["id"],"role":item["role"],"dependencies":item["dependencies"],
+                "objective":item["objective"].as_str().map(|s| s.chars().take(500).collect::<String>()),
+                "scope":item["scope"].as_array().into_iter().flatten().take(8).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>();
+            v["consultation_plan"] = json!({"nodes":nodes,"nodes_total":total,
+                "verification":plan["verification"],
+                "competency_decisions":crate::lifecycle::plan::plan_competency_decisions(&plan)});
         }
     }
     Ok(v)

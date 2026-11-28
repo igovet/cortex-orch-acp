@@ -12,10 +12,10 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 /// The runtime's single read-only predicate, shared with the permission
-/// responder and the write tools: a non-worker channel, a read-only profile, or
-/// a review-stage session.
+/// responder and the write tools: a non-worker channel, a read-only profile,
+/// a plan node declared read-only or a review-stage session.
 pub(crate) fn read_only(i: &Identity) -> bool {
-    i.role != "worker"
+    i.read_only || i.role != "worker"
         || policy::read_only(
             i.profile.as_deref().unwrap_or(""),
             i.stage.as_deref().unwrap_or(""),
@@ -314,17 +314,24 @@ pub(crate) fn credential_file(path: &str) -> bool {
 /// credential files); Git control files and engine/Cortex configuration (every
 /// other runtime-protected target); else ordinary.
 pub(crate) fn path_class(root: &Path, path: &Path) -> PathClass {
+    path_class_with_environment(root, path, &std::env::vars_os().collect())
+}
+
+fn path_class_with_environment(
+    root: &Path,
+    path: &Path,
+    env: &std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>,
+) -> PathClass {
+    let home_store = crate::native_store_policy::in_home_store(env, path);
     // Only the part below the checkout root names project state: a checkout that
     // itself lives under a `.cortex` directory (a task worktree) is not private.
-    if project_private(path.strip_prefix(root).unwrap_or(path)) {
-        return if live_store_file(path) {
+    if home_store || project_private(path.strip_prefix(root).unwrap_or(path)) {
+        return if live_store_file(path) && !crate::native_store_policy::verified_anchor(path) {
             PathClass::LiveStore
         } else {
             PathClass::Private
         };
     }
-    let env: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> =
-        std::env::vars_os().collect();
     let var = |k: &str| {
         env.get(std::ffi::OsStr::new(k))
             .filter(|v| !v.is_empty())
@@ -364,7 +371,7 @@ pub(crate) fn path_class(root: &Path, path: &Path) -> PathClass {
     if credential {
         return PathClass::Credential;
     }
-    if crate::native_command_sandbox::policy::protected_target(root, path) {
+    if crate::native_command_sandbox::policy::protected_target_environment(root, path, env) {
         return PathClass::Control;
     }
     PathClass::Ordinary
@@ -531,6 +538,47 @@ mod tests {
             PathClass::Private
         );
         assert!(!project_private(Path::new("tmp/audit/snapshot.md")));
+    }
+
+    #[test]
+    fn home_store_files_are_live_and_verified_anchor_is_private() {
+        let fixture = std::env::temp_dir().join(format!(
+            "home-store-policy-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        let root = fixture.join("project");
+        let state = fixture.join("state");
+        std::fs::create_dir_all(&root).unwrap();
+        let env = std::collections::BTreeMap::from([
+            ("XDG_STATE_HOME".into(), state.clone().into_os_string()),
+        ]);
+        let key = cortex_core::store::StoreRoot::new(&state, cortex_core::StoreChannel::Release)
+            .unwrap()
+            .project_key(&root)
+            .unwrap();
+        let store = cortex_core::Store::open(key, cortex_core::OpenMode::Initialize).unwrap();
+        crate::native_store_policy::register_key(store.key());
+        let anchor = store.key().anchor_directory().join("cortex.sqlite3");
+        assert_eq!(
+            path_class_with_environment(&root, &anchor, &env),
+            PathClass::Private,
+        );
+        for file in ["cortex.sqlite3", "cortex.sqlite3-wal", "cortex.sqlite3-shm", "cortex.sqlite3-journal", ".access.lock"] {
+            assert_eq!(
+                path_class_with_environment(&root, &store.key().directory().join(file), &env),
+                PathClass::LiveStore,
+                "{file}",
+            );
+        }
+        // A replacement cannot inherit the verified anchor classification.
+        std::fs::rename(&anchor, anchor.with_file_name("old-anchor")).unwrap();
+        std::fs::write(&anchor, b"replacement").unwrap();
+        assert_eq!(
+            path_class_with_environment(&root, &anchor, &env),
+            PathClass::LiveStore,
+        );
+        drop(store);
+        std::fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]

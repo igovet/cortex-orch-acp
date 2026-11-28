@@ -1,8 +1,8 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
-import { autoOn, consultationListed, autoVerdict, CONNECTION_ENGINE, denyTokens, EFFORT_LEVELS, effortLabel, engineInUse, ENGINES, notOffered, orderedEfforts, orphanTokens, policyOf, ROLE_CATALOG, setDeny, setEngineUse, setModelAuto, setModelEnabled, setPolicy, setPreferred, setProvider, setStretch, setTier, setTierRange, TIER_LABELS, TIERS, tierRange, WORK_KINDS, type CatalogueModel, type EngineKey, type ModelPolicy, type Problem, type RoutingRules, type Tier } from "@cortex/workspace-domain";
+import { autoOn, consultationListed, autoVerdict, CONNECTION_ENGINE, denyTokens, EFFORT_LEVELS, effortLabel, engineInUse, ENGINES, notOffered, orderedEfforts, orphanTokens, policyOf, setDeny, setEngineUse, setModelAuto, setModelEnabled, setPolicy, setPreferred, setProvider, setStretch, setTier, setTierRange, TIER_LABELS, TIERS, tierRange, WORK_KINDS, type CatalogueModel, type EngineKey, type ModelPolicy, type Problem, type RoutingRules, type Tier } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { A, I } from "./kit";
-import { HELP, PREFERRED_WHEN_HELP, PREFERRED_WORK_HELP, workKindHelp } from "./orch-help";
+import { HELP, PREFERRED_WHEN_HELP, PREFERRED_WORK_HELP, WORK_KIND_HELP } from "./orch-help";
 import { Bar, orchTo, sectionTo, Shell, slug, SourceStrips, useReadOnly, useRouting, useRoutingOff } from "./orch-shared";
 import { clock } from "./selectors";
 import { Adv, Chk, Err, Hint, Pick, Rec, SetH, Srow, Sw, Tags, Tiers } from "./settings-kit";
@@ -21,7 +21,7 @@ export function PreferredWork(props: Fields & { needsAuto?: boolean }) {
   const why = () => props.off ?? (props.needsAuto !== false && !auto() ? "Turn on Automatic first" : undefined);
   return <div class="ws-fld"><span class="lab">Preferred work<Hint text={PREFERRED_WORK_HELP} label="preferred work" /></span>
     <div class="ws-checks ws-kinds">
-      <For each={WORK_KINDS}>{k => <label class="ws-check"><Chk label={`${props.model.label} preferred for ${k.label}`} checked={!!p().preferredFor?.includes(k.id)} disabled={why()} onChange={on => props.set(setPreferred(props.rules, e(), id(), k.id, on))} /><span><span class="ws-kind-t">{k.label}</span><span class="ws-kind-d">{ROLE_CATALOG.filter(r => r.kind === k.id).map(r => r.label).join(", ") || workKindHelp(k.id, [])}{k.id === "consultation" && !consultationListed(props.rules) ? " — uses Design list until set" : ""}</span></span></label>}</For>
+      <For each={WORK_KINDS}>{k => <label class="ws-check"><Chk label={`${props.model.label} preferred for ${k.label}`} checked={!!p().preferredFor?.includes(k.id)} disabled={why()} onChange={on => props.set(setPreferred(props.rules, e(), id(), k.id, on))} /><span><span class="ws-kind-t">{k.label}</span><span class="ws-kind-d">{WORK_KIND_HELP[k.id]}{k.id === "consultation" && !consultationListed(props.rules) ? " — uses Design list until set" : ""}</span></span></label>}</For>
       <For each={legacy()}>{k => <label class="ws-check"><Chk label={`${props.model.label} preferred for ${k}`} checked disabled={props.off} onChange={on => props.set(setPreferred(props.rules, e(), id(), k, on))} /><span>{k} (legacy, kept)</span></label>}</For>
     </div>
     <Err problems={props.problems} path={`models.${e()}.policy.${id()}.preferred_for`} />
@@ -169,7 +169,7 @@ export function Models() {
   </Shell>;
 }
 
-const SETUP_WORDS = { not_downloaded: "Not downloaded", downloaded_no_login: "Downloaded, sign in on this machine", ready_to_connect: "Ready to connect", connected: "Connected" } as const;
+const SETUP_WORDS = { discovery_unavailable: "Discovery unavailable", not_downloaded: "Not downloaded", downloaded_no_login: "Downloaded, sign in on this machine", ready_to_connect: "Ready to connect", connected: "Connected" } as const;
 const STATE_WORDS = { connected: "configured", needs_login: "sign in needed" } as Record<string, string>;
 /** Section 3: how automatic routing uses the models that are on. Every model stays selectable by hand. */
 export function EnginesModels() {

@@ -1,16 +1,20 @@
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { Show } from "solid-js";
 import { render } from "solid-js/web";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Workspace, createRealPort } from "../../../packages/workspace-ui/src";
 import { createDesktopTransport } from "./transport";
+import { EngineSetupNotice } from "../../../packages/workspace-ui/src/engine-setup-notice";
 import { createWindowChrome } from "./window";
 import { createTerminalPort } from "../../../packages/workspace-ui/src/terminal-client";
 import { createVoicePort } from "../../../packages/workspace-ui/src/voice-client";
 import { pinLogoSource } from "../../../packages/workspace-ui/src/startup";
 
 const native = createDesktopTransport({
+  historyOpen: (id, params) => invoke<void>("workspace_history_open", { id, params }),
+  historyNext: id => invoke("workspace_history_next", { id }),
+  historyClose: id => invoke<void>("workspace_history_close", { id }),
   invoke: (body) => invoke("workspace_request", body),
   listen: (listener) => listen("workspace-transport", event => listener(event.payload)),
 });
@@ -21,15 +25,6 @@ const chrome = createWindowChrome(getCurrentWindow(), async () => {
   try { await native.close(() => invoke<void>("workspace_close")); }
   finally { root.inert = false; }
 });
-// not_started has no line: it is the normal state before a project is activated, not something to act on.
-const setupCopy: Record<string, string> = {
-  downloading: "Installing the qualified adapter…", connecting: "Connecting to your native account…",
-  refreshing_models: "Discovering available models…", download_failed: "Adapter download failed. Check network access and restart the app.",
-  login_required: "Native login required. Sign in with codex login or claude /login, then restart the app.",
-  opted_out: "Automatic connection is disabled.", catalog_failed: "Model discovery failed. Check the sandbox and native login, then restart the app.",
-  setup_failed: "Engine setup failed. Check native login and sandbox availability, then restart the app.",
-  downloaded: "Adapter installed; connection setup pending.",
-};
 // A click on one of this window's notifications: the shell sends back only the target it validated and kept for that notification.
 const notificationClicks = (listener: (target: unknown) => void) => {
   const stop = listen("workspace-navigate", event => listener(event.payload));
@@ -47,26 +42,8 @@ const logo = boot?.querySelector("img") ?? undefined;
 // Its relative path is fixed to an absolute address now, before the router moves the page to /m/… (startup.tsx says why).
 pinLogoSource(logo);
 function Desktop() {
-  const [setup, setSetup] = createSignal<[string, string][]>([]);
-  // One line per state, not one per engine: two engines in the same state say the same thing once.
-  const notices = () => [...new Set(setup().map(([, phase]) => phase))].map(phase =>
-    [setup().filter(([, p]) => p === phase).map(([engine]) => engine === "codex-acp" ? "Codex" : "Claude").join(" and "), setupCopy[phase]] as const);
-  onMount(() => {
-    let active = true, timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      try {
-        const status = await native.transport.request("service.status", {}) as { engines?: Record<string, string> };
-        if (active) setSetup(Object.entries(status.engines ?? {}).filter(([, phase]) => phase !== "ready" && setupCopy[phase]));
-      } catch { if (active) setSetup([]); }
-      if (active) timer = setTimeout(() => void poll(), 3000);
-    };
-    void poll();
-    onCleanup(() => { active = false; clearTimeout(timer); });
-  });
-  return <Workspace logo={logo} openResultTarget={target => invoke<void>("workspace_open_result_target", { target })} notify={({ label, target }) => invoke<void>("workspace_notify", { label, target })} notificationClicks={notificationClicks} notificationService={notificationService} voice={createVoicePort(native.transport)} terminal={createTerminalPort(native.transport)} port={createRealPort({ transport: native.transport, registry: true, localCode: true, actorId: "local-peer", boardStorage: {getItem:key => localStorage.getItem(key),setItem:(key,value) => localStorage.setItem(key,value)} })} chrome={chrome}
-    notice={<><Show when={chrome.closeError()}>{reason => <div class="strip bad" role="alert">{reason()}</div>}</Show><Show when={setup().length}><div class="strip info" role="status"><For each={notices()}>{([engines, copy]) =>
-      <span>{engines}: {copy} </span>
-    }</For></div></Show></>} />;
+  return <Workspace draftNamespace={["desktop", "local-peer"]} logo={logo} openResultTarget={target => invoke<void>("workspace_open_result_target", { target })} notify={({ label, target }) => invoke<void>("workspace_notify", { label, target })} notificationClicks={notificationClicks} notificationService={notificationService} voice={createVoicePort(native.transport)} terminal={createTerminalPort(native.transport)} port={createRealPort({ transport: native.transport, registry: true, localCode: true, actorId: "local-peer", boardStorage: {getItem:key => localStorage.getItem(key),setItem:(key,value) => localStorage.setItem(key,value)} })} chrome={chrome}
+    notice={<><Show when={chrome.closeError()}>{reason => <div class="strip bad" role="alert">{reason()}</div>}</Show><EngineSetupNotice read={() => native.transport.request("service.status", {}) as Promise<{ engines?: Record<string, string> }>} /></>} />;
 }
 // GTK measures the frameless window's edge resize zone as 5 pixels times the display scale; scrollers stop short of it.
 document.documentElement.style.setProperty("--ws-edge", `${5 * Math.max(1, Math.round(devicePixelRatio)) + 1}px`);

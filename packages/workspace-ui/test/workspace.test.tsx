@@ -157,7 +157,7 @@ describe("production workspace", () => {
     await mount(s.port, `/m/${LOCAL_MACHINE_ID}/t/t`);
     s.emit(projection("1", withDraft()));
     await flush();
-    const start = all(".tb-actions button").find(b => b.textContent?.includes("Start"))!;
+    const start = all(".conversation-actions button").find(b => b.textContent?.includes("Start"))!;
     expect(start.getAttribute("aria-disabled")).toBe("true");
     expect(start.dataset.why).toMatch(/not available/i);
     start.click();
@@ -170,7 +170,7 @@ describe("production workspace", () => {
     await mount(s.port, `/m/${LOCAL_MACHINE_ID}/t/t`);
     s.emit(projection("1", withDraft()));
     await flush();
-    const start = all(".tb-actions button").find(b => b.textContent?.includes("Start"))!;
+    const start = all(".conversation-actions button").find(b => b.textContent?.includes("Start"))!;
     expect(start.getAttribute("aria-disabled")).toBeNull();
     start.click();
     await flush();
@@ -178,10 +178,10 @@ describe("production workspace", () => {
     expect(s.commands[0].operation).toBe("start_task");
     s.receipt(true);
     await flush();
-    expect(all(".tb-actions button").some(b => b.textContent?.includes("Start"))).toBe(true);
+    expect(all(".conversation-actions button").some(b => b.textContent?.includes("Start"))).toBe(true);
     s.emit(projection("2", withDraft({ status: "working", process: "live" })));
     await flush();
-    expect(all(".tb-actions button").some(b => b.textContent?.includes("Start"))).toBe(false);
+    expect(all(".conversation-actions button").some(b => b.textContent?.includes("Start"))).toBe(false);
   });
 
   it("leaves model, effort, access and language unavailable until a session offers them", async () => {

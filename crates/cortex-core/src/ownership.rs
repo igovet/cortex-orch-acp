@@ -1,9 +1,9 @@
 //! Task CAS epochs and a separate lifetime Core owner fence.
 //! Parity: ownership.py:30-63; shared .access.lock is NEVER the owner lock.
 use crate::{
-    error::refuse,
-    store::{locks::AccessLock, ProjectKey},
     CoreResult,
+    error::refuse,
+    store::{ProjectKey, locks::AccessLock},
 };
 use rusqlite::{OptionalExtension, Transaction};
 use std::time::Duration;
@@ -14,7 +14,7 @@ impl ProjectOwner {
     pub fn acquire(key: &ProjectKey) -> CoreResult<Self> {
         Ok(Self {
             _lease: AccessLock::acquire(
-                &key.directory().join(".core-owner.lock"),
+                &key.anchor_directory().join(".core-owner.lock"),
                 true,
                 true,
                 Duration::ZERO,
@@ -31,7 +31,7 @@ pub struct SchedulerOwner {
 impl SchedulerOwner {
     pub fn acquire(key: &ProjectKey) -> CoreResult<Self> {
         let lease = AccessLock::acquire(
-            &key.directory().join(".scheduler-owner.lock"),
+            &key.anchor_directory().join(".scheduler-owner.lock"),
             true,
             true,
             Duration::ZERO,

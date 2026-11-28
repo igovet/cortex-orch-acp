@@ -36,15 +36,20 @@ pub(super) fn inline(
         return None;
     }
     let delivered = match code {
-        "review_file_coverage_required" => files(store, c, i, root, scoped, missing),
+        "review_file_coverage_required" | "review_project_revision_changed" =>
+            files(store, c, i, root, scoped, missing),
         "review_predecessor_reports_required" => reports(store, c, i, missing),
         _ => return None,
     };
     if delivered.is_empty() {
         return None;
     }
-    Some(json!({"delivered_as_read":true,"items":delivered,
-        "note":"These pages were read for you on this channel and count as read. Submit the same review again; anything not delivered stays listed in missing."}))
+    let note = if code == "review_project_revision_changed" {
+        "These pages are from the rebound checkout and count as read. Assess the new bytes, finish anything still missing, and submit your current verdict with a fresh request key."
+    } else {
+        "These pages were read for you on this channel and count as read. Submit the same review again; anything not delivered stays listed in missing."
+    };
+    Some(json!({"delivered_as_read":true,"items":delivered,"note":note}))
 }
 
 fn files(
@@ -267,9 +272,10 @@ mod tests {
             "secret.rs (outside reviewer read scope)".to_owned(),
             missing("big.rs"),
         ];
-        let first = inline(&store, &c, &i, &root, false, "review_file_coverage_required", &items)
+        let first = inline(&store, &c, &i, &root, false, "review_project_revision_changed", &items)
             .expect("delivery");
         assert_eq!(first["delivered_as_read"], true);
+        assert!(first["note"].as_str().unwrap().contains("fresh request key"));
         let paths: Vec<&str> = first["items"].as_array().unwrap().iter()
             .map(|p| p["path"].as_str().unwrap()).collect();
         assert!(paths.contains(&"small.rs") && paths.contains(&"big.rs"));

@@ -279,7 +279,9 @@ export function StepRow(props: { view: StepView; taskId: string; tone?: string; 
   </>;
   return <div class="step">
     <Show when={expandable()} fallback={<><div class="step-row">{row()}</div><Show when={file.error()}><div class="step-sub" role="alert">{file.error()}</div></Show></>}>
-      <button class="ev-toggle step-row" aria-expanded={open() ? "true" : "false"} onClick={() => props.state.toggle(props.stateKey)}>{row()}</button>
+      <button class="ev-toggle step-row" aria-expanded={open() ? "true" : "false"} onClick={() => props.state.toggle(props.stateKey)}>
+        <I n={open() ? "chevron-down" : "chevron-right"} s={12} class="faint" />{row()}
+      </button>
     </Show>
     <Show when={open() && expandable()}><div class="step-sub">
       <Show when={recorded()} fallback={<Show when={detail()}>{d => <StepDetail step={d()} taskId={props.taskId} />}</Show>}>

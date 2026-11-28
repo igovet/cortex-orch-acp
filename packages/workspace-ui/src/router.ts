@@ -46,7 +46,7 @@ export type CodeSpot = { file?: string; line?: number };
 export type Route =
   | { name: "root" }
   | { name: "home"; machine: string }
-  | { name: "board"; machine: string }
+  | { name: "board"; machine: string; view?: "list"; project?: string }
   | { name: "inbox"; machine: string }
   | { name: "archive"; machine: string }
   | { name: "new"; machine: string; kind: "task" | "sprint"; project: string | null; sprint?: string }
@@ -77,7 +77,10 @@ export function parseRoute(pathname: string, search = ""): Route {
   if (parts[0] !== "m" || !parts[1]) return notFound;
   const machine = parts[1], rest = parts.slice(2);
   if (rest.length === 0) return { name: "home", machine };
-  if (rest.length === 1 && rest[0] === "board") return { name: "board", machine };
+  if (rest.length === 1 && rest[0] === "board") {
+    const project = query.get("project");
+    return { name: "board", machine, ...(query.get("view") === "list" ? { view: "list" } : {}), ...(project ? { project } : {}) };
+  }
   if (rest.length === 1 && rest[0] === "inbox") return { name: "inbox", machine };
   if (rest.length === 1 && rest[0] === "archive") return { name: "archive", machine };
   if (rest.length === 1 && rest[0] === "new") {
@@ -120,7 +123,12 @@ export function hrefOf(route: Route): string {
   switch (route.name) {
     case "root": return "/";
     case "home": return `/m/${e(route.machine)}`;
-    case "board": return `/m/${e(route.machine)}/board`;
+    case "board": {
+      const q = new URLSearchParams();
+      if (route.project) q.set("project", route.project);
+      if (route.view) q.set("view", route.view);
+      return `/m/${e(route.machine)}/board${q.size ? `?${q}` : ""}`;
+    }
     case "inbox": return `/m/${e(route.machine)}/inbox`;
     case "archive": return `/m/${e(route.machine)}/archive`;
     case "new": {

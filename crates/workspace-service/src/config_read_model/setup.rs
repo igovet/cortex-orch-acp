@@ -267,13 +267,16 @@ fn verify_bundle(a: &Adapter, engine: &str, node: &Path, home: &Path) -> CoreRes
     }
     Ok(true)
 }
-fn automatic(config: &Path, engine: &str) -> CoreResult<(Value, Value)> {
+pub(crate) fn automatic(config: &Path, engine: &str) -> CoreResult<(Value, Value, Option<&'static str>)> {
     let Some(bytes) = read_bytes(&config.join(format!("first-run-{engine}.json")), true)? else {
-        return Ok((Value::Null, Value::Null));
+        return Ok((Value::Null, Value::Null, None));
     };
+    if bytes.len() > 8192 {
+        return Ok((json!("setup_failed"), Value::Null, None));
+    }
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     let Some(phase) = body["phase"].as_str() else {
-        return Ok((json!("setup_failed"), Value::Null));
+        return Ok((json!("setup_failed"), Value::Null, None));
     };
     let phases = [
         "downloading",
@@ -288,11 +291,12 @@ fn automatic(config: &Path, engine: &str) -> CoreResult<(Value, Value)> {
         "downloaded",
     ];
     if !phases.contains(&phase) {
-        return Ok((json!("setup_failed"), Value::Null));
+        return Ok((json!("setup_failed"), Value::Null, None));
     }
     if ["downloading", "connecting", "refreshing_models"].contains(&phase) {
-        // Noncreating, nonblocking probe of the existing cooperative setup lock.
-        let lock = config.join("automatic-setup.lock");
+        // The global writer lock may cover another engine. Only the lock
+        // for this receipt's engine can attest to live progress.
+        let lock = config.join(format!("automatic-setup-{engine}.lock"));
         let file = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -300,7 +304,7 @@ fn automatic(config: &Path, engine: &str) -> CoreResult<(Value, Value)> {
         {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((json!("interrupted"), Value::Null))
+                return Ok((json!("interrupted"), Value::Null, None))
             }
             Err(_) => return refuse(),
         };
@@ -314,13 +318,20 @@ fn automatic(config: &Path, engine: &str) -> CoreResult<(Value, Value)> {
         }
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc == 0 {
-            return Ok((json!("interrupted"), Value::Null));
+            return Ok((json!("interrupted"), Value::Null, None));
         }
         if std::io::Error::last_os_error().kind() != std::io::ErrorKind::WouldBlock {
             return refuse();
         }
     }
-    let reason = if phase == "catalog_failed"
+    let failed = matches!(phase, "setup_failed" | "catalog_failed" | "download_failed");
+    let stage = if failed {
+        ["installing_adapter", "reading_connections", "connecting", "checking_saved_catalog", "refreshing_models"]
+            .into_iter().find(|stage| body["stage"] == *stage)
+    } else {
+        None
+    };
+    let reason = if (phase == "catalog_failed" || stage.is_some())
         && body["reason"]
             .as_str()
             .is_some_and(|s| matches(r"^[a-z][a-z0-9_]{0,63}(?::[A-Za-z][A-Za-z0-9_]{0,63})?$", s))
@@ -329,7 +340,7 @@ fn automatic(config: &Path, engine: &str) -> CoreResult<(Value, Value)> {
     } else {
         Value::Null
     };
-    Ok((json!(phase), reason))
+    Ok((json!(phase), reason, stage))
 }
 impl ConfigurationReader {
     /// The discovered adapter of an npm engine and the node launching it
@@ -465,15 +476,19 @@ impl ConfigurationReader {
             if optional {
                 diagnostics.push(json!({"engine":engine,"source":"setup_discovery","code":"version_probe_disabled"}));
             }
-            let (automatic, reason) = if optional {
-                (Value::Null, Value::Null)
+            let (automatic, reason, stage) = if optional {
+                (Value::Null, Value::Null, None)
             } else {
                 automatic(&self.environment.config.join("cortex"), engine)?
             };
-            engines.push(json!({"engine":engine,"status":status,"version":found.as_ref().map(|a|a.version.clone()),
+            let mut row = json!({"engine":engine,"status":status,"version":found.as_ref().map(|a|a.version.clone()),
                 "native_login_detected":login,"already_connected":connected,"qualified":found.as_ref().is_some_and(|a|qualified(engine,&a.version)),
                 "install_supported":!optional,"automatic_setup":automatic,"automatic_setup_reason":reason,
-                "auto_connect_disabled":registry["auto_connect_disabled"].as_array().is_some_and(|a|a.iter().any(|v|v==engine))}));
+                "auto_connect_disabled":registry["auto_connect_disabled"].as_array().is_some_and(|a|a.iter().any(|v|v==engine))});
+            if let Some(stage) = stage {
+                row["automatic_setup_stage"] = json!(stage);
+            }
+            engines.push(row);
         }
         Ok(SettingsRead {
             view: json!({"surface":"connections","revision":management["revision"],"engines":engines}),

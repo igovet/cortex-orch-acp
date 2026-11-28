@@ -96,7 +96,7 @@ try {
   if (dev) makeStore(project, ".cortex-dev");
   mkdirSync(otherConfig, { recursive: true, mode: 0o700 });
   writeFileSync(join(otherConfig, "defaults.json"), "other channel must not be read or changed", { mode: 0o600 });
-  // Legacy store readers use release; native Settings still follows its build.
+  // An environment override cannot change the readers' compiled channel.
   process.env.CORTEX_WORKSPACE_CHANNEL = "release";
   // No program can be found on PATH from here on.
   process.env.PATH = "";

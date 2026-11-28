@@ -15,7 +15,7 @@ use std::{
 
 pub use m::{
     error, expected_revision, read_project_ceiling, update_mcp, update_project_ceiling,
-    update_routing, Answer,
+    update_routing, view_project, Answer,
 };
 
 /// Trusted host inputs: the owner roots and Cortex's runtime payload directory.
@@ -76,12 +76,6 @@ impl Host {
         crate::config_read_model::ConfigurationReader::new(self.environment.clone())
             .map_err(|e| read_error(e.code()))
     }
-    fn project(&self, project: &Value) -> Option<(PathBuf, PathBuf)> {
-        let root = PathBuf::from(project.as_str().filter(|s| s.starts_with('/'))?);
-        let routing = root.join(&self.store).join("routing.json");
-        Some((root, routing))
-    }
-
     pub fn update_routing(
         &self,
         target: &Value,
@@ -116,6 +110,7 @@ impl Host {
     /// `routing_profiles.mutate`: `request` holds the management fields.
     pub fn profile(&self, verb: &str, request: &Value) -> Answer {
         let config = self.config()?;
+        let project = view_project(&self.environment, &request["project"], &self.store)?;
         let mut p = json!({"verb":verb});
         for key in [
             "expected_revision",
@@ -157,7 +152,7 @@ impl Host {
             )
         })?;
         // The project only changes which source shadows the user routing.
-        if let Some(pair) = self.project(&request["project"]) {
+        if let Some(pair) = project {
             let view = self
                 .reader()?
                 .profiles_management_observation(Some((pair.0.as_path(), pair.1.as_path())))
@@ -204,6 +199,7 @@ impl Host {
     /// `refresh_route_catalog`: the fresh catalog with one outcome per connection.
     pub fn refresh_catalog(&self, project: &Value) -> Answer {
         let config = self.config()?;
+        let pair = view_project(&self.environment, project, &self.store)?;
         let records = action::management_records(&config).map_err(|e| payload(e, &[]))?;
         let outcomes = if records["connections"]
             .as_object()
@@ -213,7 +209,6 @@ impl Host {
         } else {
             action::management_refresh(&config).map_err(|e| payload(e, &[]))?["refresh"].clone()
         };
-        let pair = self.project(project);
         let mut view = self
             .reader()?
             .catalog_selector(pair.as_ref().map(|(a, b)| (a.as_path(), b.as_path())))

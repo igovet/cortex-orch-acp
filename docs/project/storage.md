@@ -1,8 +1,84 @@
 # Storage and recovery
 
-The canonical store is `<project>/.cortex/cortex.sqlite3`, with task documents,
-reports, drafts and the newest-first `pipeline.md` beside it. A project never
-uses a home-wide Cortex database. Workspace Dev selects `<project>/.cortex-dev/cortex.sqlite3` instead, with its documents and drafts beside it. Each channel has exactly one store per logical project, shared by linked worktrees. The host selects a fixed channel, not an arbitrary path. Dev never reads or imports the default/release store or legacy `.codex/cortex` storage; an existing release `.cortex` does not prevent opening the folder in Dev. See [channel stores](../cortex-workspace/backlog/CW-S12.md).
+## Where the database lives and how it moves
+
+Each logical project has one live SQLite database per channel. Linked worktrees
+resolve to the same main project root. By default release uses
+`$XDG_STATE_HOME/cortex/projects/<key>/.cortex/cortex.sqlite3`, with
+`~/.local/state` as the default XDG state root. Workspace Dev uses
+`$XDG_STATE_HOME/cortex-workspace-dev/state/cortex/projects/<key>/.cortex-dev/cortex.sqlite3`
+with the default Dev service configuration. An extracted Dev run supplies its
+own isolated state root. The runtime derives `<key>` from the sanitized
+canonical project basename and the first 32 hexadecimal characters of the
+SHA-256 of the canonical project path. There is a separate directory for each
+project, and Dev opens only its own channel.
+
+For a home store, the project keeps a private `<project>/.cortex/cortex.sqlite3` location marker
+(or the same name under `.cortex-dev`). It is a small SQLite file that binds
+the project, channel and store identity to the home database. It carries no
+task history. The same project directories can also hold channel ownership
+files. Published Markdown, drafts, and the newest-first `pipeline.md` live in
+the home store beside its live index. Back up the channel's projects directory
+as well as the checkout. A checkout archive alone does not preserve task history.
+
+| Open mode | Existing layout | Writes on open |
+| --- | --- | --- |
+| `Initialize` | Validates the home binding or handles an eligible old project-local store | Creates a fresh store or performs migration, then installs missing additive schema and indexes |
+| `RuntimeValidate`, `LiveReadOnly` | Validates the home binding or reads supported legacy layout | No relocation, migration or schema repair. Normal SQLite WAL/SHM housekeeping is allowed |
+| `InspectImmutable` | Validates the existing binding and reads a checkpointed store under the access lock | No creation, migration, checkpoints or repairs |
+
+An initializing open checks both locations under the project access fence.
+A home store with a matching binding can restore a missing location marker
+only if the project and Git identities still match. Conflicting source and
+destination databases, a marker for a different location, or a missing or
+foreign destination are refused. Keep both locations and migration backups when
+an open reports a conflict. See [format migration](format-migration.md) and
+[Workspace channel stores](../cortex-workspace/backlog/CW-S12.md).
+
+Relocation of a supported project-local store first fences ordinary access and
+persistent SQLite connections. Format 11 is upgraded with its verified backup
+before the format-12 move. The runtime copies SQLite and its document tree into
+a private home staging directory, checks the source snapshot and copied files,
+and rewrites store-owned paths. It installs the verified destination before the
+atomic project-side marker replacement. The private copy of the original store
+is retained under the project-side `.migration-backups/relocated-<store-id>/`.
+An interrupted switch resumes only with matching retained evidence. An
+occupied or stale destination is validated or refused, and stale staging can
+be quarantined in the state tree. The runtime also refuses a relocation with
+pending publication files or a linked checkout inside the old store.
+Workspace shows “Moving project history…” while its runtime performs a
+fenced relocation. A first home-store creation also preserves an existing
+private project routing file, with its original bytes retained under
+`.migration-backups/relocated-pre-database-routing/`.
+The older offline format restore primitive applies to project-local stores.
+It refuses relocated databases and location markers with
+`relocated_store_restore_unsupported`.
+
+### Administering home stores
+
+`cortex-acp project-stores list` reports stores in the binary's compiled
+channel, with each store ID, canonical project path, directory size, last
+successful writable initialization and whether originals remain. A missing
+or unavailable checkout is reported separately from an accessible one.
+
+`cortex-acp project-stores delete STORE_ID --confirm` removes the exact home
+store after exclusive checks and clears its matching checkout marker when
+the checkout is accessible. If it is unavailable, the command retains the
+removal intent so the owner can retry the same ID once it returns.
+`cortex-acp project-stores cleanup-original STORE_ID --confirm` removes the
+retained relocation originals from an accessible checkout. Run original
+cleanup first if you want to remove both copies. User-scope
+`cortex-paseo-tools uninstall` preserves the home project-store tree.
+
+`cortex-acp project-stores return-to-project PROJECT STORE_ID --confirm`
+copies the current database and documents back into the absolute, canonical
+project path. Stop the project's runtime before calling it. The command
+fences both locations, verifies the copy, and retains the former home store
+under `cortex/projects/.migration-backups/returned-<store-id>/` within the
+channel state root. A successful return keeps that store project-local on
+subsequent opens. If a switch was interrupted, retry the same confirmed
+command for `store_return_pending`. `store_return_conflict` preserves the
+conflicting locations for inspection.
 
 The writable format-12 installer maintains `native_worktree_starts` for Start
 intent, provision evidence and cleanup disposition. `task_workspaces` retains
@@ -10,8 +86,8 @@ the execution root; checkout authority is verified against the provision record,
 not a desktop projection. This adds neither a store nor a format change.
 See [worktree recovery](../cortex-workspace/consistency-and-recovery.md#worktree-start-and-cleanup).
 
-Each channel's store directory keeps itself out of the project's `git status`: a
-writable `Initialize` open creates `<store>/.gitignore` containing `*` (which also
+Each channel's project-side marker directory keeps itself out of `git status`: a
+writable `Initialize` open creates `<project>/.cortex/.gitignore` or its Dev counterpart containing `*` (which also
 ignores itself) when it is absent. It is written without following a link and
 never replaced, so an existing file is left as it is; read-only and inspection
 opens never create it. The project's tracked `.gitignore` and `.git/info/exclude`
@@ -50,6 +126,13 @@ SQLite records task and requirement revisions, assignments, attempts,
 instruction delivery, candidates, check evidence, resource ownership and
 idempotency keys. Published reports are immutable Markdown files. Bounded cursor
 reads apply to both report bodies and catalogues.
+The additive format-12 `fact_memory` table stores bounded source observations
+with their task, published report, assignment, attempt, plan revision, code
+path and SHA-256. It records typed failures in the same transaction as the source
+result and cascades on source report or task purge. Each channel retains its
+own memory. Freshness is evaluated against the receiving checkout when the
+strategy selects facts, since different linked worktrees can contain different
+bytes at the same path. See [source-backed fact memory](../features/knowledge-routing/index.md#source-backed-fact-memory).
 
 Changing work uses an isolated workspace and a candidate snapshot. Integration
 requires the exact candidate digest and expected project base revision. Runtime
@@ -112,8 +195,10 @@ oversized reply still uses the writer to store its deferred body.
 
 Every commit uses `synchronous=FULL`, with one exception. A batch of deferred display
 writes (`StoreExecutor::write_deferred`, such as streamed worker message chunks) that
-commits on its own uses `synchronous=NORMAL`. That covers a batch committed when its
-window ends, when it is full, before a publication or owner job, or at shutdown. In
+commits on its own uses `synchronous=NORMAL`. The first fragment after 40 ms of
+stream inactivity is due immediately. A continuing stream batches for up to 40 ms,
+with earlier flushes at 64 fragments, before an ordered publication or owner job,
+or at shutdown. Work already on the writer lane can extend the queue wait. In
 WAL mode that commit does not wait for an fsync of the log. The connection is back
 at FULL before the next write, and a later FULL commit makes every earlier relaxed
 commit durable together with its own. The risk is limited to a power failure or an
@@ -128,17 +213,20 @@ The additive `crates/cortex-core` library preserves SQLite application ID
 1129467218 and format 12, WAL, foreign keys and synchronous=FULL (NORMAL only for
 deferred display batches, see [Commit durability](#commit-durability)). It is the
 store of the Rust runtime. Project/channel resolution selects only
-`.cortex` or `.cortex-dev`; disposable tests never migrate the owner's store.
+the selected, isolated state root. Disposable tests never migrate the owner's store.
 
 `store::documents::Publisher` combines owned file-backed drafts, immutable
 reports, one newest-first `pipeline.md` per task, edition/provenance metadata,
 thread-scoped request receipts, bounded catalogue/content pages and durable
 publication-intent recovery. Templates are compiled into the Rust library.
-Report bodies stay in Markdown files, not SQL request receipts. Pipeline draft
-creation is a runtime-only API, separate from worker draft creation; its one
-caller is `cortex_core::pipeline::sync`, which publishes the runtime's pipeline
-editions under the `runtime` principal (drafts in `pipeline-drafts/`, the
-published file `<task>/pipeline.md`, no new table or column). Callers must
+Report bodies stay in Markdown files, not SQL request receipts.
+`cortex_core::pipeline::sync` publishes generated editions directly under
+the `runtime` principal, with the edition, provenance and receipt in one
+SQLite transaction. It uses the same durable file intent, replacing rename
+and directory synchronization as ordinary publication. Committed edition
+cleanup can be retried independently of the durable publication. Older pending
+pipeline drafts resume under their original receipt. Worker publication uses
+owned file-backed drafts. Callers must
 supply already authenticated task/thread identities: the library is not a
 transport authorization boundary. Reads in writable modes reconcile the selected
 task under a publication operation lock; immutable inspection never reconciles.
@@ -146,7 +234,8 @@ A file/digest conflict is an error, not evidence of publication success.
 A published file whose digest was verified in its exact current state (inode, size, mtime and
 ctime) is not re-read for the next publication, catalogue or page; any change of that state forces a
 real hash. A publication keeps the previous pipeline by a hard link instead of a second copy, and
-recovery drops that link if an install was interrupted before the replacing rename. Initializing
+recovery drops that link if an install was interrupted before the replacing rename.
+Recovery removes private staging files left before the complete intent was installed. Initializing
 opens write the header pragmas only when they differ, and a process skips the per-table column
 check for a schema cookie it already validated. Recovery capsule sections read only the newest rows
 that can fit their budget; an inexact total carries `total_is_lower_bound`.
@@ -201,8 +290,9 @@ A successful Core write that recorded row changes can wake the active Workspace
 reader for the same logical project and channel in the same process. Each key
 keeps at most one pending wake, not a list of commits. A wake itself does not
 assert a new outbox row. It is separate from the SQLite hooks and
-has no effect on durable ordering or the storage format. Writes from other
-processes are observed by the [reader's periodic fallback](../cortex-workspace/consistency-and-recovery.md#native-desktop-reads).
+has no effect on durable ordering or the storage format. On Linux, WAL activity
+in a verified home store can wake the reader for writes from other processes.
+Every reader keeps its [periodic fallback](../cortex-workspace/consistency-and-recovery.md#native-desktop-reads).
 
 ## Attempt tree listings
 
@@ -217,6 +307,23 @@ writes; the file shrinks only after a `VACUUM`, such as the one task retention
 runs below.
 
 ## Runtime indexes and offloaded worker activity
+
+The `runtime_events_settled_channel_time` partial index covers settled native
+turns by task, channel and timestamp. The transcript writer compares the latest
+settlement for its active channel to the previous chunk's timestamp before
+extending a streamed message.
+
+Cortex keeps a derived list of unresolved command starts. It stores only the
+task, start event ID and reference. Journal inserts maintain the list in the
+same transaction. The first initializing open backfills it under the store's
+exclusive access lock without changing format 12. A reader of an older store,
+or one whose command journal was edited, computes the exact list from the
+journal. The next initializing open rebuilds affected tasks before readers
+resume using the stored list.
+
+Two partial indexes cover assignment references for `WORKER_RELEASED` and
+`ACCESS_GRANTED` events. The scheduler uses them when rebuilding active file
+reservations and their granted scopes from the current transaction.
 
 The runtime adds `runtime_events_type` on `runtime_events(type, task_id, id)` and `capacity_by_attempt` on `capacity_reservations(attempt_id)`. It also adds `runtime_events_by_tool_call_ref` on `runtime_events(task_id, json_extract(payload_json,'$.tool_call_ref'), type, id)` and the partial `runtime_events_finished_ref` on `runtime_events(task_id, json_extract(payload_json,'$.receipt.tool_call_ref'), id) WHERE type='NATIVE_COMMAND_FINISHED'`, so a tool-call or command-receipt lookup in one task no longer parses every `TOOL_COMPLETED`, `TOOL_AUTHORIZED`, `COMMAND_*` or `NATIVE_COMMAND_*` payload of that task (the first writable open builds them under the exclusive access lock; a lookup that can end on a missing reference took seconds on a large store before). The saved-engine-retry notice read in the board projection names `assignment_ref IS NULL`, so it uses `task_events_by_assignment` instead of parsing every worker-activity `progress` payload. The initializing schema also adds `task_events_by_activity_ref` on `task_events(task_id, json_extract(payload_json,'$.activity_ref'), id)` and `runtime_requests_by_operation` on `runtime_requests(task_id, actor, operation)`, and `host_updates_by_call` on `host_updates(session_id, json_extract(update_json,'$.toolCallId'), seq)` for updates whose `update_json` is valid JSON. The conversation history and coordinator pages find a tool call's earlier updates through `host_updates_by_call`; their lookups name the same `json_valid(update_json)` condition so SQLite can use the partial index. A malformed update is still stored and is never evaluated by it. Worker split-tool lookups use unary `+` on assignment and ordering expressions so SQLite chooses the activity index without `ANALYZE`. These are `CREATE INDEX IF NOT EXISTS` statements in the initializing schema. A writable `OpenMode::Initialize` open therefore installs them on an existing format-12 database, without a format change. Inspection and non-initializing opens never install them. The install runs inside that open's exclusive `.access.lock` and its `BEGIN IMMEDIATE` schema transaction, so a missing index is built once, the first time the runtime writer opens the project. Store validation checks the header, table groups and columns, never indexes. A store without one of these indexes is therefore still accepted, and its lookups are only slower. A store that has them is accepted by a binary whose schema predates them. The same install adds `host_transcript_by_message` on `host_transcript(session_id, kind, message_id)` once the `message_id` column exists, so it is also built when a format-11 store is upgraded. A worker page reads that worker's narration (agent messages whose identity starts with `{attempt}:`) as the range [`{attempt}:`, `{attempt};`) through it, instead of walking every message of the session once per worker. After the install, every initializing open runs SQLite's `PRAGMA optimize=0x10002` with `analysis_limit=1000`: it writes planner statistics (`sqlite_stat1`) for a table never analyzed or grown many times over since, sampling a bounded number of rows, so its cost does not grow with the store. It runs under the same exclusive `.access.lock` in SQLite's own transaction. Read-only and inspection opens neither build the indexes nor write statistics; they accept a store with or without them. On a private copy of a 191 MB release store, the first initializing open built the index and the statistics in 116 ms and 41 ms. No `VACUUM` runs on open: it would rewrite the whole file under the exclusive lock while every read waits, and that store had no free pages to reclaim. Task retention keeps its own `VACUUM`.
 

@@ -96,6 +96,17 @@ describe("task mapping", () => {
     expect(mapTask({...resolved,warnings:[...resolved.warnings,"contradictory_evidence"]},ctx).status).not.toBe("done");
     expect(mapTask({...resolved,warnings:[]},ctx).status).toBe("cancelled");
   });
+  it("keeps a native pause and its external disposition ahead of stale acceptance", () => {
+    const overlay = { status: "ready_to_merge" as const, acceptance: { automatic: true, version: 2, digest: "old" },
+      integration: { method: "commit" as const, targetBranch: "dev", digest: "old", automatic: true } };
+    const paused = mapTask(wireTask({phase:"paused", runtimeState:"PAUSED", executionState:"paused"}), ctx);
+    expect(overlayTask(paused, overlay, "dev")).toMatchObject({status:"paused", observedPhase:"paused", acceptance:null});
+    const closed = mapTask(wireTask({phase:"stopped", runtimeState:"CANCELLED", executionState:"stopped",
+      warnings:["owner_resolved_without_certification", "owner_completed_externally"]}), ctx);
+    expect(overlayTask(closed, overlay, "dev")).toMatchObject({
+      status:"done", closedAs:"external", notVerifiedByCortex:true, acceptance:null, integration:null,
+    });
+  });
   it("does not certify an unconfirmed close or let stale owner facts supersede it", () => {
     const native = mapTask(wireTask({phase:"unknown",runtimeState:null,executionState:"unknown",
       warnings:["contradictory_evidence","owner_closed_unconfirmed"]}), ctx);

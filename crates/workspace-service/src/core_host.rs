@@ -2,7 +2,7 @@
 use crate::{actor, failure, local::core_failure as err, project_guard, Service};
 use cortex_core::{
     events::StreamFrame, projections::ProjectionReader, store::CommitSignal, OpenMode, ProjectKey,
-    Store, StoreChannel,
+    Store,
 };
 use serde_json::{json, Value};
 use std::{
@@ -17,7 +17,8 @@ use tokio::{
     task::JoinHandle,
     time::{sleep_until, Instant},
 };
-use workspace_protocol::core::RequestEnvelope;
+
+mod wal_watch;
 
 #[cfg(feature = "test-observations")]
 fn broadcast_identity(
@@ -64,8 +65,22 @@ pub(crate) struct Registry {
 #[derive(Default)]
 struct Readers {
     closed: bool,
-    registrations: BTreeMap<String, Arc<()>>,
+    registrations: BTreeMap<String, Arc<ProjectRegistration>>,
     slots: BTreeMap<ProjectKey, Slot>,
+}
+
+pub(crate) struct ProjectRegistration(watch::Sender<bool>);
+
+impl Default for ProjectRegistration {
+    fn default() -> Self {
+        Self(watch::channel(false).0)
+    }
+}
+
+impl ProjectRegistration {
+    pub(crate) fn stopped(&self) -> watch::Receiver<bool> {
+        self.0.subscribe()
+    }
 }
 
 #[derive(Default)]
@@ -104,7 +119,7 @@ impl Running {
 }
 
 impl Readers {
-    fn check(&self, project: &str, registration: &Arc<()>) -> io::Result<()> {
+    fn check(&self, project: &str, registration: &Arc<ProjectRegistration>) -> io::Result<()> {
         if self.closed {
             return Err(failure("service_stopping"));
         }
@@ -121,6 +136,7 @@ impl Readers {
 
 const FALLBACK: Duration = Duration::from_millis(250);
 const COALESCE: Duration = Duration::from_millis(25);
+const WAL_FINAL_RECHECK: Duration = Duration::from_millis(50);
 
 // A writer can advance the outbox between poll_model and its read transaction.
 fn consistent_read<T>(
@@ -135,19 +151,11 @@ fn consistent_read<T>(
     unreachable!()
 }
 fn key(root: &std::path::Path) -> io::Result<ProjectKey> {
-    ProjectKey::new(
-        root,
-        if workspace_protocol::channel::current().is_dev() {
-            StoreChannel::Dev
-        } else {
-            StoreChannel::Release
-        },
-    )
-    .map_err(err)
+    crate::native_runtime::key(root).map_err(err)
 }
 impl Registry {
     // Call under Service::state so removal invalidates even a queued initial query.
-    fn registration(&self, project: &str) -> io::Result<Arc<()>> {
+    fn registration(&self, project: &str) -> io::Result<Arc<ProjectRegistration>> {
         let mut readers = self.readers.lock().unwrap();
         if readers.closed {
             return Err(failure("service_stopping"));
@@ -161,7 +169,9 @@ impl Registry {
 
     pub(crate) fn remove(&self, project: &str) -> Vec<JoinHandle<()>> {
         let mut readers = self.readers.lock().unwrap();
-        readers.registrations.remove(project);
+        if let Some(registration) = readers.registrations.remove(project) {
+            registration.0.send_replace(true);
+        }
         let mut stopped = Vec::new();
         readers.slots.retain(|_, slot| {
             if slot.running.as_ref().is_some_and(|r| r.project == project) {
@@ -178,7 +188,9 @@ impl Registry {
         let stopped = {
             let mut readers = self.readers.lock().unwrap();
             readers.closed = true;
-            readers.registrations.clear();
+            for (_, registration) in std::mem::take(&mut readers.registrations) {
+                registration.0.send_replace(true);
+            }
             std::mem::take(&mut readers.slots)
                 .into_values()
                 .filter_map(|slot| slot.running.map(Running::stop))
@@ -189,14 +201,14 @@ impl Registry {
         }
     }
 
-    fn query(
+    fn projected<T>(
         &self,
         root: PathBuf,
         project: String,
-        registration: Arc<()>,
-        request: RequestEnvelope<workspace_protocol::core::CoreQuery>,
+        registration: Arc<ProjectRegistration>,
         events: broadcast::Sender<Value>,
-    ) -> io::Result<Value> {
+        mut read: impl FnMut(&ProjectionReader) -> cortex_core::CoreResult<T>,
+    ) -> io::Result<T> {
         // Conversation pages and task facts answer the owner's screen: read at the session's
         // disk priority, not the level the service unit gives task processes (`io_priority`).
         let _disk = cortex_core::io_priority::raised();
@@ -214,20 +226,21 @@ impl Registry {
                 if current.project != project {
                     return Err(failure("project_context_conflict"));
                 }
-                let reply =
-                    consistent_read(|| current.reader.query(request.body.clone())).map_err(err)?;
+                let reply = consistent_read(|| read(&current.reader)).map_err(err)?;
                 self.readers.lock().unwrap().check(&project, &registration)?;
-                return serde_json::to_value(reply).map_err(|_| failure("invalid_reply"));
+                return Ok(reply);
             }
 
             // The owner waits for this read: queue behind an exclusive migration, never `busy`.
             let store = Store::open_waiting(key.clone(), OpenMode::LiveReadOnly).map_err(err)?;
+            let wal_directory = store
+                .key()
+                .home_directory()
+                .filter(|home| home == &store.key().directory());
             let reader = ProjectionReader::new(store, project.clone(), actor()).map_err(err)?;
-            let reply = consistent_read(|| reader.query(request.body.clone())).map_err(err)?;
-            let subscription = reader
-                .subscribe(&reply.generation, reply.high_watermark)
-                .map_err(err)?;
-            let reply = serde_json::to_value(reply).map_err(|_| failure("invalid_reply"))?;
+            let reply = consistent_read(|| read(&reader)).map_err(err)?;
+            let (generation, high) = reader.stream_position().map_err(err)?;
+            let subscription = reader.subscribe(&generation, high).map_err(err)?;
             let mut readers = self.readers.lock().unwrap();
             readers.check(&project, &registration)?;
             // An alias may have owned this slot before a read failure invalidated its entry.
@@ -250,20 +263,21 @@ impl Registry {
                 }
             });
             let running = &mut readers.slots.get_mut(&key).unwrap().running;
-            if !running.as_ref().is_some_and(|r| r.project == project) {
-                if let Some(previous) = running.take() {
-                    previous.stop();
-                }
-                *running = Some(Poller {
-                    root,
-                    signal: key.commit_signal(),
-                    key: key.clone(),
-                    project: project.clone(),
-                    entry: slot.clone(),
-                    events,
-                }
-                .start());
+            // A new snapshot can replace a stale reader at the same logical key,
+            // including a formerly checkout-local store that has moved home.
+            if let Some(previous) = running.take() {
+                previous.stop();
             }
+            *running = Some(Poller {
+                root,
+                signal: key.commit_signal(),
+                key: key.clone(),
+                project: project.clone(),
+                entry: slot.clone(),
+                events,
+                wal_directory,
+            }
+            .start());
             *entry = Some(Entry {
                 project,
                 reader,
@@ -292,6 +306,13 @@ struct Poller {
     entry: ReaderSlot,
     signal: Arc<CommitSignal>,
     events: broadcast::Sender<Value>,
+    wal_directory: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy)]
+struct WalRecheck {
+    at: Instant,
+    next_delay: Option<Duration>,
 }
 
 impl Poller {
@@ -325,8 +346,16 @@ impl Poller {
     {
         // The first poll catches commits between the initial snapshot and registration.
         let mut timing = None;
+        let mut wal = None;
+        let mut recheck: Option<WalRecheck> = None;
         loop {
-            if let Some((ready, fallback)) = timing {
+            if wal.is_none() {
+                wal = self
+                    .wal_directory
+                    .as_deref()
+                    .and_then(|directory| wal_watch::Watch::new(directory).ok());
+            }
+            let next_recheck = if let Some((ready, fallback)) = timing {
                 // Leave the single permit untouched during cooldown. A burst through the
                 // current read and the cooldown thus asks for one trailing poll, not a queue.
                 tokio::select! {
@@ -337,10 +366,24 @@ impl Poller {
                 tokio::select! {
                     biased;
                     _ = stop.changed() => return,
-                    _ = self.signal.notified() => (),
-                    _ = sleep_until(fallback) => (),
+                    _ = self.signal.notified() => None,
+                    _ = sleep_until(fallback) => None,
+                    result = wal_watch::wait(wal.as_ref()) => {
+                        if result.is_err() {
+                            wal = None;
+                        }
+                        result.is_ok().then_some((COALESCE, Some(WAL_FINAL_RECHECK)))
+                    },
+                    // A WAL write can notify before SQLite makes the commit
+                    // visible. Only an empty WAL poll can schedule a recheck.
+                    _ = sleep_until(recheck.map_or(ready, |check| check.at)), if recheck.is_some() => {
+                        recheck.and_then(|check| check.next_delay).map(|delay| (delay, None))
+                    },
                 }
-            }
+            } else {
+                None
+            };
+            recheck = None;
             let mut entry = tokio::select! {
                 biased;
                 _ = stop.changed() => return,
@@ -371,6 +414,12 @@ impl Poller {
                 result = &mut read => result,
             };
             if let Ok((_entry, events)) = result {
+                if events.is_empty() {
+                    recheck = next_recheck.map(|(delay, next_delay)| WalRecheck {
+                        at: started + delay,
+                        next_delay,
+                    });
+                }
                 // Keep the reader guard until its drained frames are delivered, and
                 // serialize the final send with removal's stop. Neither lock spans an await.
                 let stopped = stop.borrow();
@@ -412,7 +461,12 @@ fn poll(
         .into_iter()
         .map(|frame| match frame {
             StreamFrame::Delta(batch) => {
-                json!({"type":"native_delta","projectId":project,"batch":batch})
+                let heads = current.reader.history_heads(&batch.generation, batch.through_sequence);
+                let mut event = json!({"type":"native_delta","projectId":project,"batch":batch});
+                if !heads.is_empty() {
+                    event["historyHeads"] = json!(heads);
+                }
+                event
             }
             StreamFrame::Resync(r) => {
                 json!({"type":"native_resync","projectId":project,"reason":r.reason})
@@ -475,6 +529,41 @@ mod startup_reads {
     }
 }
 impl Service {
+    pub(crate) async fn projection_registration(
+        &self,
+        project: &str,
+    ) -> io::Result<(PathBuf, Arc<ProjectRegistration>)> {
+        let state = self.state.lock().await;
+        let entry = state
+            .projects
+            .iter()
+            .find(|p| p.project_id == project)
+            .ok_or_else(|| failure("project_not_found"))?;
+        if entry.activation.is_none() {
+            return Err(failure("project_inactive"));
+        }
+        Ok((entry.canonical_root.clone(), self.core.registration(project)?))
+    }
+
+    pub(crate) async fn follow_history_read(
+        &self,
+        root: PathBuf,
+        registration: Arc<ProjectRegistration>,
+        request: workspace_protocol::read::HistoryFollowRequest,
+        previous_decision: Option<String>,
+    ) -> io::Result<cortex_core::projections::HistoryFollowRead> {
+        let project = request.project_id.clone();
+        let host = self.core.clone();
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            host.projected(root, project, registration, events, |reader| {
+                reader.follow_history(&request, previous_decision.as_deref())
+            })
+        })
+        .await
+        .map_err(|_| failure("storage_unavailable"))?
+    }
+
     pub async fn native_query(&self, params: Value) -> io::Result<Value> {
         let request = workspace_protocol::core::decode_native_query(
             &serde_json::to_vec(&params).map_err(|_| failure("invalid_request"))?,
@@ -484,22 +573,16 @@ impl Service {
             .project_id
             .clone()
             .ok_or_else(|| failure("invalid_project"))?;
-        let (root, registration) = {
-            let state = self.state.lock().await;
-            let p = state
-                .projects
-                .iter()
-                .find(|p| p.project_id == project)
-                .ok_or_else(|| failure("project_not_found"))?;
-            if p.activation.is_none() {
-                return Err(failure("project_inactive"));
-            }
-            (p.canonical_root.clone(), self.core.registration(&project)?)
-        };
+        let (root, registration) = self.projection_registration(&project).await?;
         let host = self.core.clone();
         let events = self.events.clone();
-        tokio::task::spawn_blocking(move || host.query(root, project, registration, request, events))
+        let reply = tokio::task::spawn_blocking(move || {
+            host.projected(root, project, registration, events, |reader| {
+                reader.query(request.body.clone())
+            })
+        })
             .await
-            .map_err(|_| failure("storage_unavailable"))?
+            .map_err(|_| failure("storage_unavailable"))??;
+        serde_json::to_value(reply).map_err(|_| failure("invalid_reply"))
     }
 }

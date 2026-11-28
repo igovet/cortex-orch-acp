@@ -11,13 +11,16 @@ const here = () => location.pathname + location.search;
  * Every tab routes on its own; the window's address follows the active one. The address is only ever replaced, so the
  * webview's history stays out of the way of each tab's Back and Forward.
  */
-export function createTabs() {
+export function createTabs(phonePairing?: string) {
   const owner = getOwner();
   const [saved, save] = persisted<StoredTabs | null>("cw.ws.tabs", null, v => v === null || isStoredTabs(v));
   const [list, setList] = createSignal<TabList>(startTabs(saved(), here()));
   const publish = () => {
     const now = untrack(list), href = hrefIn(activeOf(now));
-    if (here() !== href) history.replaceState(history.state, "", href);
+    if (here() !== href || (phonePairing && history.state?.phonePairing !== phonePairing)) {
+      const state = phonePairing ? { ...history.state, phonePairing } : history.state;
+      history.replaceState(state, "", href);
+    }
     save(encodeTabs(now));
   };
   publish();

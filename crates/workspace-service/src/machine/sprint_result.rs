@@ -13,25 +13,112 @@ fn outcome(db: &Connection, task: &str) -> CoreResult<Value> {
         [task],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
-    let last:Option<(String,String)>=db.query_row(
-        "SELECT type,payload_json FROM runtime_events WHERE task_id=? AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED')
-         AND json_extract(payload_json,'$.revision')=? ORDER BY id DESC LIMIT 1", (task,revision), |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let last: Option<(i64, String, String, String)> = db
+        .query_row(
+            "SELECT id,type,actor,payload_json FROM runtime_events WHERE task_id=?1 AND type IN
+         ('VERIFICATION_PASSED','VERIFICATION_FAILED','VERIFICATION_REVISED')
+         AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type IN
+             ('TASK_REOPENED','PLAN_ACCEPTED','REVIEW_STARTED')),0)
+         ORDER BY id DESC LIMIT 1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
     let verification = match last {
-        Some((kind, raw)) => {
+        Some((_, _, actor, _)) if actor != "runtime" => {
+            json!({"last_observation":null,"reason":"verification_evidence_unconfirmed"})
+        }
+        Some((event, kind, _, raw)) => {
             let payload: Value = serde_json::from_str(&raw)?;
-            let checks:Vec<_>=payload["checks"].as_array().into_iter().flatten().map(|v| json!({
-                "receipt_ref":v["receipt_ref"],"program":v["argv"].get(0),"complete":v["complete"],"exit_code":v["exit_code"]
-            })).collect();
-            json!({"last_observation":kind,"revision":revision,"revision_digest":payload["revision_digest"],"checks":checks})
+            if kind == "VERIFICATION_REVISED" && payload["accepted_unverified"].is_null() {
+                json!({"last_observation":null,"reason":"verification_procedure_revised"})
+            } else if kind == "VERIFICATION_REVISED"
+                && cortex_core::lifecycle::completion::retained_verification_waiver(
+                    db, task, event, &payload,
+                )?
+            {
+                let accepted: Vec<_> = payload["accepted_unverified"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|argv| argv.get(0))
+                    .collect();
+                json!({"last_observation":null,"reason":"owner_accepted_unverified","programs":accepted})
+            } else if kind == "VERIFICATION_REVISED" {
+                json!({"last_observation":null,"reason":"verification_evidence_unconfirmed"})
+            } else if kind == "VERIFICATION_PASSED"
+                && payload["revision"] == revision
+                && !cortex_core::lifecycle::completion::retained_verification_pass(
+                    db, task, event, &payload,
+                )?
+            {
+                json!({"last_observation":null,"reason":"verification_evidence_unconfirmed"})
+            } else if payload["revision"] == revision {
+                let checks:Vec<_>=payload["checks"].as_array().into_iter().flatten().map(|v| json!({
+                    "receipt_ref":v["receipt_ref"],"program":v["argv"].get(0),"complete":v["complete"],"exit_code":v["exit_code"]
+                })).collect();
+                json!({"last_observation":kind,"revision":revision,"revision_digest":payload["revision_digest"],
+                    "review_event":payload["review_event"],"checks":checks})
+            } else {
+                json!({"last_observation":null,"reason":"no_verification_for_this_revision"})
+            }
         }
         None => json!({"last_observation":null,"reason":"no_verification_for_this_revision"}),
     };
     let constraints = json!({"write_denials":cortex_core::lifecycle::steering::denials(db,task)?,
         "access_mode":cortex_core::access::current(db,task)?});
+    let owner_resolution: Option<String> = db
+        .query_row(
+            "SELECT payload_json FROM runtime_events WHERE task_id=?1
+         AND type IN ('OWNER_TASK_RESOLVED','USER_FORCE_FINISHED')
+         AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1
+             AND type='TASK_REOPENED'),0) ORDER BY id DESC LIMIT 1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let owner_resolution = owner_resolution
+        .map(|raw| serde_json::from_str::<Value>(&raw))
+        .transpose()?
+        .map(|v| {
+            json!({"disposition":v["disposition"],"certified":v["certified"],
+            "processes_unconfirmed":v["processes_unconfirmed"]})
+        });
     Ok(
         json!({"state":state,"revision":revision,"synthesis":synthesis,"blocker":blocker,"verification":verification,
-        "constraints":constraints,"decisions":decisions(db,task,None,16)?}),
+        "owner_resolution":owner_resolution,"constraints":constraints,"decisions":decisions(db,task,None,16)?}),
     )
+}
+
+/// Report publication and use by an assignment are separate facts. Historical
+/// reports remain readable, but cannot stand in for the current result.
+fn report_use(db: &Connection, task: &str, report: &str, digest: &str) -> CoreResult<&'static str> {
+    let (current, bindings): (bool, i64) = db.query_row(
+        "SELECT coalesce(max(n.revision=t.revision AND n.revision>coalesce(
+             (SELECT json_extract(e.payload_json,'$.revision') FROM runtime_events e
+              WHERE e.task_id=t.task_id AND e.type='TASK_REOPENED' ORDER BY e.id DESC LIMIT 1),-1)),0),
+             count(*)
+         FROM runtime_nodes n JOIN runtime_tasks t ON t.task_id=n.task_id
+         JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
+         WHERE n.task_id=? AND n.status='completed'
+         AND json_extract(n.result_json,'$.report_ref')=?
+         AND json_extract(n.result_json,'$.report_digest')=?
+         AND 1=(SELECT count(*) FROM runtime_events e
+                WHERE e.task_id=n.task_id AND e.type='WORKER_COMPLETED' AND e.actor='runtime'
+                AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref
+                AND json_extract(e.payload_json,'$.attempt_id')=p.attempt_id
+                AND json_extract(e.payload_json,'$.result.report_ref')=json_extract(n.result_json,'$.report_ref')
+                AND json_extract(e.payload_json,'$.result.report_digest')=json_extract(n.result_json,'$.report_digest'))",
+        (task, report, digest),
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(if bindings != 1 {
+        "unbound"
+    } else if current {
+        "current_revision"
+    } else {
+        "historical"
+    })
 }
 
 /// Question IDs and answers are evidence from the predecessor, not authority
@@ -95,9 +182,10 @@ pub(crate) fn read(
             cursor,
             limit.unwrap_or(4000) as usize,
         )?;
+        let usage = store.read(|db| report_use(db, task, report, &page.sha256))?;
         return Ok(
             json!({"member_id":id,"report":{"report_id":report,"markdown":page.markdown,"sha256":page.sha256,
-            "total_characters":page.total_characters,"next_cursor":page.next_cursor}}),
+            "result_binding":usage,"total_characters":page.total_characters,"next_cursor":page.next_cursor}}),
         );
     }
     let mut value =
@@ -116,16 +204,18 @@ pub(crate) fn read(
         return Ok(json!({"member_id":id,"decisions":page}));
     }
     let catalogue = publisher.immutable_reports(task, cursor, limit.unwrap_or(25) as usize)?;
-    let items:Vec<_>=catalogue.reports.iter().map(|r|json!({
-        "report_id":r.report_id,"title":r.title,"summary":r.summary,"sha256":r.sha256,"size_bytes":r.size_bytes
-    })).collect();
-    value["reports"] = json!({"items":items,"next_cursor":catalogue.next_cursor});
-    let (result, code) = store.read(|db| {
+    let (items, result, code) = store.read(|db| {
+        let items = catalogue.reports.iter().map(|r| Ok(json!({
+            "report_id":r.report_id,"title":r.title,"summary":r.summary,"sha256":r.sha256,"size_bytes":r.size_bytes,
+            "result_binding":report_use(db, task, &r.report_id, &r.sha256)?
+        }))).collect::<CoreResult<Vec<_>>>()?;
         Ok((
+            items,
             outcome(db, task)?,
             task_facts_git::sprint_availability(db, id, recipient)?,
         ))
     })?;
+    value["reports"] = json!({"items":items,"next_cursor":catalogue.next_cursor});
     value["outcome"] = result;
     value["code"] = code;
     Ok(value)
@@ -134,7 +224,257 @@ pub(crate) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cortex_core::{lifecycle::TaskMachine, OpenMode};
+    use cortex_core::{
+        channels::{self, Principal},
+        lifecycle::{self, completion, FoundationGuards, TaskMachine},
+        ports::{CommandObservation, ProcessObservation},
+        store::documents::Publication,
+        OpenMode, TaskState,
+    };
+
+    #[tokio::test]
+    async fn downstream_coordinator_reads_bound_predecessor_pages_and_detects_stale_or_missing_evidence(
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("sprint-handoff-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let store = Store::open(
+            crate::native_runtime::key(&root).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap();
+        let machine = TaskMachine::new(&store);
+        let owner_a = machine
+            .create("run-a", "Describe the API", "owner")
+            .unwrap();
+        let owner = machine.create("run-b", "Use the API", "owner").unwrap();
+        machine
+            .transition(
+                "run-b",
+                &owner,
+                "planning",
+                TaskState::Planning,
+                None,
+                &FoundationGuards,
+            )
+            .unwrap();
+        let project = "sprint_fixture";
+        let state = root.join("state");
+        let product = super::super::native::product_path(&state, project).unwrap();
+        std::fs::create_dir_all(product.parent().unwrap()).unwrap();
+        std::fs::write(product, json!({
+            "tasks": {
+                "card-a":{"sprintId":"sprint-a","status":"done","closedAs":"as_is","notVerifiedByCortex":true,"dependencies":[]},
+                "card-b":{"sprintId":"sprint-a","dependencies":["card-a"]}
+            },
+            "sprints":[{"id":"sprint-a","projectId":project,"taskIds":["card-a","card-b"]}]
+        }).to_string()).unwrap();
+        let publisher = Publisher::new(&store);
+        let draft = publisher
+            .create_draft("run-a", "author", "general", "draft")
+            .unwrap();
+        let body = format!(
+            "{}\n\n{}\nFinal input key: record_id\n",
+            draft.markdown.lines().next().unwrap(),
+            "API input schema. ".repeat(400)
+        );
+        publisher
+            .write_draft("run-a", "author", &draft.draft_id, &body)
+            .unwrap();
+        let report = publisher
+            .publish(
+                "run-a",
+                "author",
+                &draft.draft_id,
+                "publish",
+                Publication {
+                    title: "API contract",
+                    summary: "The downstream input schema",
+                    author: "author",
+                    source_revision: 0,
+                    artifacts: json!([]),
+                },
+            )
+            .unwrap();
+        std::fs::write(root.join("contract.txt"), "record_id\n").unwrap();
+        let mut snapshot = crate::native_effects::observe(root.clone()).await.unwrap();
+        let argv = vec![
+            "/usr/bin/test".to_owned(),
+            "-s".to_owned(),
+            "contract.txt".to_owned(),
+        ];
+        let exit = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(exit.success());
+        let credential = store.write(|db| {
+            db.execute("INSERT INTO workspace_projects(project_id,project_root,activated_by,activated_at) VALUES (?,?,'owner','now')",
+                (project, root.to_str().unwrap()))?;
+            db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,created_at)
+                VALUES ('outside',?,'Other project task','now')", [project])?;
+            for (card, run) in [("card-a","run-a"),("card-b","run-b")] {
+                db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,execution_id,created_at) VALUES (?,?,?,?,'now')",
+                    (card,project,card,run))?;
+                db.execute("INSERT INTO acp_host_sessions(session_id,project_root,task_id,client_info,client_capabilities,mcp_servers,created_at)
+                    VALUES (?,?,?,'{}','{}','[]','now')", (card,root.to_str().unwrap(),run))?;
+                db.execute("INSERT INTO workspace_executions(execution_id,task_id,runtime_task_id,acp_session_id,owner_epoch,bound_at) VALUES (?,?,?,?,1,'now')",
+                    (run,card,run,card))?;
+            }
+            db.execute("UPDATE runtime_tasks SET revision=1,state='PLAN_READY',plan_json=? WHERE task_id='run-a'",
+                [json!({"verification":[argv],"outcomes":[{"id":"api","statement":"Publish the API contract"}]}).to_string()])?;
+            completion::execution_baseline_tx(db, "run-a", &snapshot)?;
+            db.execute("INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status,assignment_ref)
+                VALUES ('run-a',1,'describe','worker-explorer','Describe API','[]','[]','execution','running','assignment-a')", [])?;
+            let worker = channels::issue_tx(db, "run-a", &owner_a, Principal::Worker {assignment:"assignment-a"})?;
+            let attempt = channels::authenticate(db, &worker.channel_id, worker.secret(), false)?.attempt;
+            db.execute("INSERT INTO task_events(task_id,event_type,assignment_ref,dedup_key,payload_json,origin,created_at)
+                VALUES ('run-a','worker_result','assignment-a','result-a',?,'runtime','now')",
+                [json!({"report_ref":report.report_id}).to_string()])?;
+            snapshot.artifacts.insert(report.report_id.clone(), report.sha256.clone());
+            snapshot.workers.insert(attempt, ProcessObservation::ConfirmedExited);
+            completion::record_result_tx(db, "run-a", "assignment-a",
+                &json!({"report_ref":report.report_id,"summary":"Published contract","checks":[]}), &snapshot)?;
+            completion::add_review_tx(db, "run-a", &snapshot)?;
+            lifecycle::event_tx(db, "run-a", "VERIFICATION_PASSED", json!({"revision":1,"revision_digest":"original","checks":[]}))?;
+            assert_eq!(outcome(db, "run-a")?["verification"]["reason"], "verification_evidence_unconfirmed");
+            completion::retain_check_tx(db, "run-a", &owner_a, "fixture-check", &argv,
+                &CommandObservation{complete:true,exit_code:exit.code(),receipt_ref:"check-contract-a".into()}, &snapshot)?;
+            assert!(completion::record_verification_tx(db, "run-a", &["fixture-check".into()], &snapshot)?);
+            lifecycle::reconciliation::submit_synthesis_tx(db, "run-a", &json!({"text":"See API contract",
+                "outcomes":[{"id":"api","status":"done","evidence":report.report_id}]}))?;
+            completion::complete_tx(db, "run-a", &snapshot)?;
+            let c = channels::issue_tx(db, "run-b", &owner, Principal::Coordinator)?;
+            channels::bind_session_tx(db, &c, "coordinator-b")?;
+            Ok(c)
+        }).unwrap();
+        let identity = store
+            .read(|db| {
+                channels::authenticate(db, &credential.channel_id, credential.secret(), true)
+            })
+            .unwrap();
+        let read = |args| {
+            crate::native_context_tools::sprint_read(
+                &store,
+                &credential,
+                &identity,
+                Some(&state),
+                &root,
+                "sprint_task_result",
+                &args,
+            )
+        };
+        let catalogue = read(json!({"member_id":"card-a"})).unwrap();
+        assert_eq!(catalogue["task"]["notVerifiedByCortex"], true);
+        assert_eq!(
+            catalogue["outcome"]["verification"]["last_observation"],
+            "VERIFICATION_PASSED"
+        );
+        assert_eq!(
+            catalogue["reports"]["items"][0]["report_id"],
+            report.report_id
+        );
+        assert_eq!(
+            catalogue["reports"]["items"][0]["result_binding"],
+            "current_revision"
+        );
+        assert_eq!(catalogue["code"]["status"], "unknown");
+        let args = json!({"member_id":"card-a", "report_id": report.report_id, "limit": 4000});
+        let first = read(args.clone()).unwrap();
+        let cursor = &first["report"]["next_cursor"];
+        assert!(cursor.is_string());
+        assert!(!first["report"]["markdown"]
+            .as_str()
+            .unwrap()
+            .contains("record_id"));
+        let second =
+            read(json!({"member_id":"card-a", "report_id":report.report_id, "cursor":cursor}))
+                .unwrap();
+        assert!(second["report"]["next_cursor"].is_null());
+        assert_eq!(first["report"]["sha256"], second["report"]["sha256"]);
+        let consumed = second["report"]["markdown"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("Final input key: "));
+        assert_eq!(consumed, Some("record_id"));
+        assert_eq!(
+            format!(
+                "{}{}",
+                first["report"]["markdown"].as_str().unwrap(),
+                second["report"]["markdown"].as_str().unwrap()
+            ),
+            body
+        );
+        assert_eq!(
+            read(json!({"member_id":"outside"})).unwrap_err().code(),
+            "task_outside_sprint"
+        );
+        assert!(
+            read(json!({"member_id":"card-b","report_id":report.report_id,"cursor":cursor}))
+                .is_err()
+        );
+        store
+            .write(|db| {
+                db.execute(
+                    "UPDATE workspace_executions SET owner_epoch=2 WHERE task_id='card-a'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            read(args.clone()).unwrap_err().code(),
+            "sprint_membership_invalid"
+        );
+        store
+            .write(|db| {
+                db.execute(
+                    "UPDATE workspace_executions SET owner_epoch=1 WHERE task_id='card-a'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .write(|db| {
+                lifecycle::event_tx(db, "run-a", "REVIEW_STARTED", json!({"revision":1}))?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            read(json!({"member_id":"card-a"})).unwrap()["outcome"]["verification"]
+                ["last_observation"]
+                .is_null()
+        );
+        store
+            .write(|db| {
+                lifecycle::event_tx(db, "run-a", "TASK_REOPENED", json!({"revision":1}))?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            read(args.clone()).unwrap()["report"]["result_binding"],
+            "historical"
+        );
+        let filename = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT filename FROM reports WHERE id=?",
+                    [&report.report_id],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
+            .unwrap();
+        let path = store.key().directory().join("run-a").join(filename);
+        std::fs::write(&path, b"partial").unwrap();
+        assert_eq!(read(args.clone()).unwrap_err().code(), "file_conflict");
+        std::fs::remove_file(path).unwrap();
+        assert!(read(args).is_err());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn result_binds_checks_to_revision_and_pages_work_decisions_without_permission_details() {

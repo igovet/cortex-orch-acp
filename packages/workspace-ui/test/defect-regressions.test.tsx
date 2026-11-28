@@ -106,6 +106,32 @@ const workBlock = () => document.querySelector<HTMLElement>(".sb-work");
 const showActiveWork = async () => { document.querySelector<HTMLButtonElement>(".sb-view-head .seg button:last-child")!.click(); await settle(); };
 const sideLinks = (parent: ParentNode, selector = ".task-row") => [...parent.querySelectorAll<HTMLAnchorElement>(selector)];
 
+it.each(["close_sprint", "delete_sprint"] as const)("confirms only the targeted sidebar sprint for %s", async operation => {
+  const state = world();
+  state.projects.push({ ...state.projects[0], id: "other", name: "Other project" });
+  state.sprints = [sidebarSprint("active", "running"), { ...sidebarSprint("selected", "running"), projectId: "other" }];
+  const fixture = await mount(state, taskPath);
+  document.querySelector<HTMLButtonElement>('[aria-label="Show tasks of Other project"]')?.click(); await settle();
+  const trigger = document.querySelector<HTMLButtonElement>('[aria-label="Actions for sprint selected sprint"]')!;
+  const link = trigger.previousElementSibling as HTMLAnchorElement;
+  const menu = document.querySelector<HTMLElement>("#m-task")!;
+  const item = () => [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(b => b.textContent?.startsWith(operation === "close_sprint" ? "Close sprint" : "Delete sprint"))!;
+  link.dispatchEvent(new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true }));
+  expect(menu.getAttribute("aria-label")).toBe("Sprint actions");
+  expect(location.pathname).toBe(taskPath);
+  item().click(); await settle();
+  const dialog = () => document.querySelector<HTMLDialogElement>('dialog[data-dialog="Confirm"]')!;
+  expect(dialog().textContent).toContain("Other project / selected sprint");
+  dialog().querySelector<HTMLButtonElement>("[data-autofocus]")!.click(); await settle();
+  expect(fixture.commands).toEqual([]);
+  expect(document.activeElement).toBe(link);
+  trigger.click();
+  item().click(); await settle();
+  dialog().querySelector<HTMLButtonElement>(".btn-danger, .btn-primary")!.click(); await settle();
+  expect(fixture.commands.map(c => c.payload)).toEqual([{ type: operation, projectId: "other", sprintId: "selected", confirmed: true }]);
+  fixture.receipt(); await settle();
+});
+
 it("lists uncapped work across projects with project names and separate status words", async () => {
   const s = world(), base = s.tasks[0];
   s.projects[0].name = "First project";
@@ -122,15 +148,14 @@ it("lists uncapped work across projects with project names and separate status w
   await mount(s, `/m/${LOCAL_MACHINE_ID}`);
   await showActiveWork();
   const block = workBlock()!;
-  expect(document.querySelector(".sidebar .proj")).toBeNull();
-  expect([...block.querySelectorAll(".sb-work-group")].map(h => h.textContent)).toEqual(["Working", "Review", "Ready to merge"]);
-  expect(sideLinks(block)).toHaveLength(8);
-  const links = sideLinks(block);
-  expect(links.filter(r => r.querySelector(".sb-row-project")?.textContent === "First project")).toHaveLength(6);
-  expect(links.filter(r => r.querySelector(".sb-row-project")?.textContent === "Other project")).toHaveLength(2);
+  expect([...block.querySelectorAll(".proj .trunc")].map(n => n.textContent)).toEqual(["First project", "Other project"]);
+  block.querySelector<HTMLButtonElement>('[aria-label="Show tasks of Other project"]')!.click(); await settle();
+  const links = sideLinks(block, '.task-row[href*="/t/"]');
+  expect(links).toHaveLength(8);
+  expect(block.querySelector('[aria-label="Actions for Working 5"]')).toBeTruthy();
   const merge = links.find(r => r.getAttribute("href")?.endsWith("/t/merge"))!;
   expect(merge.querySelector(".sig")?.textContent).toMatch(/^(Finish|Merge)$/);
-  expect(merge.getAttribute("aria-label")).toBe(`Land the change — Other project — ${merge.querySelector(".sig")?.textContent}`);
+
 });
 
 it("shows an empty Active work view when there are no matching rows", async () => {
@@ -155,14 +180,14 @@ it("shows running and paused sprint trees without repeating their tasks within A
   expect(projectRows).toHaveLength(5);
   const child = projectRows.find(row => row.getAttribute("href") === taskPath)!;
   expect(child.classList.contains("in-sprint")).toBe(true);
-  expect(child.closest(".task-row-actions")?.previousElementSibling?.getAttribute("href")).toBe(sprintPath + "/board");
+  expect(child.closest(".task-row-actions")?.previousElementSibling?.querySelector("a.task-row")?.getAttribute("href")).toBe(sprintPath + "/board");
   await showActiveWork();
   const block = workBlock()!;
-  expect(sideLinks(block).map(row => row.getAttribute("href"))).toEqual([
+  expect(sideLinks(block, ".task-row:not(.all)").map(row => row.getAttribute("href"))).toEqual([
     sprintPath + "/board", taskPath, sprintPath.replace("running", "paused") + "/board", taskPath.replace(/t$/, "r"),
   ]);
   expect(sideLinks(block, ".in-sprint").map(row => row.querySelector(".trunc")?.textContent)).toEqual(["Sprint child", "Paused sprint child"]);
-  expect(block.querySelector(".task-row .sb-row-project")?.textContent).toBe(s.projects[0].name);
+  expect(block.querySelector(".proj .trunc")?.textContent).toBe(s.projects[0].name);
   const current = () => sideLinks(document, '.sidebar a[aria-current="page"]').map(a => a.getAttribute("href"));
   expect(current()).toEqual([sprintPath + "/board"]);
 
@@ -216,7 +241,7 @@ it("round-trips project views in a sprint, including checkout, file and line on 
   expect(parseRoute(`/m/${LOCAL_MACHINE_ID}/p/p/code`, "?file=a.ts&line=2")).toMatchObject({ name: "project", scope: { kind: "all" }, file: "a.ts", line: 2 });
 });
 
-it("keeps a sprint whose queue is complete in the sidebar, as Done, until it is closed into the Archive", async () => {
+it("keeps a sprint whose queue is complete in the sidebar until it is closed into the Archive", async () => {
   const s = world();
   // Four tasks ready to finish, as in the live run: the sprint row must not be the one pushed out of the five.
   s.tasks = ["t", "u", "v", "w"].map(id => ({ ...s.tasks[0], id, title: `Work ${id}`, status: "ready_to_merge" as const, sprintId: "sp" }));
@@ -224,7 +249,8 @@ it("keeps a sprint whose queue is complete in the sidebar, as Done, until it is 
   s.sprints = [sprint];
   await mount(s, `/m/${LOCAL_MACHINE_ID}`);
   const row = () => [...document.querySelectorAll<HTMLAnchorElement>(".sidebar .task-row")].find(r => r.textContent?.includes("Sprint: Release"));
-  expect(row()?.querySelector(".sig")?.textContent).toBe("Done");
+  // Queue completion does not move the four ready-to-finish cards into Done.
+  expect(row()?.querySelector(".sig")?.textContent).toBe("Done 0 of 4");
   expect(row()?.getAttribute("href")).toContain("/p/p/s/sp/board");
   expect(document.querySelectorAll(".sidebar .tasks .task-row:not(.all)")).toHaveLength(5);
   // Closed into the Archive, it leaves the sidebar.

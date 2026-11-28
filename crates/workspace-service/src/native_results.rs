@@ -18,6 +18,25 @@ fn text<'a>(v: &'a Value, field: &str) -> CoreResult<&'a str> {
         .as_str()
         .ok_or(CoreError::Refused("invalid_native_result"))
 }
+/// Project only data retained in a failed result, in both owner worker readers.
+pub(super) fn add_failed_result_fields(result: &mut Value, recorded: &Value) {
+    if recorded["assignment_outcome"] != "failed" {
+        return;
+    }
+    result["outcome"] = json!("failed");
+    if recorded["objective_status"] == "partial" {
+        result["objectiveStatus"] = json!("partial");
+        let remaining: Vec<_> = recorded["remaining"].as_array().into_iter().flatten()
+            .filter_map(Value::as_str).filter(|text| !text.trim().is_empty())
+            .take(16).map(|text| text.chars().take(500).collect::<String>()).collect();
+        if !remaining.is_empty() {
+            result["remaining"] = json!(remaining);
+        }
+    }
+    if let Some(detail) = recorded["blocker"]["detail"].as_str().filter(|text| !text.trim().is_empty()) {
+        result["blockerDetail"] = json!(detail.chars().take(1000).collect::<String>());
+    }
+}
 #[cfg(test)]
 fn validate_result(
     store: &Store,
@@ -36,9 +55,6 @@ struct Relief {
     /// Unread required predecessor reports are disclosed as an `unverified` limit
     /// instead of refused.
     disclose_unread_reports: bool,
-    /// A writer's failed assignment with an open verified failed check is recorded
-    /// without the one repair offer (`failed_check_repair_required`).
-    skip_repair_offer: bool,
     /// Runtime limits (`outcome: unverified`, `source: runtime`) recorded with the result.
     limits: Vec<Value>,
 }
@@ -75,7 +91,7 @@ fn validate_result_with(
         .ok_or(CoreError::Refused("invalid_native_result"))?;
     let mut runs = store.read(|db| worker_checks::load_runs(db, &i.task, &c.channel_id))?;
     let logical = store.key().root();
-    if store.read(|db| Ok(crate::native_project::task_root(db, &i.task)? != logical))? {
+    if store.read(|db| Ok(crate::native_project::identity_root(db, i)? != logical))? {
         let checkout = crate::native_project::checkout_binding(store, i)?
             .ok_or(CoreError::Refused("worktree_binding_invalid"))?;
         runs.retain(|run| {
@@ -89,11 +105,15 @@ fn validate_result_with(
     // A failed run that an earlier submission of this attempt cited and this one omits is
     // carried over by the runtime as a failed check (closed by an exact passing rerun when
     // one exists); it never refuses the submission.
-    let presented: Vec<String> = store.read(|db| Ok(db.prepare("SELECT json_extract(payload_json,'$.ref') FROM runtime_events WHERE task_id=? AND type='CHECK_FAILURE_PRESENTED' AND json_extract(payload_json,'$.attempt')=?")?
-        .query_map((&i.task, &i.attempt), |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?))?;
+    let presented: Vec<(String, Option<String>)> = store.read(|db| Ok(db.prepare(
+        "SELECT json_extract(payload_json,'$.ref'),json_extract(payload_json,'$.name')
+         FROM runtime_events WHERE task_id=? AND type='CHECK_FAILURE_PRESENTED'
+         AND json_extract(payload_json,'$.attempt')=? ORDER BY id"
+    )?.query_map((&i.task, &i.attempt), |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?))?;
     let mut all: Vec<Value> = submitted.to_vec();
     let first_carried = all.len();
-    for r in &presented {
+    for (r, name) in &presented {
         let cited = submitted.iter().any(|c| {
             matches!(c["outcome"].as_str(), Some("passed" | "failed")) && c["tool_call_ref"] == *r
         });
@@ -103,7 +123,8 @@ fn validate_result_with(
         }
         let program = run.receipt["argv"][0].as_str().unwrap_or("command");
         let program: String = program.rsplit('/').next().unwrap_or(program).chars().take(40).collect();
-        all.push(json!({"name": format!("{program} (carried from an earlier submission)"),
+        let name = name.clone().unwrap_or_else(|| format!("{program} (carried from an earlier submission)"));
+        all.push(json!({"name": name,
             "outcome": "failed", "tool_call_ref": r}));
     }
     let relevant = worker_checks::relevant_references(&all, &runs);
@@ -134,6 +155,8 @@ fn validate_result_with(
     // A cited pass whose run did not observe the exact submitted checkout may still be
     // bound to its own work set: the host compares that set's files now with the
     // stable observation retained across the run (`native_work_set`).
+    let partial_checkout = evidence.incomplete || evidence.cap_reached || evidence.metadata_only;
+    let checkout_digest = if partial_checkout { None } else { evidence.project_digest.as_deref() };
     let mut digests = std::collections::BTreeMap::new();
     for run in &mut runs {
         let reference = run.receipt["tool_call_ref"].as_str().unwrap_or("");
@@ -142,7 +165,7 @@ fn validate_result_with(
             .any(|c| c["outcome"] == "passed" && c["tool_call_ref"] == reference);
         let exact = run.receipt["revision_digest"]
             .as_str()
-            .is_some_and(|d| d.len() == 64 && Some(d) == evidence.project_digest.as_deref());
+            .is_some_and(|d| d.len() == 64 && Some(d) == checkout_digest);
         if !cited || exact || reference.is_empty() || run.operation != "command_run" {
             continue;
         }
@@ -162,8 +185,8 @@ fn validate_result_with(
     let presented_now: Vec<_> = submitted
         .iter()
         .filter(|c| matches!(c["outcome"].as_str(), Some("passed" | "failed")))
-        .filter_map(|c| c["tool_call_ref"].as_str())
-        .filter(|reference| {
+        .filter_map(|c| Some((c["tool_call_ref"].as_str()?, c["name"].as_str().unwrap_or("check"))))
+        .filter(|(reference, _)| {
             let matched: Vec<_> = runs
                 .iter()
                 .filter(|r| r.receipt["tool_call_ref"] == *reference)
@@ -174,23 +197,73 @@ fn validate_result_with(
     if !presented_now.is_empty() {
         store.write(|db| {
         channels::authenticate(db, &c.channel_id, c.secret(), true)?;
-        for reference in &presented_now {
+        for (reference, name) in &presented_now {
                     let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='CHECK_FAILURE_PRESENTED' AND json_extract(payload_json,'$.attempt')=? AND json_extract(payload_json,'$.ref')=?)",
                         (&i.task,&i.attempt,reference),|r|r.get(0))?;
-                    if !exists { lifecycle::event_tx(db,&i.task,"CHECK_FAILURE_PRESENTED",json!({"attempt":i.attempt,"ref":reference}))?; }
+                    if !exists { lifecycle::event_tx(db,&i.task,"CHECK_FAILURE_PRESENTED",json!({"attempt":i.attempt,"ref":reference,"name":check_text(name, 200)}))?; }
         }
         Ok(())
     })?;
     }
-    // Only a verified failure is carried; anything else never enters the result.
+    // Complete diagnostic observations stay in the command history. A
+    // diagnostic citation never becomes a verified pass or an open check.
+    let diagnostics: std::collections::BTreeSet<_> = runs
+        .iter()
+        .filter(|run| run.diagnostic_result())
+        .filter_map(|run| run.receipt["tool_call_ref"].as_str())
+        .filter(|reference| {
+            runs.iter().filter(|run| run.receipt["tool_call_ref"] == *reference).take(2).count() == 1
+        })
+        .collect();
     let mut index = 0;
-    all.retain(|c| {
-        let keep = index < first_carried
-            || runs.iter().any(|run| run.receipt["tool_call_ref"] == c["tool_call_ref"] && run.verified_failure());
+    all.retain_mut(|c| {
+        let carried = index >= first_carried;
         index += 1;
-        keep
+        if matches!(c["outcome"].as_str(), Some("passed" | "failed"))
+            && c["tool_call_ref"].as_str().is_some_and(|r| diagnostics.contains(r)) {
+            return false;
+        }
+        if carried && !runs.iter().any(|run| run.receipt["tool_call_ref"] == c["tool_call_ref"] && run.verified_failure()) {
+            c["outcome"] = json!("unverified");
+            c["blocker"] = json!("The earlier submission cited this check without a retained, verified failing receipt.");
+        }
+        true
     });
-    let mut checks = worker_checks::evaluate(&all, &runs, evidence.project_digest.as_deref())?;
+    let checked_failure = args["assignment_outcome"] == "failed"
+        && lifecycle::review::valid_blocker(&args["blocker"]["kind"])
+        && args["blocker"]["detail"].as_str().is_some_and(|detail| !detail.trim().is_empty());
+    let mut checks = match worker_checks::evaluate(&all, &runs, checkout_digest) {
+        Ok(checks) => checks,
+        Err(error) if matches!(error.code(), "invalid_check_retraction" | "invalid_check_supersession") => {
+            // Assess the original observations without the requested correction.
+            // A failure report can retain these facts without granting that correction.
+            for check in &mut all {
+                if let Some(fields) = check.as_object_mut() {
+                    fields.remove("invocation_error");
+                    fields.remove("command_correction");
+                }
+            }
+            let checks = worker_checks::evaluate(&all, &runs, checkout_digest)?;
+            if !checked_failure {
+                refusal_details(&c.channel_id, error.code(), unresolved_check_items(&checks, &runs));
+                return Err(error);
+            }
+            checks
+        }
+        Err(error) => return Err(error),
+    };
+    // Partial or failed whole-checkout observation cannot certify any check.
+    // Each claimed pass must instead have independently verified scope evidence.
+    if partial_checkout && !checked_failure {
+        let claimed = submitted.iter().filter(|check| check["outcome"] == "passed").count();
+        let verified = checks.iter().filter(|check| check["outcome"] == "passed"
+            && check["evidence_strength"] == "verified"
+            && check["revision_binding"]["kind"] == "work_set").count();
+        if claimed != verified {
+            refusal_details(&c.channel_id, "project_revision_unavailable", unresolved_check_items(&checks, &runs));
+            return Err(CoreError::Refused("project_revision_unavailable"));
+        }
+    }
     if let Some(assignment) = i.assignment.as_deref() {
         store.read(|db| worker_checks::attribute_foreign(db, &i.task, assignment, &mut checks, &runs))?;
     }
@@ -211,7 +284,7 @@ fn validate_result_with(
             refusal_details(
                 &c.channel_id,
                 "open_failed_check",
-                worker_checks::open_items(&checks, &runs),
+                unresolved_check_items(&checks, &runs),
             );
             return Err(CoreError::Refused("open_failed_check"));
         }
@@ -220,36 +293,20 @@ fn validate_result_with(
                 .as_str()
                 .is_none_or(|s| s.trim().is_empty())
         {
+            refusal_details(&c.channel_id, "check_blocker_required", unresolved_check_items(&checks, &runs));
             return Err(CoreError::Refused("check_blocker_required"));
-        }
-    }
-    // The authenticated channel identifies the profile. An explicit second failure
-    // can reach the coordinator even when this worker cannot repair the project.
-    if i.stage.as_deref() == Some("execution")
-        && i.profile
-            .as_deref()
-            .is_some_and(|role| !cortex_core::scheduler::policy::read_only(role, "execution"))
-        && args["assignment_outcome"] == "failed"
-        && checks.iter().any(|c| {
-            c["outcome"] == "failed"
-                && c["evidence_strength"] == "verified"
-                && !worker_checks::resolved(c)
-        })
-    {
-        let offered = store.read(|db| Ok(db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
-             AND json_extract(payload_json,'$.attempt')=? AND json_extract(payload_json,'$.code')='failed_check_repair_required')",
-            (&i.task, &i.attempt), |r| r.get::<_, bool>(0),
-        )?))?;
-        if !offered && !relief.skip_repair_offer {
-            return Err(CoreError::Refused("failed_check_repair_required"));
         }
     }
     // A worker finishes its own assignment. A part it can still do, or a failure
     // without a named dead end, is refused with exactly what is outstanding; the
     // channel stays open and the same session continues.
-    if let Some((code, _)) = outstanding(store, c, i, args)? {
+    if let Some((code, missing)) = outstanding(store, c, i, args)? {
         if !(code == "review_predecessor_reports_required" && relief.disclose_unread_reports) {
+            if matches!(code, "assignment_blocker_required" | "objective_partial_blocker_required") {
+                let mut details = unresolved_check_items(&checks, &runs);
+                details.extend(missing);
+                refusal_details(&c.channel_id, code, details);
+            }
             return Err(CoreError::Refused(code));
         }
     }
@@ -352,6 +409,12 @@ pub(super) fn outstanding(
     // blocker rule still applies to the arguments alone.
     let assignment = i.assignment.as_deref().unwrap_or("");
     let stage = i.stage.as_deref().unwrap_or("execution");
+    if stage == "execution" {
+        let missing = store.read(|db| required_reports_unread(store, db, c, i))?;
+        if !missing.is_empty() {
+            return Ok(Some(("required_reports_unread", missing)));
+        }
+    }
     if let Some(found) =
         store.read(|db| completion::outstanding_tx(db, &i.task, assignment, stage, args))?
     {
@@ -365,6 +428,37 @@ pub(super) fn outstanding(
     }
     Ok(None)
 }
+
+fn required_reports_unread(
+    store: &Store, db: &rusqlite::Connection, c: &Credential, i: &Identity,
+) -> CoreResult<Vec<String>> {
+    let Some(assignment) = i.assignment.as_deref() else { return Ok(Vec::new()) };
+    let required = cortex_core::required_reports::for_assignment(db, &i.task, assignment)?;
+    let unread = cortex_core::required_reports::unread(db, &i.task, assignment, &c.channel_id, &i.attempt)?;
+    let publisher = Publisher::new(store);
+    let mut missing = Vec::new();
+    for report in required {
+        let (id, sha) = (report["report_id"].as_str(), report["sha256"].as_str());
+        let error = match (id, sha) {
+            (Some(id), Some(sha)) if report["available"] == true => {
+                publisher.verify_immutable_report_on(db, &i.task, id, sha).err()
+            }
+            _ => Some(CoreError::Refused("required_report_unavailable")),
+        };
+        if error.is_some() || unread.contains(&report) {
+            let name = id.or_else(|| report["from_node"].as_str()).unwrap_or("report");
+            let detail = error.map_or_else(|| {
+                if let (Some(start), Some(end)) = (report["section"]["start"].as_u64(), report["section"]["end"].as_u64()) {
+                    format!("characters {start}..{end}")
+                } else {
+                    "whole report".to_owned()
+                }
+            }, |e| e.code().to_owned());
+            missing.push(format!("{name} ({detail})"));
+        }
+    }
+    Ok(missing)
+}
 /// The items of an open or omitted failed check, computed by `validate_result` from
 /// the evaluation it refused (the checkout and work-set observations it used are not
 /// repeatable afterwards), by channel. Taken once by `refusal_missing` in the same
@@ -372,9 +466,63 @@ pub(super) fn outstanding(
 static REFUSAL_DETAILS: std::sync::Mutex<
     std::collections::BTreeMap<String, (&'static str, Vec<String>)>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
+const REFUSAL_ITEM_LIMIT: usize = 32;
+fn check_text(text: &str, limit: usize) -> String {
+    text.chars()
+        .take(limit)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+fn bounded_check_items(mut items: Vec<String>) -> Vec<String> {
+    if items.len() > REFUSAL_ITEM_LIMIT {
+        let omitted = items.len() - (REFUSAL_ITEM_LIMIT - 1);
+        items.truncate(REFUSAL_ITEM_LIMIT - 1);
+        items.push(format!("Omitted {omitted} additional unresolved items."));
+    }
+    items.into_iter().map(|item| check_text(&item, 640)).collect()
+}
+fn unresolved_check_items(checks: &[Value], runs: &[lifecycle::worker_checks::Run]) -> Vec<String> {
+    let mut items = lifecycle::worker_checks::open_items(checks, runs);
+    for check in checks {
+        if !matches!(check["outcome"].as_str(), Some("unverified" | "not_run")) {
+            continue;
+        }
+        let label = check_text(check["name"].as_str().unwrap_or("check"), 80);
+        let reference = check_text(check["tool_call_ref"].as_str().unwrap_or("no receipt"), 160);
+        let reason = match (check["outcome"].as_str(), check["evidence_gap"].as_str()) {
+            (Some("not_run"), _) => "the check was not run",
+            (_, Some("revision_mismatch")) => "the receipt does not bind to the current checkout or work set",
+            (_, Some("call_incomplete" | "later_run_unresolved")) => "this or a later matching command has no complete result; inspect its status",
+            (_, Some("trivial_command")) => "the cited command cannot establish a verification pass",
+            (_, Some("tool_call_ref_missing" | "tool_call_ref_unknown" | "ambiguous_ref" | "ref_already_cited")) =>
+                "the cited receipt is missing, ambiguous, duplicated or outside this attempt",
+            _ => "the retained evidence does not verify the check",
+        };
+        items.push(format!("{label} [{reference}]: {reason}"));
+    }
+    items
+}
+fn names_check_items(code: &str) -> bool {
+    FAILED_CHECK_CODES.contains(&code)
+        || matches!(code, "project_revision_unavailable" | "check_blocker_required"
+            | "assignment_blocker_required" | "objective_partial_blocker_required" | "command_not_settled")
+}
+fn pending_commands(
+    db: &rusqlite::Connection, task: &str, channel: &str,
+) -> CoreResult<Vec<Option<String>>> {
+    let mut statement = db.prepare(
+        "SELECT CASE WHEN json_type(result_json,'$.handle.reference')='text'
+             THEN json_extract(result_json,'$.handle.reference') END FROM runtime_requests
+         WHERE task_id=? AND actor=? AND operation='command_run'
+         AND json_type(result_json,'$.handle')='object'
+         AND json_extract(result_json,'$.settled') IS NOT 1 ORDER BY request_key LIMIT ?",
+    )?;
+    let rows = statement.query_map((task, channel, (REFUSAL_ITEM_LIMIT + 1) as i64), |row| row.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
 fn refusal_details(channel: &str, code: &'static str, items: Vec<String>) {
     if let Ok(mut details) = REFUSAL_DETAILS.lock() {
-        details.insert(channel.to_owned(), (code, items));
+        details.insert(channel.to_owned(), (code, bounded_check_items(items)));
     }
 }
 /// The items a refusal names in its `missing` field, recomputed from the refused
@@ -393,10 +541,27 @@ pub(super) fn refusal_missing(
         .lock()
         .ok()
         .and_then(|mut d| d.remove(&c.channel_id));
-    if matches!(code, "open_failed_check" | "omitted_failed_check") {
-        return detail
-            .filter(|(refused, items)| *refused == code && !items.is_empty())
-            .map(|(_, items)| items);
+    if let Some((_, items)) = detail.filter(|(refused, items)| *refused == code && !items.is_empty()) {
+        return Some(items);
+    }
+    if code == "review_project_revision_changed" {
+        let assignment = i.assignment.as_deref()?;
+        return store.read(|db| {
+            let rebinds: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED'
+                 AND json_extract(payload_json,'$.assignment_ref')=?
+                 AND json_extract(payload_json,'$.rebind') IS NOT NULL",
+                (&i.task, assignment), |r| r.get(0),
+            )?;
+            if rebinds != 1 {
+                return Ok(None);
+            }
+            let items: Vec<_> = completion::review_coverage_missing_tx(db, &i.task, assignment, args)?
+                .into_iter()
+                .filter_map(|m| Some(format!("{} ({})", m["path"].as_str()?, m["reason"].as_str()?)))
+                .collect();
+            Ok((!items.is_empty()).then_some(items))
+        }).ok().flatten();
     }
     match outstanding(store, c, i, args) {
         Ok(Some((found, items))) if found == code && !items.is_empty() => Some(items),
@@ -444,6 +609,7 @@ mod evidence_tests {
             .write(|db| channels::issue_tx(db, "t", &owner, channels::Principal::Coordinator))
             .unwrap();
         let i = Identity {
+            read_only: false,
             task: "t".into(),
             attempt: "xa_fixture".into(),
             principal: "fixture".into(),
@@ -480,7 +646,7 @@ mod evidence_tests {
         assert!(reply["structuredContent"]["message"]
             .as_str()
             .unwrap()
-            .contains("Each item in missing names the check"));
+            .contains("The listed checks are open"));
         // A structural refusal names exactly the missing headings and is correctable.
         let reply = refusal_reply_with("report_sections_missing", Some(vec!["## Changes".into()]));
         assert_eq!(reply["structuredContent"]["missing"], json!(["## Changes"]));
@@ -618,6 +784,7 @@ mod evidence_tests {
             })
             .unwrap();
         let i = Identity {
+            read_only: false,
             task: "t".into(),
             attempt: "xa_review".into(),
             principal: "reviewer".into(),
@@ -696,6 +863,86 @@ mod evidence_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn first_refusal_then_honest_failure_records_original_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "native-first-refusal-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Store::open(
+            ProjectKey::new(&root, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap();
+        let owner = TaskMachine::new(&store).create("t", "checks", "owner").unwrap();
+        let c = store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
+            db.execute("INSERT INTO runtime_nodes (task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status,assignment_ref)
+                VALUES ('t',1,'test','worker-backend-dev','test','[]','[]','execution','running','a')", [])?;
+            channels::issue_tx(db, "t", &owner, channels::Principal::Worker { assignment: "a" })
+        }).unwrap();
+        store.write(|db| channels::bind_session_tx(db, &c, "fixture-session")).unwrap();
+        let i = store.read(|db| channels::authenticate(db, &c.channel_id, c.secret(), true)).unwrap();
+
+        let dir = store.key().directory().join("t").join(".native-output");
+        cortex_core::store::locks::private_directory(dir.parent().unwrap(), true).unwrap();
+        cortex_core::store::locks::private_directory(&dir, true).unwrap();
+        let mut output = cortex_core::store::locks::open_private(&dir.join("lo_failed.bin"), true, false).unwrap();
+        use std::io::Write;
+        output.write_all(b"private output").unwrap();
+        output.sync_all().unwrap();
+        let digest = crate::native_project::digest(b"private output");
+        let reference = "native-command:failed";
+        let receipt = json!({"tool_call_ref":reference,"argv":["cargo","test","private-arg"],
+            "cwd":root,"profile":"development","complete":true,"settled":true,"exit_code":1,
+            "failure":null,"large_output_id":"lo_failed","byte_count":14});
+        store.write(|db| {
+            db.execute("INSERT INTO large_outputs VALUES ('lo_failed','t',?,'terminal',?,'lo_failed.bin',14,0,1,NULL,NULL,'fixture')",
+                (&c.channel_id,&digest))?;
+            db.execute("INSERT INTO runtime_requests VALUES ('t','run',?,'command_run','bound',?)",
+                (&c.channel_id,receipt.to_string()))?;
+            Ok(())
+        }).unwrap();
+        let mut report = String::from("# Checks\n");
+        let skeleton = cortex_core::assignment_brief::skeleton("worker-backend-dev", "execution");
+        for section in skeleton["sections"].as_array().unwrap() {
+            report.push_str(&format!("\n{}\n\nRecorded fixture check.\n", section["heading"].as_str().unwrap()));
+        }
+        let mut args = json!({"request_key":"submit","report":report,"summary":"One check is open.",
+            "checks":[{"name":"tests","outcome":"failed","tool_call_ref":reference}]});
+        let error = submit(&store, &c, &i, &args, EvidenceSnapshot::default()).unwrap_err();
+        assert_eq!(error.code(), "open_failed_check");
+        let items = refusal_missing(&store, &c, &i, &args, error.code()).unwrap();
+        record_refusal(&store, &c, &i, error.code(), Some(&items)).unwrap();
+        let first = refusal_reply_with(error.code(), Some(items));
+        let rendered = first.to_string();
+        assert!(rendered.contains(reference) && rendered.contains("no_passing_rerun"), "{first}");
+        assert!(!rendered.contains("private-arg") && !rendered.contains("private output"));
+
+        args["assignment_outcome"] = json!("failed");
+        args["objective_status"] = json!("partial");
+        args["remaining"] = json!(["Verify the write exactly once"]);
+        args["blocker"] = json!({"kind":"owner_decision","detail":"A rerun may repeat an external write."});
+        args["checks"] = json!([]);
+        let receipt = submit(&store, &c, &i, &args, EvidenceSnapshot::default()).unwrap();
+        assert_eq!(receipt["outcome"], "recorded");
+        assert_eq!(receipt["certified"], false);
+        let (status, result) = store.read(|db| {
+            Ok(db.query_row("SELECT status,result_json FROM runtime_nodes WHERE assignment_ref='a'", [], |r|
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?)
+        }).unwrap();
+        assert_eq!(status, "failed");
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["report_ref"], receipt["report_ref"]);
+        assert_eq!(result["checks"][0]["outcome"], "failed");
+        assert_eq!(result["checks"][0]["tool_call_ref"], reference);
+        assert_eq!(result["remaining"], args["remaining"]);
+        assert_eq!(result["blocker"], args["blocker"]);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn passed_receipts_require_digest_nontrivial_command_unique_ref_and_intact_output() {
         let root = std::env::temp_dir().join(format!(
             "native-checks-{}",
@@ -727,6 +974,7 @@ mod evidence_tests {
             .write(|db| channels::bind_session_tx(db, &c, "fixture-session"))
             .unwrap();
         let i = Identity {
+            read_only: false,
             task: "t".into(),
             attempt: "fixture".into(),
             principal: "fixture".into(),
@@ -804,6 +1052,27 @@ mod evidence_tests {
             validate_result(&store, &c, &i, &args, &evidence).unwrap()[0]["evidence_strength"],
             "verified"
         );
+        let mut diagnostic = receipt.clone();
+        diagnostic["tool_call_ref"] = json!("native-command:diagnostic");
+        diagnostic["argv"] = json!(["git", "diff", "--no-index", "--check", "/dev/null", "file"]);
+        diagnostic["exit_code"] = json!(1);
+        diagnostic["large_output_id"] = json!("lo_diagnostic");
+        store.write(|db|{
+            db.execute("INSERT INTO large_outputs VALUES ('lo_diagnostic','t',?,'terminal',?,'lo_fixture.bin',15,0,1,NULL,NULL,'fixture')",(&c.channel_id,&hash))?;
+            db.execute("INSERT INTO runtime_requests VALUES ('t','diagnostic',?,'command_run','bound',?)",
+                (&c.channel_id,diagnostic.to_string()))?;
+            Ok(())
+        }).unwrap();
+        let mut diagnostic_args = args.clone();
+        diagnostic_args["checks"] =
+            json!([{"name":"inspect diff","outcome":"failed","tool_call_ref":"native-command:diagnostic"}]);
+        assert!(validate_result(&store, &c, &i, &diagnostic_args, &evidence).unwrap().is_empty());
+        assert!(!store.read(|db| Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='CHECK_FAILURE_PRESENTED'
+             AND json_extract(payload_json,'$.ref')='native-command:diagnostic')",
+            [], |r| r.get::<_, bool>(0),
+        )?)).unwrap());
+
         // Persist a nonzero receipt, refuse it, reopen, then require its history.
         let mut failed_receipt = receipt.clone();
         failed_receipt["tool_call_ref"] = json!("native-command:failed");
@@ -859,9 +1128,6 @@ mod evidence_tests {
         explicit_failure["blocker"] = json!({"kind":"other_role_work",
             "detail":"The failing test is in a module only the backend developer may change."});
         assert!(validate_result(&store, &c, &reader, &explicit_failure, &evidence).is_ok());
-        let refusal = validate_result(&store, &c, &i, &explicit_failure, &evidence).unwrap_err();
-        assert_eq!(refusal.code(), "failed_check_repair_required");
-        record_refusal(&store, &c, &i, refusal.code(), None).unwrap();
         let honest_failure = validate_result(&store, &c, &i, &explicit_failure, &evidence).unwrap();
         assert_eq!(honest_failure[0]["outcome"], "failed");
         drop(store);
@@ -972,6 +1238,7 @@ mod evidence_tests {
             .write(|db| channels::issue_tx(db, "t", &owner, channels::Principal::Coordinator))
             .unwrap();
         let i = Identity {
+            read_only: false,
             task: "t".into(),
             attempt: "fixture".into(),
             principal: "fixture".into(),
@@ -992,10 +1259,9 @@ mod evidence_tests {
         file.write_all(b"complete output").unwrap();
         file.sync_all().unwrap();
         let hash = crate::native_project::digest(b"complete output");
-        // The checkout changed during the run: the receipt has no checkout digest.
         let receipt = json!({"tool_call_ref":"native-command:fixture","argv":["npm","test"],
             "cwd":root,"profile":"development","complete":true,"settled":true,"exit_code":0,"failure":null,
-            "revision_digest":null,"large_output_id":"lo_fixture","byte_count":15});
+            "revision_digest":"c".repeat(64),"large_output_id":"lo_fixture","byte_count":15});
         let set = vec!["ui/**".to_owned()];
         let observed = crate::native_work_set::digest(&root, &set).unwrap();
         store.write(|db|{
@@ -1010,8 +1276,42 @@ mod evidence_tests {
             project_digest: Some("b".repeat(64)),
             ..Default::default()
         };
-        // Another writer's file changes: the work set is unchanged.
+        // Another writer's file changes: the work set is unchanged even if a
+        // full checkout observation cannot bind a revision.
         std::fs::write(root.join("core/x.rs"), "changed by another task").unwrap();
+        let unavailable = EvidenceSnapshot { incomplete: true, ..Default::default() };
+        let scoped = validate_result(&store, &c, &i, &args, &unavailable).unwrap();
+        assert_eq!(scoped[0]["outcome"], "passed");
+        assert_eq!(scoped[0]["revision_binding"]["kind"], "work_set");
+        let mut forged = args.clone();
+        forged["checks"][0]["tool_call_ref"] = json!("native-command:missing");
+        for has_real_pass in [false, true] {
+            if has_real_pass {
+                forged["checks"].as_array_mut().unwrap().push(args["checks"][0].clone());
+            }
+            assert_eq!(
+                validate_result(&store, &c, &i, &forged, &unavailable).unwrap_err().code(),
+                "project_revision_unavailable"
+            );
+        }
+        let items = refusal_missing(&store, &c, &i, &forged, "project_revision_unavailable").unwrap();
+        assert!(items.iter().any(|item| item.contains("native-command:missing")));
+        forged["assignment_outcome"] = json!("failed");
+        forged["objective_status"] = json!("partial");
+        forged["remaining"] = json!(["Verify the unbound check"]);
+        forged["blocker"] = json!({"kind":"owner_decision","detail":"Rerunning this command may repeat an external write."});
+        let checks = validate_result(&store, &c, &i, &forged, &unavailable).unwrap();
+        assert_eq!(checks[0]["outcome"], "unverified");
+        assert_eq!(checks[0]["claimed_outcome"], "passed");
+        assert_eq!(checks[0]["tool_call_ref"], "native-command:missing");
+        assert_eq!(checks[1]["outcome"], "passed");
+        let partial = EvidenceSnapshot {
+            project_digest: Some("c".repeat(64)),
+            cap_reached: true,
+            ..Default::default()
+        };
+        let scoped = validate_result(&store, &c, &i, &args, &partial).unwrap();
+        assert_eq!(scoped[0]["revision_binding"]["kind"], "work_set");
         let checks = validate_result(&store, &c, &i, &args, &evidence).unwrap();
         assert_eq!(checks[0]["outcome"], "passed");
         assert_eq!(checks[0]["evidence_strength"], "verified");
@@ -1045,6 +1345,7 @@ pub(super) fn correctable(code: &str) -> bool {
     matches!(
         code,
         "command_not_settled"
+            | "project_revision_unavailable"
             | "failed_check_repair_required"
             | "open_failed_check"
             | "omitted_failed_check"
@@ -1060,6 +1361,7 @@ pub(super) fn correctable(code: &str) -> bool {
             | "invalid_arguments"
             | "draft_guidance_remaining"
             | "report_sections_missing"
+            | "required_reports_unread"
             | "review_project_revision_changed"
             | "review_project_revision_unstable"
             | "review_resubmit_required"
@@ -1151,12 +1453,14 @@ fn report_structure(store: &Store, i: &Identity, args: &Value) -> CoreResult<Opt
 /// `missing` names the exact missing sections for `report_sections_missing`.
 pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Value {
     let hint = match code {
-        "command_not_settled" => "An owned command has no final receipt. Use command_status to inspect it before submitting a successful result, or report a failed assignment with its blocker.",
+        "command_not_settled" => "The listed commands have no final receipt. Inspect each with command_status before claiming success. If settling or repeating it would be unsafe or outside your authority, submit assignment_outcome failed with blocker.kind and a concrete blocker.detail.",
+        "project_revision_unavailable" => "The listed checks lack an exact current checkout or work-set binding. Inspect their receipts and rerun only if authorized and safe. If no safe repair exists, submit assignment_outcome failed with the concrete blocker. For partial work, add objective_status partial and list the unfinished parts in remaining.",
         "draft_guidance_remaining" => "The report still contains a report template's guidance comment line (<!-- ... -->). Replace it with the content it asks for.",
         "report_sections_missing" => "The report lacks required sections of its template (listed in missing). Add each as a level-two heading with its exact English text, keep the rest, and submit again; the request_key may stay the same.",
         "review_project_revision_changed" => "The project changed while you reviewed it; the review is now bound to the current state. Re-read what changed, then submit with a fresh request_key.",
         "review_project_revision_unstable" => "The project kept changing during the review, so nothing was recorded and the review stays bound to an earlier state. Submit again with a fresh request_key once the other writers have stopped: a submission that finds the project unchanged since this refusal re-binds the review to that state and is refused review_project_revision_changed; then re-read what changed and submit once more. If it never settles, submit INCOMPLETE naming the instability.",
         "review_resubmit_required" => "This request_key belongs to a refused submission of this review. Submit again with a fresh request_key.",
+        "required_reports_unread" => "Read each listed report or section on this assignment with direct read_report calls. For a section use its start and read through the required end. Follow each returned next_cursor for a whole report. Then submit again. If the exact report is unavailable, tell the coordinator what is blocked.",
         "review_predecessor_reports_required" => "The refusal's inline_reads holds the current pages of the required reports the runtime read for you; they count as read, so submit again. Any report still listed in missing and not in inline_reads: read each required predecessor report listed in missing (your review packet's predecessor_reports; optional_reports are not required) through its final page with read_report. A report the runtime cannot read is not required and is retained on your result instead. This review stays active in this session; then submit again.",
         "review_coverage_unfinished" => "The not_covered parts listed in missing name no dead end, so you can still cover them. Review each one now in this session, then submit again; keep in not_covered only parts you cannot reach yourself, each with its blocker.",
         "review_file_coverage_required" => "The refusal's inline_reads holds the current pages of the changed files listed in missing that the runtime read for you on this channel; they count as read, so submit the same review again. For a file still listed in missing and not fully delivered (its entry has next_offset), or not delivered at all, read it yourself: the changed files listed in missing were not read completely in their current state. Read them with project_read in this session, up to 8 files per read_batch call as inline project_read items, and submit again (for a file with review_lines in the review packet, reading those line ranges of its current bytes is enough); a part you genuinely cannot reach goes in not_covered with its blocker under verdict INCOMPLETE. After repeated refusals the result is recorded with every file still unread disclosed as unverified.",
@@ -1165,10 +1469,10 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "assignment_blocker_required" => "A failed assignment needs blocker: the dead end (kind and concrete detail) you cannot clear within your role and permissions. If you can still finish the work, finish it and submit the completed result instead.",
         "objective_partial_blocker_required" => "objective_status partial (with the undone parts in remaining) is accepted only at a dead end, as assignment_outcome failed with its blocker. Finish the remaining parts listed in missing in this session and submit objective_status complete; only a part you genuinely cannot do goes back as a failed assignment.",
         "review_goal_coverage_required" => "An approval answers, in goal_coverage, every outcome of the review packet goal (listed in missing) exactly once: delivered true only when the reviewed work delivers it as the goal states it. Approving a stage that leaves an outcome undelivered is fine: report it as delivered false.",
-        "open_failed_check" => "A cited check failed and is still open. Each item in missing names the check, its tool_call_ref, the gap that keeps it open and what closes it: only a verified passing rerun of the same argv, cwd and profile, cited as passed under the same name, closes a failure. At a genuine dead end, submit assignment_outcome \"failed\" with its blocker instead.",
+        "open_failed_check" => "The listed checks are open. Inspect their receipts first. If authorized and safe, fix the cause and cite a verified passing rerun of the exact command under the same accepted scope. If a repeat risks side effects, needs owner action or is unavailable, retain the failed check and submit assignment_outcome failed with blocker.kind and a concrete blocker.detail. For partial work, set objective_status partial and name the unfinished parts in remaining.",
         "failed_check_repair_required" => "A project check failed. Repair the cause in your scope, rerun the exact same command, and submit the result again. Only a genuine dead end, submitted as a failure with its blocker, goes to the coordinator.",
         "omitted_failed_check" => "A failed check run that an earlier submission cited is missing (each is named in missing by its tool_call_ref). Cite each again as a failed check; a verified exact passing rerun cited as passed under the same name closes it. At a genuine dead end, submit assignment_outcome \"failed\" with its blocker.",
-        "check_blocker_required" => "Every not_run or unverified check needs a concrete blocker.",
+        "check_blocker_required" => "Give each listed not_run or unverified check a concrete blocker. At a dead end, submit assignment_outcome failed with a blocker describing why this attempt cannot proceed safely.",
         "native_inline_report_required" => "The report must be the complete Markdown report, or the exact report_id of a report published by this attempt.",
         "native_summary_required" => "The summary must not be empty.",
         "invalid_publication" => "The report title must be 1 to 200 characters.",
@@ -1197,6 +1501,8 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "native_summary_required" => Some("summary"),
         "invalid_publication" => Some("report_title"),
         "open_failed_check"
+        | "project_revision_unavailable"
+        | "command_not_settled"
         | "omitted_failed_check"
         | "check_blocker_required"
         | "failed_check_repair_required"
@@ -1228,11 +1534,12 @@ pub(super) fn record_refusal(
             detail["missing"] = json!(missing.iter().take(32).collect::<Vec<_>>());
         }
         if code == "command_not_settled" {
-            let refs = db.prepare("SELECT json_extract(result_json,'$.handle.reference') FROM runtime_requests
-                WHERE task_id=? AND actor=? AND operation='command_run' AND json_type(result_json,'$.handle')='object'
-                AND json_extract(result_json,'$.settled') IS NOT 1 ORDER BY request_key")?
-                .query_map((&i.task,&c.channel_id),|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-            detail["command_refs"]=json!(refs);
+            let pending = pending_commands(db, &i.task, &c.channel_id)?;
+            detail["command_refs"] = json!(pending.iter().take(REFUSAL_ITEM_LIMIT)
+                .filter_map(|reference| reference.as_deref()).collect::<Vec<_>>());
+            if pending.len() > REFUSAL_ITEM_LIMIT {
+                detail["command_refs_truncated"] = json!(true);
+            }
         }
         lifecycle::event_tx(db,&i.task,"WORKER_RESULT_REFUSED",detail)?;
         Ok(())
@@ -1284,7 +1591,7 @@ fn title(args: &Value) -> CoreResult<&str> {
 /// bytes now (removed, a symlink) has nothing to read, like a deletion. Nothing else
 /// in the packet changes, and an unchanged project never rewrites it.
 fn refresh_rebound_review_packet_tx(
-    db: &rusqlite::Connection,
+    db: &rusqlite::Transaction<'_>,
     root: &std::path::Path,
     task: &str,
     assignment: &str,
@@ -1325,7 +1632,11 @@ fn refresh_rebound_review_packet_tx(
         }
     }
     let base = crate::native_project::review_base(db, task, &event["packet"])?;
-    crate::native_project::add_review_lines(root, base.as_deref(), &mut event["packet"]);
+    let bytes = crate::native_project::add_review_lines(root, base.as_deref(), &mut event["packet"]);
+    if event["packet"]["review_strategy"].is_object() {
+        let risk = cortex_core::strategy::review_strategy(db, task, &mut event["packet"], bytes)?;
+        lifecycle::review::escalate_for_observed_risk_tx(db, task, risk)?;
+    }
     lifecycle::completion::mark_reviewed_before(db, task, assignment, &mut event["packet"])?;
     event["refreshed_from"] = json!(recorded);
     lifecycle::event_tx(db, task, "REVIEW_PACKET", event)?;
@@ -1336,7 +1647,7 @@ fn refresh_rebound_review_packet_tx(
 /// items as `unverified` runtime limits, and a failed-check refusal as a failed
 /// assignment (or, for a review, an INCOMPLETE verdict) whose blocker is the open
 /// check, never as a pass. Stricter per-code bounds stay: report sections and
-/// changed-file coverage (2), the repair offer of a failed check (1).
+/// changed-file coverage (2).
 pub(super) const SAME_REFUSAL_LIMIT: usize = 3;
 /// Refusals that name a failed check the worker could not close.
 const FAILED_CHECK_CODES: [&str; 5] = [
@@ -1447,7 +1758,7 @@ fn relieve(
     }
     let missing = refusal_missing(store, c, i, args, code);
     // The caller names these items in the refusal it records; keep them for it.
-    if matches!(code, "open_failed_check" | "omitted_failed_check") {
+    if names_check_items(code) {
         if let Some(items) = &missing {
             refusal_details(&c.channel_id, code, items.clone());
         }
@@ -1667,7 +1978,6 @@ fn relieve(
                 relieved["blocker"] = json!({"kind":"other_role_work","detail":format!(
                     "The open failed check could not be closed in this attempt after repeated identical refusals: {open}. Its repair belongs to the next plan.{}",
                     own.map(|o| format!(" Worker: {o}")).unwrap_or_default())});
-                relief.skip_repair_offer = true;
             }
             "failed_assignment"
         }
@@ -1691,13 +2001,24 @@ fn submit_once(
     if &i != expected {
         return Err(CoreError::Refused("channel_identity_changed"));
     }
-    let active = store.read(|db| Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND operation='command_run' AND json_type(result_json,'$.handle')='object' AND json_extract(result_json,'$.settled') IS NOT 1)",
-        (&i.task,&credential.channel_id),|row|row.get::<_,bool>(0))?))?;
-    if active && args["assignment_outcome"] != "failed" {
-        return Err(CoreError::Refused("command_not_settled"));
+    // Keep a partial fingerprint out of the persisted result. Completion
+    // re-evaluates receipts against this result's retained project digest.
+    if evidence.incomplete || evidence.cap_reached || evidence.metadata_only {
+        evidence.project_digest = None;
     }
     let mut checks = validate_result_with(store, credential, &i, args, &evidence, relief)?;
+    if args["assignment_outcome"] != "failed" {
+        let pending = store.read(|db| pending_commands(db, &i.task, &credential.channel_id))?;
+        if !pending.is_empty() {
+            let mut items = unresolved_check_items(&checks, &[]);
+            items.extend(pending.into_iter().map(|reference| match reference {
+                Some(reference) => format!("Command [{}]: no settled receipt; inspect its current status", check_text(&reference, 160)),
+                None => "An owned command has no settled receipt or retained reference.".to_owned(),
+            }));
+            refusal_details(&credential.channel_id, "command_not_settled", items);
+            return Err(CoreError::Refused("command_not_settled"));
+        }
+    }
     // What the runtime recorded open after repeated identical refusals stays visible.
     checks.extend(relief.limits.iter().cloned());
     let assignment = i
@@ -1891,6 +2212,9 @@ fn submit_once(
             return Err(CoreError::Refused("channel_identity_changed"));
         }
         lifecycle::request_tx(db, &i.task, &credential.channel_id, key, "result_submit", args, || {
+            if !required_reports_unread(store, db, credential, &i)?.is_empty() {
+                return Err(CoreError::Refused("required_reports_unread"));
+            }
             // Binding is created by the authenticated host, not by report text.
             db.execute(
                 "INSERT INTO task_events(task_id,event_type,assignment_ref,dedup_key,payload_json,origin,created_at)
@@ -1899,6 +2223,7 @@ fn submit_once(
                     bound.to_string(), cortex_core::now()),
             )?;
             completion::record_result_tx(db, &i.task, assignment, &result, &evidence)?;
+            cortex_core::store::fact_memory::retain_result_tx(db, &i.task, assignment, &credential.channel_id, &result, crate::native_project::memory_source_path)?;
             let mut receipt = json!({"outcome":"recorded","report_ref":report.report_id,"assignment_ref":assignment,
                 "certified":false});
             if let Some(structure) = &structure {
@@ -2056,6 +2381,7 @@ mod refusal_limit_tests {
             .write(|db| channels::issue_tx(db, "t", &owner, channels::Principal::Coordinator))
             .unwrap();
         let i = Identity {
+            read_only: false,
             task: "t".into(),
             attempt: "xa_fixture".into(),
             principal: "fixture".into(),
@@ -2132,14 +2458,13 @@ mod refusal_limit_tests {
         for _ in 0..2 {
             record_refusal(&store, &c, &i, "open_failed_check", None).unwrap();
         }
-        let (relieved, relief, action, _) = relieve(&store, &c, &i, &args, "open_failed_check")
+        let (relieved, _, action, _) = relieve(&store, &c, &i, &args, "open_failed_check")
             .unwrap()
             .unwrap();
         assert_eq!(action, "failed_assignment");
         assert_eq!(relieved["assignment_outcome"], "failed");
         assert_eq!(relieved["blocker"]["kind"], "other_role_work");
         assert_eq!(relieved["checks"][0]["outcome"], "failed");
-        assert!(relief.skip_repair_offer);
         // A failed outcome without a dead end is recorded with one.
         let failed = json!({"report":"r","summary":"s","checks":[],"assignment_outcome":"failed"});
         for _ in 0..2 {

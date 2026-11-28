@@ -138,10 +138,7 @@ impl IncomingHost {
         if key.root() != root {
             return Err(io::Error::other("incoming_worktree_unavailable"));
         }
-        let derived_project = format!(
-            "acp-{}",
-            &format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()))[..32]
-        );
+        let derived_project = format!("acp-{}", key.identity());
         let (runtime, project) = Runtime::open_shared(root, &derived_project, routes).map_err(err)?;
         Ok(Self {
             runtime: Arc::new(runtime),

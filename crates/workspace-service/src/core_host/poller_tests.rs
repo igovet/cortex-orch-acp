@@ -76,6 +76,7 @@ impl Fixture {
                 project: project.to_owned(),
                 entry,
                 events,
+                wal_directory: None,
             },
         )
     }
@@ -118,6 +119,188 @@ fn delta(event: &Value, project: &str, from: &str, through: &str, version: &str)
     let changes = event["batch"]["changes"].as_array().unwrap();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["newVersion"], version);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_directory_watch_survives_wal_replacement_and_reports_its_own_loss() {
+    let fixture = Fixture::new();
+    let directory = fixture.0.join("store");
+    fs::create_dir(&directory).unwrap();
+    let watch = wal_watch::Watch::new(&directory).unwrap();
+    let wal = directory.join("cortex.sqlite3-wal");
+    fs::write(&wal, b"first WAL").unwrap();
+    timeout(DEADLINE, wal_watch::wait(Some(&watch)))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let database = directory.join("cortex.sqlite3");
+    fs::write(&database, b"original database").unwrap();
+    timeout(DEADLINE, wal_watch::wait(Some(&watch)))
+        .await
+        .unwrap()
+        .unwrap();
+    fs::remove_file(&wal).unwrap();
+    fs::write(&wal, b"replacement WAL").unwrap();
+    timeout(DEADLINE, wal_watch::wait(Some(&watch)))
+        .await
+        .unwrap()
+        .unwrap();
+    fs::rename(&database, directory.join("old-database")).unwrap();
+    fs::write(&database, b"replacement database").unwrap();
+    timeout(DEADLINE, wal_watch::wait(Some(&watch)))
+        .await
+        .unwrap()
+        .unwrap();
+
+    fs::rename(&directory, fixture.0.join("retired-store")).unwrap();
+    assert_eq!(
+        timeout(DEADLINE, wal_watch::wait(Some(&watch)))
+            .await
+            .unwrap()
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    assert!(wal_watch::Watch::new(&directory).is_err());
+    fs::create_dir(&directory).unwrap();
+    let replacement = wal_watch::Watch::new(&directory).unwrap();
+    fs::write(&wal, b"new directory").unwrap();
+    timeout(DEADLINE, wal_watch::wait(Some(&replacement)))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+// SQLite's own connection writes the portable outbox without a Core wake.
+fn raw_update(database: &std::path::Path, project: &str, checkpoints: usize) {
+    let mut db = rusqlite::Connection::open(database).unwrap();
+    db.busy_timeout(DEADLINE).unwrap();
+    if checkpoints > 0 {
+        db.execute_batch("CREATE TABLE checkpoint_probe(id INTEGER)")
+            .unwrap();
+    }
+    for _ in 0..checkpoints {
+        db.execute("INSERT INTO checkpoint_probe VALUES (1)", [])
+            .unwrap();
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    }
+    let tx = db.transaction().unwrap();
+    tx.execute(
+        "UPDATE workspace_tasks SET version=2 WHERE task_id='task'",
+        [],
+    )
+    .unwrap();
+    cortex_core::store::append_public_tx(&tx, project, "task", "task", 2).unwrap();
+    tx.commit().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn fallback_delivers_writes_after_the_watch_is_lost() {
+    let fixture = Fixture::new();
+    let (events, mut received) = broadcast::channel(16);
+    let (_store, mut reader) = fixture.start_reader("fallback", events);
+    let database = reader.key.database();
+    let directory = fixture.0.join("observed");
+    fs::create_dir(&directory).unwrap();
+    reader.wal_directory = Some(directory.clone());
+    let (calls, mut reads) = mpsc::unbounded_channel();
+    let running = reader.start_with(move |root, key, project, entry| {
+        let result = poll(root, key, project, entry);
+        calls.send(()).unwrap();
+        result
+    });
+    timeout(DEADLINE, reads.recv()).await.unwrap().unwrap();
+    fs::remove_dir(&directory).unwrap();
+    timeout(DEADLINE, reads.recv()).await.unwrap().unwrap();
+    tokio::task::spawn_blocking(move || raw_update(&database, "fallback", 0))
+        .await
+        .unwrap();
+    let event = timeout(DEADLINE, received.recv()).await.unwrap().unwrap();
+    delta(&event, "fallback", "1", "1", "2");
+    running.stop().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(start_paused = true)]
+async fn a_wal_hint_before_commit_rechecks_once_at_cooldown() {
+    check_early_wal_hint(false).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(start_paused = true)]
+async fn a_slow_commit_is_visible_at_the_final_wal_recheck() {
+    check_early_wal_hint(true).await;
+}
+
+#[cfg(target_os = "linux")]
+async fn check_early_wal_hint(slow_commit: bool) {
+    let fixture = Fixture::new();
+    let (events, mut received) = broadcast::channel(16);
+    let (_store, mut reader) = fixture.start_reader("early", events);
+    let database = reader.key.database();
+    let observed = fixture.0.join("observed");
+    fs::create_dir(&observed).unwrap();
+    reader.wal_directory = Some(observed.clone());
+    let (calls, mut reads) = mpsc::unbounded_channel();
+    let running = reader.start_with(move |root, key, project, entry| {
+        let result = poll(root, key, project, entry);
+        calls.send(()).unwrap();
+        result
+    });
+    at_this_tick(|| reads.try_recv().ok()).await;
+
+    // A hint from the watched directory arrives without a visible commit.
+    fs::write(observed.join("cortex.sqlite3-wal"), b"early wake").unwrap();
+    advance(COALESCE).await;
+    at_this_tick(|| reads.try_recv().ok()).await;
+    assert!(received.try_recv().is_err());
+
+    if slow_commit {
+        advance(COALESCE).await;
+        at_this_tick(|| reads.try_recv().ok()).await;
+        assert!(received.try_recv().is_err());
+    }
+
+    // The other connection emits no local signal and its WAL is outside
+    // the test watch. A bounded recheck observes the durable write.
+    raw_update(&database, "early", 0);
+    advance(if slow_commit { WAL_FINAL_RECHECK } else { COALESCE }).await;
+    let event = at_this_tick(|| received.try_recv().ok()).await;
+    delta(&event, "early", "1", "1", "2");
+    at_this_tick(|| reads.try_recv().ok()).await;
+    advance(COALESCE * 2).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(reads.try_recv().is_err());
+    running.stop().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn checkpoint_bursts_preserve_one_committed_delta() {
+    let fixture = Fixture::new();
+    let (events, mut received) = broadcast::channel(16);
+    let (_store, mut reader) = fixture.start_reader("checkpoint", events);
+    let database = reader.key.database();
+    reader.wal_directory = Some(reader.key.directory());
+    let (calls, mut reads) = mpsc::unbounded_channel();
+    let running = reader.start_with(move |root, key, project, entry| {
+        calls.send(()).unwrap();
+        poll(root, key, project, entry)
+    });
+    timeout(DEADLINE, reads.recv()).await.unwrap().unwrap();
+    tokio::task::spawn_blocking(move || raw_update(&database, "checkpoint", 80))
+        .await
+        .unwrap();
+    let event = timeout(DEADLINE, received.recv()).await.unwrap().unwrap();
+    delta(&event, "checkpoint", "1", "1", "2");
+    running.stop().await.unwrap();
+    assert!(reads.try_recv().is_ok());
+    assert!(received.try_recv().is_err());
 }
 
 #[tokio::test(start_paused = true)]
@@ -244,6 +427,7 @@ async fn a_blocking_read_cannot_keep_a_removed_poller_alive_or_send_its_drained_
         project: "blocked".into(),
         entry: new_entry.clone(),
         events,
+        wal_directory: None,
     };
     let new_signal = Arc::downgrade(&fresh.signal);
     let (entered, in_read) = tokio::sync::oneshot::channel();

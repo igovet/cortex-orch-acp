@@ -5,11 +5,130 @@ use crate::{
     scheduler::{self, policy},
     CoreError, CoreResult, TaskState,
 };
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 const CONSULTATION: &str = "_consultation";
 const RESERVED_ROLES: [&str; 3] = ["code-reviewer", "build-verification", "senior-consultant"];
+pub const PLANNABLE_ROLES: [&str; 2] = ["explorer", "general"];
+
+/// Retained role identities keep their original tool catalogue, routing and
+/// access checks. Only instruction assembly resolves a role to a base profile.
+pub fn legacy_profile(role: &str) -> Option<(&'static str, &'static [&'static str])> {
+    Some(match role {
+        "worker-accessibility-auditor" => ("worker-explorer", &["accessibility"]),
+        "worker-accessibility-fixer" => ("worker-general", &["accessibility"]),
+        "worker-architect" => ("worker-explorer", &["architecture"]),
+        "worker-backend-dev" => ("worker-general", &["backend"]),
+        "worker-data-engineer" => ("worker-general", &["data"]),
+        "worker-database-architect" => ("worker-explorer", &["database"]),
+        "worker-debugger" => ("worker-general", &["debugging"]),
+        "worker-devops-engineer" => ("worker-general", &["operations"]),
+        "worker-frontend-dev" => ("worker-general", &["frontend"]),
+        "worker-fullstack-dev" => ("worker-general", &["backend", "frontend"]),
+        "worker-mobile-dev" => ("worker-general", &["mobile"]),
+        "worker-performance-engineer" => ("worker-explorer", &["performance"]),
+        "worker-planner" => ("worker-explorer", &["planning"]),
+        "worker-qa-engineer" => ("worker-general", &["testing"]),
+        "worker-refactorer" => ("worker-general", &["refactoring"]),
+        "worker-security-auditor" => ("worker-explorer", &["security"]),
+        "worker-technical-writer" => ("worker-general", &["documentation"]),
+        "worker-ux-designer" => ("worker-explorer", &["ux"]),
+        _ => return None,
+    })
+}
+
+pub const COMPETENCIES: &[&str] = &[
+    "accessibility",
+    "architecture",
+    "backend",
+    "data",
+    "database",
+    "debugging",
+    "documentation",
+    "frontend",
+    "mobile",
+    "operations",
+    "performance",
+    "planning",
+    "refactoring",
+    "security",
+    "testing",
+    "ux",
+];
+
+fn validated_competencies(value: &Value) -> CoreResult<BTreeSet<&str>> {
+    let items = value
+        .as_array()
+        .filter(|items| items.len() <= 4)
+        .ok_or(CoreError::Refused("invalid_plan_competencies"))?;
+    let mut ids = BTreeSet::new();
+    for item in items {
+        let id = item
+            .as_str()
+            .filter(|id| COMPETENCIES.contains(id))
+            .ok_or(CoreError::Refused("invalid_plan_competencies"))?;
+        if !ids.insert(id) {
+            return refuse("invalid_plan_competencies");
+        }
+    }
+    Ok(ids)
+}
+
+pub const BASE_SUFFICIENCY_REASON_MAX: usize = 600;
+
+fn validate_competency_decision(node: &Value) -> CoreResult<()> {
+    let selected = node.get("competencies").ok_or(CoreError::Refused("plan_competencies_required"))?;
+    let modules = validated_competencies(selected)?;
+    if modules.is_empty() && node.get("base_sufficiency_reason").is_none() {
+        return refuse("plan_base_sufficiency_reason_required");
+    }
+    Ok(())
+}
+
+/// Exact authored selection, with absence preserved for pre-contract plans.
+pub fn competency_decision(node: &Value) -> Option<Value> {
+    let selected = node.get("competencies")?;
+    let mut decision = json!({"competencies":selected});
+    if let Some(reason) = node.get("base_sufficiency_reason") {
+        decision["base_sufficiency_reason"] = reason.clone();
+    }
+    if let Some(source) = node.get("competency_decision_source") {
+        decision["source"] = source.clone();
+    }
+    Some(decision)
+}
+
+pub fn assignment_competencies(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+) -> CoreResult<Vec<String>> {
+    let source: Option<(String, String, Option<String>)> = db
+        .query_row(
+            "SELECT n.node_id,n.role,t.plan_json FROM runtime_nodes n JOIN runtime_tasks t
+          ON t.task_id=n.task_id AND t.revision=n.revision
+          WHERE n.task_id=? AND n.assignment_ref=? AND n.stage='execution'",
+            (task, assignment),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((node, role, plan)) = source else {
+        return Ok(Vec::new());
+    };
+    let plan = serde_json::from_str(plan.as_deref().unwrap_or("{}"))?;
+    let data = node_routing(&plan, &node);
+    data.get("competencies").map_or_else(
+        || Ok(legacy_profile(&role).map_or(&[][..], |(_, ids)| ids)
+            .iter().map(|id| (*id).to_owned()).collect()),
+        |items| {
+            Ok(validated_competencies(items)?
+                .into_iter()
+                .map(str::to_owned)
+                .collect())
+        },
+    )
+}
 
 fn unprefixed_role(role: &str) -> &str {
     role.strip_prefix("worker-").unwrap_or(role)
@@ -549,7 +668,7 @@ fn keep_required_verification(
     Ok(kept)
 }
 /// The plan in force of `task`, if any.
-fn plan_in_force(db: &rusqlite::Connection, task: &str) -> CoreResult<Option<Value>> {
+pub(crate) fn plan_in_force(db: &rusqlite::Connection, task: &str) -> CoreResult<Option<Value>> {
     let raw: Option<String> = db
         .query_row(
             "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
@@ -559,6 +678,18 @@ fn plan_in_force(db: &rusqlite::Connection, task: &str) -> CoreResult<Option<Val
         .optional()?
         .flatten();
     Ok(raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok()))
+}
+
+pub(crate) fn plan_competency_decisions(plan: &Value) -> Vec<Value> {
+    plan["tasks"].as_array().into_iter().flatten().filter_map(|node| {
+        let mut decision = competency_decision(node)?;
+        decision["node"] = node["id"].clone();
+        decision["role"] = node["role"].clone();
+        if let Some(objective) = node["objective"].as_str() {
+            decision["objective_excerpt"] = json!(objective.chars().take(500).collect::<String>());
+        }
+        Some(decision)
+    }).collect()
 }
 /// The plan the coordinator submitted with every id-only outcome reference of the
 /// plan in force filled with its recorded statement.
@@ -607,10 +738,17 @@ pub fn validate(plan: &Value) -> CoreResult<Value> {
                 "model",
                 "model_reason",
                 "work_kind",
+                "read_only",
                 "delivers",
+                "competencies",
+                "base_sufficiency_reason",
+                "required_reports",
             ]
             .contains(&k.as_str())
         }) {
+            return refuse("invalid_plan_node");
+        }
+        if n.get("read_only").is_some_and(|v| !v.is_boolean()) {
             return refuse("invalid_plan_node");
         }
         if let Some(model) = n.get("model") {
@@ -683,8 +821,20 @@ pub fn validate(plan: &Value) -> CoreResult<Value> {
         if deps.iter().collect::<BTreeSet<_>>().len() != deps.len() {
             return refuse("invalid_dependencies");
         }
+        crate::required_reports::validate(n)?;
         normalized["tasks"][index]["scope"] = json!(canonical);
         normalized["tasks"][index]["role"] = json!(role);
+        if let Some(items) = n.get("competencies") {
+            let ids = validated_competencies(items)?;
+            normalized["tasks"][index]["competencies"] = json!(ids);
+        }
+        if let Some(reason) = n.get("base_sufficiency_reason") {
+            if n.get("competencies").is_none() || reason.as_str().is_none_or(|text|
+                text.trim().is_empty() || text.chars().count() > BASE_SUFFICIENCY_REASON_MAX)
+            {
+                return refuse("invalid_plan_base_sufficiency_reason");
+            }
+        }
         graph.push(scheduler::Node {
             id: id.into(),
             stage: "execution".into(),
@@ -778,20 +928,53 @@ fn restore_runtime_nodes(prior: &[Value], supplied: &mut Vec<Value>) -> CoreResu
             supplied.insert(i.min(supplied.len()), node.clone());
         }
     }
-    let graph = supplied
-        .iter()
-        .map(|n| {
-            Ok(scheduler::Node {
-                id: n["id"]
-                    .as_str()
-                    .ok_or(CoreError::Refused("invalid_plan_node"))?
-                    .into(),
-                stage: "execution".into(),
-                status: "pending".into(),
-                dependencies: serde_json::from_value(n["dependencies"].clone())?,
-            })
-        })
-        .collect::<CoreResult<Vec<_>>>()?;
+    Ok(())
+}
+
+/// Nodes that cannot be amended even if their current status has returned to
+/// pending. Retry history and the original claim both belong to that node id.
+pub fn locked_execution_nodes(
+    db: &rusqlite::Connection,
+    task: &str,
+    revision: i64,
+) -> CoreResult<BTreeSet<String>> {
+    let mut statement = db.prepare(
+        "SELECT n.node_id FROM runtime_nodes n WHERE n.task_id=? AND n.revision=? AND (
+            n.stage!='execution' OR n.status!='pending' OR n.assignment_ref IS NOT NULL
+            OR n.result_json IS NOT NULL OR EXISTS(
+                SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='ASSIGNMENT_CREATED'
+                AND json_extract(e.payload_json,'$.node')=n.node_id
+                AND json_extract(e.payload_json,'$.revision')=n.revision))",
+    )?;
+    let rows = statement.query_map((task, revision), |r| r.get(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Validate the actual scheduler graph, including runtime-created fixes and
+/// review nodes absent from the editable plan.
+fn validate_amended_graph(
+    db: &Transaction<'_>,
+    task: &str,
+    revision: i64,
+    prior: &[Value],
+    supplied: &[Value],
+) -> CoreResult<()> {
+    let mut graph: Vec<_> = scheduler::revision_nodes(db, task, revision)?
+        .into_iter()
+        .map(|(node, _)| node)
+        .collect();
+    if prior.iter().any(|p| !graph.iter().any(|n| p["id"] == n.id)) {
+        return refuse("active_plan_graph_mismatch");
+    }
+    graph.retain(|n| !prior.iter().any(|p| p["id"] == n.id && !supplied.contains(p)));
+    for n in supplied.iter().filter(|n| !prior.contains(n)) {
+        graph.push(scheduler::Node {
+            id: n["id"].as_str().unwrap().into(),
+            stage: "execution".into(),
+            status: "pending".into(),
+            dependencies: serde_json::from_value(n["dependencies"].clone())?,
+        });
+    }
     scheduler::dependency_ready(&graph, "execution")?;
     Ok(())
 }
@@ -815,6 +998,7 @@ pub fn amend_active_tx(
     let mut old: Value = serde_json::from_str(&raw)?;
     let carried = carry_outcomes(Some(&old), &args["plan"])?;
     let mut next = super::sprint_planning::validate_plan(db, task, &carried, validate)?;
+    crate::required_reports::validate_existing(db, task, &next)?;
     if old["verification"] != next["verification"] {
         return refuse("active_plan_verification_locked");
     }
@@ -823,20 +1007,30 @@ pub fn amend_active_tx(
     let prior = plan_nodes(&old)?;
     let supplied = next["tasks"].as_array_mut().unwrap();
     restore_runtime_nodes(prior, supplied)?;
-    let denials = super::steering::denials(db, task)?;
-    for node in prior {
-        let id = node["id"].as_str().unwrap_or_default();
-        if supplied.iter().any(|n| n == node) { continue; }
-        let unclaimed: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_nodes n WHERE task_id=?1 AND revision=?2 AND node_id=?3
-                AND stage='execution' AND status='pending' AND assignment_ref IS NULL AND result_json IS NULL
-                AND NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND type='ASSIGNMENT_CREATED'
-                  AND json_extract(e.payload_json,'$.node')=n.node_id AND json_extract(e.payload_json,'$.revision')=n.revision))",
-            (task, revision, id), |r| r.get(0),
-        )?;
-        if !unclaimed { return refuse("active_plan_node_already_claimed"); }
+    let locked = locked_execution_nodes(db, task, revision)?;
+    let cancelled: Vec<_> = prior.iter()
+        .filter(|n| !supplied.iter().any(|s| s["id"] == n["id"]))
+        .filter_map(|n| n["id"].as_str())
+        .collect();
+    let added: Vec<_> = supplied.iter()
+        .filter(|n| !prior.iter().any(|p| p["id"] == n["id"]))
+        .filter_map(|n| n["id"].as_str())
+        .collect();
+    let changed: Vec<_> = prior.iter()
+        .filter(|n| supplied.iter().any(|s| s["id"] == n["id"] && s != *n))
+        .filter_map(|n| n["id"].as_str())
+        .collect();
+    for id in cancelled.iter().chain(&changed) {
+        if locked.contains(*id) {
+            return refuse("active_plan_node_already_claimed");
+        }
+    }
+    validate_amended_graph(db, task, revision, prior, supplied)?;
+    let changes = json!({"added":added,"changed":changed,"cancelled":cancelled});
+    for id in cancelled {
         db.execute("DELETE FROM runtime_nodes WHERE task_id=? AND revision=? AND node_id=?", (task, revision, id))?;
     }
+    let denials = super::steering::denials(db, task)?;
     for node in supplied.iter() {
         if prior.contains(node) { continue; }
         let id = node["id"].as_str().unwrap();
@@ -844,18 +1038,33 @@ pub fn amend_active_tx(
         // An amendment cannot select or change a provider/model outside ordinary
         // plan intake. Unchanged route choices on an edited pending node are retained.
         let previous = prior.iter().find(|p| p["id"] == id);
+        if !PLANNABLE_ROLES.contains(&unprefixed_role(role))
+            && previous.is_none_or(|p| p["role"] != node["role"])
+        {
+            return refuse("plan_requires_base_role");
+        }
+        validate_competency_decision(node)?;
         let allowed_routing = previous.map(routing_fields).unwrap_or_else(|| json!({"model":"auto"}));
         if routing_fields(node) != allowed_routing {
             return refuse("active_plan_routing_locked");
         }
-        if !policy::read_only(role, "execution") && node["scope"].as_array().unwrap().iter().any(|s| {
+        if !policy::plan_node_read_only(node) && node["scope"].as_array().unwrap().iter().any(|s| {
             denials.iter().any(|p| policy::overlaps(s.as_str().unwrap(), p))
         }) {
             return refuse("write_denied");
         }
-        db.execute("INSERT INTO runtime_nodes VALUES (?,?,?,?,?,?,?,'execution','pending',NULL,NULL)",
-            (task, revision, id, role, node["objective"].as_str(),
-             node["dependencies"].to_string(), node["scope"].to_string()))?;
+        if previous.is_some() {
+            db.execute(
+                "UPDATE runtime_nodes SET role=?,objective=?,dependencies_json=?,scope_json=?
+                 WHERE task_id=? AND revision=? AND node_id=?",
+                (role, node["objective"].as_str(), node["dependencies"].to_string(),
+                 node["scope"].to_string(), task, revision, id),
+            )?;
+        } else {
+            db.execute("INSERT INTO runtime_nodes VALUES (?,?,?,?,?,?,?,'execution','pending',NULL,NULL)",
+                (task, revision, id, role, node["objective"].as_str(),
+                 node["dependencies"].to_string(), node["scope"].to_string()))?;
+        }
     }
     old["tasks"] = next["tasks"].take();
     old["outcomes"] = next["outcomes"].take();
@@ -863,10 +1072,131 @@ pub fn amend_active_tx(
     let digest = crate::digest(updated.as_bytes());
     if updated != raw {
         db.execute("UPDATE runtime_tasks SET plan_json=? WHERE task_id=?", (&updated, task))?;
+        let strategy = crate::strategy::select_plan(db, task, &old)?;
         event_tx(db, task, "PLAN_AMENDED", json!({"revision":revision,"plan":old,
-            "source_request":args["source_request"],"plan_digest":digest}))?;
+            "source_request":args["source_request"],"plan_digest":digest,"nodes":changes,"strategy":strategy}))?;
     }
-    Ok(json!({"accepted":true,"revision":revision,"plan_digest":digest,"changed":updated!=raw}))
+    let warnings = policy::plan_scope_warnings(db, task, &old)?;
+    Ok(json!({"accepted":true,"revision":revision,"plan_digest":digest,"changed":updated!=raw,"nodes":changes,"scope_warnings":warnings}))
+}
+
+fn normalized_consultation_text(value: &Value) -> String {
+    value
+        .as_str()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn consultation_subject(db: &Connection, task: &str, proposal: &Value) -> CoreResult<Value> {
+    let mut reports = std::collections::BTreeMap::new();
+    for id in proposal["report_ids"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        let digest = db.query_row(
+            "SELECT e.digest FROM reports r JOIN editions e ON e.report_id=r.id
+             WHERE r.task_id=? AND r.id=? AND r.kind='report' ORDER BY e.sequence DESC LIMIT 1",
+            (task, id), |row| row.get::<_, String>(0),
+        ).optional()?;
+        if let Some(digest) = digest {
+            reports.insert(id, digest);
+        }
+    }
+    Ok(json!({"question":normalized_consultation_text(&proposal["question"]),
+        "reason":normalized_consultation_text(&proposal["reason"]),"reports":reports}))
+}
+
+/// A replay of the original request key is answered before this validation.
+/// A new key needs a changed question, basis, retained report, or owner input.
+pub(super) fn validate_consultation_request(
+    db: &Connection,
+    task: &str,
+    revision: i64,
+    proposal: &Value,
+) -> CoreResult<Value> {
+    let subject = consultation_subject(db, task, proposal)?;
+    if subject["question"] == "" || subject["reason"] == "" {
+        return refuse("consultation_question_and_reason_required");
+    }
+    let input: i64 = db.query_row(
+        "SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=? AND type IN
+          ('USER_STEERING','USER_ANSWER_RECEIVED','WORKER_USER_ANSWER_RECEIVED','TASK_REOPENED')",
+        [task], |row| row.get(0),
+    )?;
+    let source: i64 = db.query_row(
+        "SELECT coalesce(max(revision),0) FROM source_revisions WHERE task_id=?",
+        [task], |row| row.get(0),
+    )?;
+    let identity = json!({"subject":subject,"owner_input":input,"source_revision":source});
+    let mut stmt = db.prepare(
+        "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED'
+         AND id>? AND json_extract(payload_json,'$.operation')='escalation_request'
+         AND json_extract(payload_json,'$.requested_operation') IS NULL ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map((task, input), |row| row.get::<_, String>(0))?;
+    for raw in rows {
+        let previous: Value = serde_json::from_str(&raw?)?;
+        let old = &previous["consultation_identity"];
+        if old == &identity || (old.is_null() && consultation_subject(db, task, &previous["proposal"])? == subject) {
+            return refuse("consultation_request_already_recorded");
+        }
+    }
+    if explicit_consultation(db, task, revision)?.is_some() {
+        return refuse("consultation_request_pending");
+    }
+    Ok(identity)
+}
+
+pub(super) fn consultation_consumed(db: &Connection, task: &str, id: i64, revision: i64) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='CONSULTATION_REQUIRED'
+         AND id>? AND (? IN (json_extract(payload_json,'$.request_event'),
+                             json_extract(payload_json,'$.recovery_request_event')) OR
+           (json_extract(payload_json,'$.request_event') IS NULL
+            AND json_extract(payload_json,'$.source_revision')=?)))",
+        (task, id, id, revision), |row| row.get(0),
+    )?)
+}
+
+fn explicit_consultation(db: &Connection, task: &str, revision: i64) -> CoreResult<Option<(i64, Value)>> {
+    let request = db.query_row(
+        "SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED'
+         AND json_extract(payload_json,'$.revision')=?
+         AND json_extract(payload_json,'$.operation')='escalation_request'
+         AND json_extract(payload_json,'$.requested_operation') IS NULL
+         ORDER BY id DESC LIMIT 1",
+        (task, revision), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    ).optional()?;
+    let Some((id, raw)) = request else { return Ok(None); };
+    let event: Value = serde_json::from_str(&raw)?;
+    if consultation_consumed(db, task, id, revision)? {
+        return Ok(None);
+    }
+    Ok(Some((id, event)))
+}
+
+/// A previous completed consultation with an exact, published result and digest.
+pub(crate) fn previous_consultation(db: &Connection, task: &str, through_revision: i64) -> CoreResult<Option<Value>> {
+    Ok(db.query_row(
+        "SELECT r.id,e.digest,e.sequence,n.revision
+         FROM runtime_nodes n
+         JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
+         JOIN reports r ON r.task_id=n.task_id AND r.id=json_extract(n.result_json,'$.report_ref') AND r.kind='report'
+         JOIN editions e ON e.report_id=r.id AND e.digest=json_extract(n.result_json,'$.report_digest')
+         WHERE n.task_id=? AND n.revision<=? AND n.node_id='_consultation'
+         AND n.role='worker-senior-consultant' AND n.stage='execution' AND n.status='completed'
+         AND EXISTS(SELECT 1 FROM task_events t WHERE t.task_id=n.task_id
+           AND t.event_type='worker_result' AND t.assignment_ref IN (n.assignment_ref,p.attempt_id)
+           AND json_extract(t.payload_json,'$.report_ref')=r.id)
+         AND EXISTS(SELECT 1 FROM runtime_events w WHERE w.task_id=n.task_id AND w.type='WORKER_COMPLETED'
+           AND json_extract(w.payload_json,'$.assignment_ref')=n.assignment_ref
+           AND json_extract(w.payload_json,'$.attempt_id')=p.attempt_id
+           AND json_extract(w.payload_json,'$.result.report_ref')=r.id
+           AND json_extract(w.payload_json,'$.result.report_digest')=e.digest)
+         ORDER BY n.revision DESC,e.sequence DESC LIMIT 1",
+        (task, through_revision), |row| Ok(json!({"report_id":row.get::<_, String>(0)?,
+            "node":CONSULTATION,"role":"senior-consultant","sha256":row.get::<_, String>(1)?,
+            "artifact_revision":row.get::<_, i64>(2)?,"plan_revision":row.get::<_, i64>(3)?,"availability":"recorded"})),
+    ).optional()?)
 }
 
 /// Runtime-derived previews are retained with the exact plan receipt, never recomputed on replay.
@@ -889,16 +1219,20 @@ pub fn accept_routed_tx(
         if state != TaskState::Planning {
             return refuse("plan_not_expected");
         }
+        for node in canonical["tasks"].as_array().unwrap() {
+            validate_competency_decision(node)?;
+        }
         let live:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM capacity_reservations WHERE task_id=? AND kind='worker' AND state!='released')",[task],|r|r.get(0))?;
         if live {
             return refuse("workers_still_live_or_unknown");
         }
+        crate::required_reports::validate_existing(db, task, &canonical)?;
         // A read-only sprint planning task dispatches only read-only specialists.
         super::sprint_planning::require_read_only_plan(db, task, &canonical)?;
         // The owner's write denials in force (lifted ones excluded).
         let denied = super::steering::denials(db, task)?;
         for n in canonical["tasks"].as_array().unwrap() {
-            if policy::read_only(n["role"].as_str().unwrap(), "execution") {
+            if policy::plan_node_read_only(n) {
                 continue;
             }
             if n["scope"].as_array().unwrap().iter().any(|s| {
@@ -927,17 +1261,15 @@ pub fn accept_routed_tx(
         }
         let revision = revision + 1;
         let mut proposed = canonical["tasks"].as_array().unwrap().clone();
-        let automatic = super::automatic::consultation(db, task)?;
-        let escalation:Option<String>=db.query_row("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED' ORDER BY id DESC LIMIT 1",
-            [task],|r|r.get(0)).optional()?;
-        let escalation = automatic.map(|v| v.to_string()).or(escalation);
-        if let Some(raw) = escalation {
-            let escalation: Value = serde_json::from_str(&raw)?;
-            if escalation["operation"] == "escalation_request"
-                && (escalation["revision"] == revision - 1 || escalation["automatic"] == true)
-            {
+        let explicit = explicit_consultation(db, task, revision - 1)?;
+        let automatic = super::automatic::consultation(db, task, revision - 1)?;
+        let (escalation, additional_recovery) = match (explicit, automatic) {
+            (Some(explicit), recovery) => (Some(explicit), recovery),
+            (None, recovery) => (recovery, None),
+        };
+        if let Some((request_event, escalation)) = escalation.as_ref() {
                 let proposal = &escalation["proposal"];
-                let objective = format!(
+                let mut objective = format!(
                     "Answer this independent consultation question: {}\nReason: {}",
                     proposal["question"]
                         .as_str()
@@ -949,6 +1281,15 @@ pub fn accept_routed_tx(
                     .as_array()
                     .cloned()
                     .unwrap_or_default();
+                if let Some((_, recovery)) = &additional_recovery {
+                    objective.push_str("\nAutomatic recovery context: ");
+                    objective.push_str(recovery["proposal"]["reason"].as_str().unwrap_or(""));
+                    for report in recovery["proposal"]["report_ids"].as_array().into_iter().flatten() {
+                        if !reports.contains(report) {
+                            reports.push(report.clone());
+                        }
+                    }
+                }
                 let prior=db.prepare("SELECT json_extract(result_json,'$.report_ref') FROM runtime_nodes WHERE task_id=? AND revision=? AND result_json IS NOT NULL ORDER BY rowid")?
                     .query_map((task,revision-1),|r|r.get::<_,Option<String>>(0))?.collect::<Result<Vec<_>,_>>()?;
                 for report in prior.into_iter().flatten() {
@@ -956,8 +1297,12 @@ pub fn accept_routed_tx(
                         reports.push(json!(report));
                     }
                 }
-                let mut packet = vec![];
+                let previous = previous_consultation(db, task, revision - 1)?;
+                let mut packet = previous.into_iter().collect::<Vec<_>>();
                 for report in reports {
+                    if packet.iter().any(|entry| entry["report_id"] == report) {
+                        continue;
+                    }
                     let metadata:Option<(String,i64)>=db.query_row("SELECT digest,sequence FROM editions e JOIN reports r ON r.id=e.report_id WHERE r.task_id=? AND r.id=? AND r.kind='report' ORDER BY sequence DESC LIMIT 1",
                         (task,report.as_str()),|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
                     packet.push(if let Some((sha,sequence))=metadata { json!({"report_id":report,"sha256":sha,"artifact_revision":sequence,"availability":"recorded"}) }
@@ -970,14 +1315,12 @@ pub fn accept_routed_tx(
                         .insert(0, json!(CONSULTATION));
                 }
                 proposed.insert(0,json!({"id":CONSULTATION,"role":"worker-senior-consultant","objective":objective,"scope":["."],"dependencies":[]}));
-                event_tx(
-                    db,
-                    task,
-                    "CONSULTATION_REQUIRED",
-                    json!({"role":"worker-senior-consultant","source_revision":revision-1,
-                    "revision":revision,"node":CONSULTATION,"dependency_reports":packet}),
-                )?;
-            }
+                let mut receipt = json!({"role":"worker-senior-consultant","source_revision":revision-1,
+                    "revision":revision,"node":CONSULTATION,"request_event":request_event,"dependency_reports":packet});
+                if let Some((recovery_event, _)) = &additional_recovery {
+                    receipt["recovery_request_event"] = json!(recovery_event);
+                }
+                event_tx(db, task, "CONSULTATION_REQUIRED", receipt)?;
         }
         // The stored plan and PLAN_ACCEPTED carry exactly the nodes and edges that
         // were inserted, including a runtime-added `_consultation` node.
@@ -1007,17 +1350,29 @@ pub fn accept_routed_tx(
                 ),
             )?;
         }
-        event_tx(
-            db,
-            task,
-            "PLAN_ACCEPTED",
-            json!({"revision":revision,"plan":stored}),
-        )?;
+        let mut strategy = crate::strategy::select_plan(db, task, &stored)?;
+        if escalation.is_some() {
+            strategy["consultation"] = json!("scheduled");
+        }
+        let warnings = policy::plan_scope_warnings(db, task, &stored)?;
+        let mut accepted = json!({"revision":revision,"plan":stored,"strategy":strategy});
+        if crate::deliverables::runtime_contract(db, task)?
+            .is_some_and(|contract| contract["consumes"].as_array().is_some_and(|v| !v.is_empty()))
+        {
+            accepted["sprint_consumer_channel"] = json!(actor);
+        }
+        if !warnings.is_empty() {
+            accepted["scope_warnings"] = json!(warnings);
+        }
+        event_tx(db, task, "PLAN_ACCEPTED", accepted)?;
         if !kept_verification.is_empty() {
             event_tx(db, task, VERIFICATION_KEPT, json!({"revision":revision,"kept":kept_verification}))?;
         }
         domain::state_tx(db, task, TaskState::PlanReady, None)?;
         let mut reply = json!({"revision":revision,"state":"PLAN_READY","model_hints":model_hints});
+        if !warnings.is_empty() {
+            reply["scope_warnings"] = json!(warnings);
+        }
         if !kept_verification.is_empty() {
             reply["verification_kept_by_runtime"] = json!(kept_verification);
         }

@@ -69,11 +69,24 @@ project; any other id (another task's draft, a pipeline, an unbound task) is `no
 The existing `service.subscribe` connection delivers `native_delta` batches after
 an opened reader's snapshot. A same-process commit can wake that project's reader;
 a separate writer process relies on periodic outbox reads unless another read
-picks up its changes first. The wake changes scheduling, not the wire format or
-recovery rules. Batches identify a project stream, generation,
-from/through decimal sequences and versioned task upserts/removals. Native
+picks up its changes first. Batches identify a project stream, generation,
+from/through decimal sequences and versioned task upserts/removals. An optional
+`historyHeads` array carries at most 64 body-free hints for matching task
+upserts. Each names the bound execution and the display source position in
+that batch's snapshot. An empty-question hint confirms that the execution has
+no decision cards. Missing hints use the ordinary history read. Native
 resynchronization is explicit; disconnect recovery starts a new snapshot and does
 not replay actions. See [consistency and recovery](consistency-and-recovery.md).
+
+When advertised, `native.history.follow` opens a dedicated local desktop
+connection for one project, task and execution. A cold open returns the recent
+window. A resume names a confirmed forward cursor, its page limit and the
+current generation. Each subsequent page names its input cursor and committed
+project watermark. When a complete bounded decision page fits, the service
+delivers it from the same snapshot with the same revision. The normal paged
+reads handle an oversized decision set or a history backlog. Closing the pane
+can close its connection. A generation change, removed registration or
+subscription gap ends the stream and requires resynchronization.
 
 ## Native draft writes through the existing desktop contract
 
@@ -98,13 +111,13 @@ processes do not participate in that fence.
 
 ## Remote transport and version refusals (built, not qualified)
 
-The remote endpoint (`crates/workspace-remote`) serves three ALPNs. `cortex-workspace/pair/1` carries pairing and `cortex-workspace/rpc/1` carries the workspace wire (currently 1.11, the generated `WIRE_MAJOR`.`WIRE_MINOR`; the major must match and the minor is the intersection of both sides). `cortex-workspace/version/1` is a probe that needs no authorization: the client sends one byte (`0x01`) and the host answers one length-prefixed JSON frame of constants only, `{"supported":["cortex-workspace/pair/1","cortex-workspace/rpc/1"],"wire":"1.11"}`, then closes. The reply carries no machine name, identity-derived data, device list or pairing state. After a failed pairing or rpc dial a client may probe once; a well-formed reply (at most 256 bytes) that lacks the requested ALPN is the stable refusal `remote_incompatible_version`; a failed probe, a malformed reply or a reply still listing the ALPN leaves the machine `machine_unreachable`. `service.status` reports the actual wire major and minor.
+The remote endpoint (`crates/workspace-remote`) serves three ALPNs. `cortex-workspace/pair/1` carries pairing and `cortex-workspace/rpc/1` carries the workspace wire (currently 1.13, the generated `WIRE_MAJOR`.`WIRE_MINOR`; the major must match and the minor is the intersection of both sides). `cortex-workspace/version/1` is a probe that needs no authorization: the client sends one byte (`0x01`) and the host answers one length-prefixed JSON frame of constants only, `{"supported":["cortex-workspace/pair/1","cortex-workspace/rpc/1"],"wire":"1.13"}`, then closes. The reply carries no machine name, identity-derived data, device list or pairing state. After a failed pairing or rpc dial a client may probe once; a well-formed reply (at most 256 bytes) that lacks the requested ALPN is the stable refusal `remote_incompatible_version`; a failed probe, a malformed reply or a reply still listing the ALPN leaves the machine `machine_unreachable`. `service.status` reports the actual wire major and minor.
 
 Stable refusal codes on this path: `remote_incompatible_version` (probe-confirmed mismatch), `unsupported_pairing_link_version` (pairing link in an unknown format, refused before dialing), `invalid_pairing_link`, `device_rejected` (not or no longer paired), `machine_unreachable`, `pairing_cancelled`, `remote_operation_refused` (allowlist), `remote_state_corrupt` (damaged saved state keeps remote access off) and `remote_state_unavailable` (an owner decision or revoke could not be saved). Desktop bridge refusals `version_mismatch`, `service_protocol_mismatch`, `bridge_invalid_capabilities` and `unsupported_protocol` are shown with reinstall guidance. See [security](security.md#remote-access-built-not-qualified).
 
 ## Local desktop slice (built)
 
-The first implementation covers only the subset below. It is the contract of [CW-S02](backlog/CW-S02.md) to [CW-S12](backlog/CW-S12.md) and is described in [ADR 0014](adr/0014-local-service-transport.md). The wire version is 1.11 and the mapping version is 1. A task waiting for files may include `filesWait` with the same-project holder’s Workspace task ID and the release target text. Clients use the holder’s current display title when available and otherwise show `waitReason`.
+The first implementation covers only the subset below. It is the contract of [CW-S02](backlog/CW-S02.md) to [CW-S12](backlog/CW-S12.md) and is described in [ADR 0014](adr/0014-local-service-transport.md). The wire version is 1.12 and the mapping version is 1. A task waiting for files may include `filesWait` with the same-project holder’s Workspace task ID and the release target text. Clients use the holder’s current display title when available and otherwise show `waitReason`.
 
 **Transport.** The desktop shell reaches the service through a native bridge. The service listens on a Unix domain socket in a private runtime directory. Frames are length-prefixed UTF-8 JSON with a 4-byte big-endian length and an 8 MiB maximum, carrying JSON-RPC 2.0 requests and bounded subscription notifications. ACP keeps its own newline-delimited framing. No TCP, loopback HTTP or WebSocket listener is used. The service serves at most 64 connections at once; a later caller waits in the listen backlog until one ends and is never accepted and dropped. The desktop bridge keeps at most 48 ordinary requests in flight, so `service.status` and the subscription's own `projects.list` resync always find a connection (see [consistency and recovery](consistency-and-recovery.md)).
 
@@ -390,4 +403,4 @@ the frame budget.
 
 **Limits, version 1.** 50 task summaries per page; 100 events or history rows per page; 64 KiB of content per response page; 8 MiB per local JSON frame; 32,000 characters per description or answer; request identities of at most 128 characters. Oversized content is marked unavailable or delivered through bounded text pages; it is never silently truncated.
 
-**Version.** The public wire version is 1.11 (prior fingerprints remain in the lock), independent of the product version and of ACP protocol version 1. The schema is canonical JSON Schema 2020-12 with a committed fingerprint. Commands are strict; responses may add fields.
+**Version.** The public wire version is 1.12 (prior fingerprints remain in the lock), independent of the product version and of ACP protocol version 1. The schema is canonical JSON Schema 2020-12 with a committed fingerprint. Commands are strict; responses may add fields.

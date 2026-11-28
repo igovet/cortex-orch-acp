@@ -8,26 +8,19 @@ use std::{collections::BTreeMap, path::Path};
 
 type RecordedContent = BTreeMap<String, (Option<String>, Option<i64>)>;
 
-fn recorded_content(
-    db: &rusqlite::Connection,
-    task: &str,
-) -> cortex_core::CoreResult<Option<RecordedContent>> {
-    recorded_writes(db, task, false)
-}
-
 /// The task's recorded content for its own commit: also takes the bytes its final
 /// approved and verified review read (`reviewed_content`).
 fn landing_content(
     db: &rusqlite::Connection,
     task: &str,
 ) -> cortex_core::CoreResult<Option<RecordedContent>> {
-    recorded_writes(db, task, true)
+    recorded_writes(db, task, false)
 }
 
 fn recorded_writes(
     db: &rusqlite::Connection,
     task: &str,
-    reviewed: bool,
+    handoff: bool,
 ) -> cortex_core::CoreResult<Option<RecordedContent>> {
     let runtime: Option<String> = db
         .query_row(
@@ -40,13 +33,25 @@ fn recorded_writes(
     let Some(runtime) = runtime else {
         return Ok(Some(BTreeMap::new()));
     };
+    let handoff_cycle = if handoff {
+        db.query_row(
+            "SELECT revision, coalesce((SELECT max(id) FROM runtime_events e WHERE e.task_id=t.task_id AND e.type='TASK_REOPENED'),0),
+             coalesce(json_extract(o.options_json,'$.checkout.kind'),'main')
+             FROM runtime_tasks t LEFT JOIN workspace_task_options o ON o.task_id=? WHERE t.task_id=?",
+            (task, &runtime), |r| Ok((r.get::<_,i64>(0)?, r.get::<_,i64>(1)?, r.get::<_,String>(2)?)),
+        )
+            .optional()?
+    } else {
+        None
+    };
     // Gateway tool receipts name their channel as the actor; the native runtime's own
     // file tools record NATIVE_PROJECT_WRITTEN with the channel in the payload.
     let rows=db.prepare("SELECT e.type,e.payload_json,cast(strftime('%s',e.created_at) as integer),e.id FROM runtime_events e
             JOIN trusted_channels c ON c.task_id=e.task_id AND c.channel_id=CASE e.type WHEN 'TOOL_COMPLETED' THEN e.actor
                 ELSE json_extract(e.payload_json,'$.channel_id') END
-            WHERE e.task_id=? AND e.type IN ('TOOL_COMPLETED','NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED') ORDER BY e.id LIMIT 1001")?
-            .query_map([&runtime],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?,r.get::<_,i64>(3)?)))?
+            WHERE e.task_id=? AND e.type IN ('TOOL_COMPLETED','NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED')
+                AND (NOT ? OR e.type='TOOL_COMPLETED' OR e.actor='runtime') ORDER BY e.id LIMIT 1001")?
+            .query_map((&runtime, handoff),|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?,r.get::<_,i64>(3)?)))?
             .collect::<std::result::Result<Vec<_>,_>>()?;
     if rows.len() > 1000 {
         return Ok(None);
@@ -62,10 +67,66 @@ fn recorded_writes(
     let mut seen = std::collections::HashMap::<(String, String, String), i64>::new();
     // The event id of each path's latest recorded write.
     let mut written = std::collections::HashMap::<String, i64>::new();
+    let mut handoff_keys = std::collections::HashMap::new();
     for (kind, raw, at, id) in rows {
         let v: Value = serde_json::from_str(&raw)?;
         if let Some(name) = v["path"].as_str() {
             written.insert(name.to_owned(), id);
+        }
+        if handoff {
+            let operation = v["operation"].as_str().unwrap_or_default();
+            if kind == "NATIVE_PROJECT_CHANGED" && operation != "project_delete"
+                || kind == "TOOL_COMPLETED" && !matches!(operation, "project_write" | "project_edit" | "project_delete")
+            {
+                continue;
+            }
+            let Some(path) = v["path"].as_str().filter(|path| relative(path).is_ok()) else {
+                return Ok(None);
+            };
+            let expected = if operation == "project_delete" {
+                Some(DELETED)
+            } else {
+                v["sha256"].as_str().filter(|sha| digest(sha))
+            };
+            let channel = v["channel_id"].as_str().unwrap_or_default();
+            let key = v["request_key"].as_str().unwrap_or_default();
+            let mut matchable = kind != "TOOL_COMPLETED" && !key.is_empty()
+                && matches!(operation, "project_write" | "project_edit" | "project_delete")
+                && handoff_cycle.as_ref().is_some_and(|(revision, reopened, _)| {
+                    v["revision"] == *revision && id > *reopened
+                });
+            if matchable {
+                if let Some(previous) = handoff_keys.insert((channel.to_owned(), key.to_owned()), path.to_owned()) {
+                    content.insert(previous, (None, at));
+                    matchable = false;
+                }
+            }
+            let receipt: Option<String> = if matchable {
+                db.query_row("SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=? AND operation=?",
+                    (&runtime, channel, key, operation), |r| r.get(0)).optional()?
+            } else {
+                None
+            };
+            let receipt = receipt.map(|raw| serde_json::from_str::<Value>(&raw)).transpose()?;
+            let checkout = if v["checkout"].is_null() {
+                handoff_cycle.as_ref().is_some_and(|(_, _, kind)| kind == "main")
+                    && cortex_core::workspace::worktrees::receipt_matches(db, &runtime, &json!({}), true)?
+            } else {
+                cortex_core::workspace::worktrees::receipt_matches(db, &runtime,
+                    &json!({"checkout":v["checkout"],"cwd":v["checkout"]["root"]}), true)?
+            };
+            let confirmed = checkout && receipt.is_some_and(|receipt| {
+                let reply = &receipt["reply"]["structuredContent"];
+                receipt["complete"] == true && receipt["checkout"] == v["checkout"]
+                    && receipt["revision"] == v["revision"]
+                    && reply["path"] == path && match expected {
+                        Some(DELETED) => reply["deleted"] == true,
+                        Some(sha) => reply["sha256"] == sha,
+                        None => false,
+                    }
+            });
+            content.insert(path.to_owned(), (expected.filter(|_| confirmed).map(str::to_owned), at));
+            continue;
         }
         // A deletion through the native project_delete tool is the path's latest
         // recorded content: absent. Confirmed only by its completed receipt.
@@ -138,7 +199,7 @@ fn recorded_writes(
             .map(str::to_owned);
         content.insert(name.to_owned(), (sha, at));
     }
-    if reviewed {
+    if !handoff {
         reviewed_content(db, &runtime, &written, &mut content)?;
     }
     Ok(if content.len() > 100 {
@@ -210,7 +271,7 @@ pub(super) fn sprint_availability(
     draft: &str,
     recipient: &Path,
 ) -> cortex_core::CoreResult<Value> {
-    let content = recorded_content(db, draft)?;
+    let content = recorded_writes(db, draft, true)?;
     let Some(content) = content.filter(|items| !items.is_empty()) else {
         return Ok(
             json!({"scope":"recorded_paths","status":"unknown","reason":"no_complete_write_evidence"}),
@@ -885,7 +946,7 @@ mod sprint_availability_tests {
             ],
         );
         let db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE workspace_tasks(task_id TEXT, execution_id TEXT); CREATE TABLE workspace_executions(execution_id TEXT, runtime_task_id TEXT); CREATE TABLE trusted_channels(task_id TEXT, channel_id TEXT); CREATE TABLE runtime_events(id INTEGER PRIMARY KEY, task_id TEXT, type TEXT, actor TEXT, payload_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP); CREATE TABLE runtime_requests(task_id TEXT, actor TEXT, request_key TEXT, operation TEXT, result_json TEXT);").unwrap();
+        db.execute_batch("CREATE TABLE runtime_tasks(task_id TEXT, revision INTEGER); INSERT INTO runtime_tasks VALUES ('runtime',1); CREATE TABLE workspace_task_options(task_id TEXT, options_json TEXT); CREATE TABLE workspace_tasks(task_id TEXT, execution_id TEXT); CREATE TABLE workspace_executions(execution_id TEXT, runtime_task_id TEXT); CREATE TABLE trusted_channels(task_id TEXT, channel_id TEXT); CREATE TABLE runtime_events(id INTEGER PRIMARY KEY, task_id TEXT, type TEXT, actor TEXT, payload_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP); CREATE TABLE runtime_requests(task_id TEXT, actor TEXT, request_key TEXT, operation TEXT, result_json TEXT);").unwrap();
         db.execute("INSERT INTO workspace_tasks VALUES ('draft','exec')", [])
             .unwrap();
         db.execute(
@@ -907,8 +968,8 @@ mod sprint_availability_tests {
         fs::write(std::path::Path::new(&source).join("api.txt"), b"v2\n").unwrap();
         let bytes = fs::read(std::path::Path::new(&source).join("api.txt")).unwrap();
         let sha = files::revision(&bytes);
-        db.execute("INSERT INTO runtime_events(id,task_id,type,actor,payload_json) VALUES (1,'runtime','NATIVE_PROJECT_WRITTEN','channel',?)", [json!({"operation":"project_write","path":"api.txt","channel_id":"channel","request_key":"write-1","sha256":sha}).to_string()]).unwrap();
-        db.execute("INSERT INTO runtime_requests VALUES ('runtime','channel','write-1','project_write',?)", [json!({"complete":true,"reply":{"structuredContent":{"path":"api.txt","sha256":sha}}}).to_string()]).unwrap();
+        db.execute("INSERT INTO runtime_events(id,task_id,type,actor,payload_json) VALUES (1,'runtime','NATIVE_PROJECT_WRITTEN','runtime',?)", [json!({"operation":"project_write","path":"api.txt","channel_id":"channel","request_key":"write-1","revision":1,"sha256":sha}).to_string()]).unwrap();
+        db.execute("INSERT INTO runtime_requests VALUES ('runtime','channel','write-1','project_write',?)", [json!({"complete":true,"revision":1,"reply":{"structuredContent":{"path":"api.txt","sha256":sha}}}).to_string()]).unwrap();
         let before = sprint_availability(&db, "draft", &recipient).unwrap();
         assert_eq!(before["status"], "missing");
         git(Path::new(&source), &["commit", "-qam", "implement API"]);
@@ -933,7 +994,7 @@ mod sprint_availability_tests {
         let (db, recipient, source) = fixture();
         let bytes = fs::read(std::path::Path::new(&source).join("api.txt")).unwrap();
         let sha = files::revision(&bytes);
-        db.execute("INSERT INTO runtime_events(id,task_id,type,actor,payload_json) VALUES (1,'runtime','NATIVE_PROJECT_WRITTEN','channel',?)", [json!({"operation":"project_write","path":"api.txt","channel_id":"channel","request_key":"write-1","sha256":sha}).to_string()]).unwrap();
+        db.execute("INSERT INTO runtime_events(id,task_id,type,actor,payload_json) VALUES (1,'runtime','NATIVE_PROJECT_WRITTEN','runtime',?)", [json!({"operation":"project_write","path":"api.txt","channel_id":"channel","request_key":"write-1","revision":1,"sha256":sha}).to_string()]).unwrap();
         fs::write(recipient.join("api.txt"), bytes).unwrap();
         assert_eq!(
             sprint_availability(&db, "draft", &recipient).unwrap()["status"],

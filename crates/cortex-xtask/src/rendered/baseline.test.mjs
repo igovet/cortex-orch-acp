@@ -1,7 +1,46 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { bindPeer, classify, correlate, decoder, exactHistoryRow, isSubscription, markerIn, parsePeerTrace, rateSummary } from './baseline.mjs';
+import { bindPeer, capabilityFrame, classify, correlate, decoder, exactHistoryRow, followFrame, isSubscription, markerIn, parsePeerTrace, rateSummary, sqliteWindow } from './baseline.mjs';
+
+test('delivery comparison changes only the actual negotiated method in the control', () => {
+  const response = {jsonrpc:'2.0',id:'k',result:{methods:['native.board','native.history.follow'],machine:true}};
+  for (const arm of ['pull','push']) {
+    const frame = capabilityFrame(structuredClone(response), {id:'k'}, arm);
+    assert.equal(frame.readUInt32BE(),frame.length-4);
+    const actual = JSON.parse(frame.subarray(4));
+    if (arm === 'pull') actual.result.methods.push('native.history.follow');
+    assert.deepEqual(actual,response);
+  }
+  assert.throws(()=>capabilityFrame({...response,result:{methods:[]}}, {id:'k'}, 'pull'),/real history-follow/);
+});
+
+test('private marker requires aligned project, task, execution, generation and cursor continuity', () => {
+  const ids = {projectId:'p',taskId:'t',executionId:'e'};
+  const request = {method:'native.history.follow',params:ids};
+  const state = {ack:true,generation:'g',cursor:'nt1.first'};
+  const marker = {kind:'assistant',text:'Post-question coordinator text',sequence:'3',historyId:'h'};
+  const event = {...ids,type:'native_history_page',generation:'g',throughSequence:'9',fromCursor:'nt1.first',page:{items:[marker],tailCursor:'nt1.next'}};
+  for (const bad of [{taskId:'other'},{projectId:'other'},{executionId:'other'},{generation:'other'},{fromCursor:null}]) {
+    assert.throws(()=>followFrame(request,{...event,...bad},{...state}));
+  }
+  assert.throws(()=>followFrame({method:'service.subscribe'},event,state),/unrelated socket/);
+  assert.equal(followFrame(request,event,state),marker);
+  assert.equal(state.cursor,'nt1.next');
+  assert.throws(()=>followFrame(request,event,state),/discontinuous/);
+});
+
+test('SQLite SQL coverage distinguishes uninstrumented binaries and counts only the measured time', () => {
+  const record = (time,kind) => {const bytes=Buffer.alloc(16);bytes.writeBigUInt64LE(BigInt(time));bytes.writeBigUInt64LE(BigInt(kind),8);return bytes;};
+  const trace = Buffer.concat([[1,1],[2,2],[6,4],[7,5],[8,3],[9,7]].map(([time,kind])=>record(time,kind)));
+  assert.equal(sqliteWindow(trace,4,9).statements,2);
+  assert.equal(sqliteWindow(trace,4,9).readonlyResultStatements,1);
+  assert.equal(sqliteWindow(trace,4,9).resultRows,1);
+  assert.equal(sqliteWindow(trace,4,9).closes,0);
+  assert.deepEqual(sqliteWindow(Buffer.alloc(0),4,9),{coverage:'uninstrumented'});
+  assert.throws(()=>sqliteWindow(trace.subarray(1),4,9),/truncated/);
+  assert.throws(()=>sqliteWindow(trace.subarray(16),4,9),/unavailable/);
+});
 
 test('counts sent history and detail operations without treating project reads as full refreshes', () => {
   assert.equal(classify({method: 'native.query', params: {operation: 'history.page'}}), 'history');
